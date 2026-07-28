@@ -61,7 +61,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Run interactive Pi terminal smoke");
     expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");
     expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
-    expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
+    expect(workflow).toContain("./node_modules/.bin/pi -e ./src/index.ts --list-models litellm");
+    expect(workflow).toContain("-e ./src/index.ts");
+    expect(workflow).not.toContain("-e ./dist/index.js");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
@@ -179,7 +181,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("## Mocked LiteLLM smoke workflow");
     expect(readme).toContain("VidaiMock");
     expect(readme).toContain("does not call real LLM APIs");
-    expect(readme).toContain("No provider API keys or GitHub Models permission are required");
+    expect(readme).toMatch(/No provider API keys or GitHub\s+Models permission are required/);
     expect(readme).toContain("OpenAI-compatible and Anthropic routes");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
