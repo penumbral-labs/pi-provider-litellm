@@ -576,7 +576,6 @@ async function resolveApiKeyAuth(
   return {
     auth: {
       apiKey: creds.apiKey,
-      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
@@ -633,7 +632,6 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           }),
           toAuth: async (credential) => ({
             apiKey: credential.access,
-            baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
             headers: resolveHeaders(definition),
           }),
         }
@@ -774,7 +772,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
     return {
-      baseUrl: normalizeBaseUrl(resolved.auth.baseUrl ?? requestBaseUrl(definition)),
+      baseUrl: normalizeBaseUrl(requestBaseUrl(definition)),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
