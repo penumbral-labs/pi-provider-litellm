@@ -24,7 +24,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function supportedThinkingLevels(model: DiscoveredModel): string[] {
   return getSupportedThinkingLevels({
     ...model,
-    api: model.api ?? "openai-completions",
+    api: model.api,
     provider: "litellm",
     baseUrl: "https://litellm.example.com/v1",
   } as Model<LiteLLMApi>);
@@ -277,7 +277,7 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     });
-    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[0]?.api).toBe("openai-completions");
     expect(supportedThinkingLevels(result.models[0]!)).toEqual([
       "off",
       "minimal",
@@ -299,7 +299,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ reasoning: false });
-    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[0]?.api).toBe("openai-completions");
     expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
@@ -441,9 +441,9 @@ describe("discoverModels API selection", () => {
     const catalogResponses = result.models.find((model) => model.id === "openai/gpt-4o");
 
     expect(completions?.thinkingLevelMap?.max).toBe("max");
-    expect(completions?.api).toBeUndefined();
+    expect(completions?.api).toBe("openai-completions");
     expect(catalogResponses?.thinkingLevelMap?.max).toBeUndefined();
-    expect(catalogResponses?.api).toBeUndefined();
+    expect(catalogResponses?.api).toBe("openai-completions");
   });
 
   it("normalizes Azure and Codex catalog APIs to the LiteLLM Responses transport", async () => {
@@ -504,7 +504,7 @@ describe("discoverModels API selection", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ id: "custom-chat-model", reasoning: false });
-    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[0]?.api).toBe("openai-completions");
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
 });
@@ -596,7 +596,7 @@ describe("discoverModels fallback to /v1/models", () => {
       expect(openai.api).toBe("openai-responses");
       const anthropic = result.models.find((m) => m.id === "anthropic/claude-3-5-sonnet")!;
       expect(anthropic.name).toBe("anthropic/claude-3-5-sonnet (no metadata)");
-      expect(anthropic.api).toBeUndefined();
+      expect(anthropic.api).toBe("openai-completions");
       expect(anthropic.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
     });
   }
@@ -1266,13 +1266,13 @@ describe("discoverModels fallback to /health", () => {
     ]);
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["vertex/claude-sonnet", "openai/gpt-4o-mini", "kimi-k2.6"]);
-    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[0]?.api).toBe("openai-completions");
     expect(result.models[0]).toMatchObject({
       input: ["text", "image"],
       contextWindow: 200000,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
-    expect(result.models[1]?.api).toBeUndefined();
+    expect(result.models[1]?.api).toBe("openai-completions");
     expect(supportedThinkingLevels(result.models[2]!)).toEqual(["off", "high"]);
   });
 
@@ -1303,8 +1303,8 @@ describe("discoverModels fallback to /health", () => {
     ]);
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
-    expect(result.models[0]?.api).toBeUndefined();
-    expect(result.models[1]?.api).toBeUndefined();
+    expect(result.models[0]?.api).toBe("openai-completions");
+    expect(result.models[1]?.api).toBe("openai-completions");
     expect(result.models[1]).toMatchObject({
       name: "anthropic/claude-3-5-sonnet",
       contextWindow: 128000,
