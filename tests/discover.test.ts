@@ -426,7 +426,7 @@ describe("discoverModels via /model/info", () => {
 });
 
 describe("discoverModels API selection", () => {
-  it.each(["anthropic", "bedrock", "bedrock_converse", "vertex_ai-anthropic_models"])(
+  it.each(["anthropic", "bedrock_converse", "vertex_ai-anthropic_models"])(
     "selects Anthropic Messages for the exact %s adapter",
     async (litellmProvider) => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -450,6 +450,43 @@ describe("discoverModels API selection", () => {
       expect(result.models[0]?.compat ?? {}).not.toHaveProperty("cacheControlFormat");
     },
   );
+
+  it("selects Bedrock Anthropic routes only with authoritative backend-model corroboration", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "corroborated-anthropic-route",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "bedrock/anthropic.claude-sonnet-4-5-v1:0",
+            },
+          },
+          {
+            model_name: "non-anthropic-route",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "bedrock/amazon.titan-text-express-v1",
+            },
+          },
+          {
+            model_name: "missing-base-model",
+            model_info: { mode: "chat", litellm_provider: "bedrock" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map((model) => [model.id, model.api])).toEqual([
+      ["corroborated-anthropic-route", "anthropic-messages"],
+      ["non-anthropic-route", "openai-completions"],
+      ["missing-base-model", "openai-completions"],
+    ]);
+  });
 
   it("selects Azure Anthropic routes only with authoritative backend-model corroboration", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
