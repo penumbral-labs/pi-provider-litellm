@@ -57,6 +57,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("npx tsx scripts/smoke-runner.ts");
     expect(workflow).toContain("npx tsx scripts/smoke-auth.ts");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
+    expect(workflow).toContain("run: npm run prepublishOnly");
     expect(workflow).toContain("Run Pi CLI smoke");
     expect(workflow).toContain("Run interactive Pi terminal smoke");
     expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");

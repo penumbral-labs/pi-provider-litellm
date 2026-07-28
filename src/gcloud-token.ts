@@ -45,7 +45,8 @@ function shellQuote(value: string): string {
 }
 
 export function getGcloudTokenCommand(): string {
-  const cliPath = fileURLToPath(new URL("./gcloud-token-cli.js", import.meta.url));
+  const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+  const cliPath = fileURLToPath(new URL(`./gcloud-token-cli.${extension}`, import.meta.url));
   return `!${shellQuote(process.execPath)} ${shellQuote(cliPath)}`;
 }
 
