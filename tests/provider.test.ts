@@ -6,7 +6,7 @@ import type {
   ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveredModel, DiscoveryResult } from "../src/types.js";
 
@@ -42,6 +42,18 @@ const discovered = (id: string): DiscoveryResult => ({
     },
   ],
 });
+
+{
+  const invalidMessagesModel: DiscoveredModel = {
+    ...discovered("messages").models[0],
+    api: "anthropic-messages",
+    compat: {
+      // @ts-expect-error OpenAI compatibility fields are invalid for Messages models.
+      supportsStore: false,
+    },
+  };
+  expectTypeOf(invalidMessagesModel).toMatchTypeOf<DiscoveredModel>();
+}
 
 function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
@@ -115,16 +127,6 @@ describe("toNativeModels", () => {
       api: "anthropic-messages",
       compat: { forceAdaptiveThinking: true },
     });
-
-    const invalidMessagesModel: DiscoveredModel = {
-      ...baseModel,
-      api: "anthropic-messages",
-      compat: {
-        // @ts-expect-error OpenAI compatibility fields are invalid for Messages models.
-        supportsStore: false,
-      },
-    };
-    void invalidMessagesModel;
   });
 });
 

@@ -162,13 +162,13 @@ export async function createCompatibilityHarness(
     }
     const chunks =
       responses.shift() ??
-      (isForeignRequest && history.includes("Continue elsewhere")
+      (!isAnthropicRequest && isForeignRequest && history.includes("Continue elsewhere")
         ? successfulResponse("foreign continued")
-        : history.includes("Continue in LiteLLM")
+        : !isAnthropicRequest && history.includes("Continue in LiteLLM")
           ? successfulResponse("LiteLLM continued")
-          : history.includes("diameter: 2 px")
+          : !isAnthropicRequest && history.includes("diameter: 2 px")
             ? successfulResponse("diameter 2 px")
-            : history.includes("Inspect the image")
+            : !isAnthropicRequest && history.includes("Inspect the image")
               ? successfulResponse("red circle")
               : undefined);
     if (!chunks) throw new Error("missing mock response");

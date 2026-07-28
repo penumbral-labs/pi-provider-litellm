@@ -772,7 +772,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
     return {
-      baseUrl: normalizeBaseUrl(requestBaseUrl(definition)),
+      baseUrl: resolved.env?.[ENV_BASE_URL] ?? requestBaseUrl(definition),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
@@ -880,7 +880,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       baseUrl: requestBaseUrl(definition),
       auth: createProviderAuth(definition),
       credentialBaseUrl: (credential) =>
-        credential.type === "oauth" && typeof credential.baseUrl === "string" ? credential.baseUrl : undefined,
+        credential.type === "oauth" && typeof credential.baseUrl === "string"
+          ? credential.baseUrl
+          : credential.type === "api_key"
+            ? credential.env?.[ENV_BASE_URL]
+            : undefined,
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);

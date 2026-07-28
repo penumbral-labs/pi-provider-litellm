@@ -727,6 +727,52 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
+  it("uses the stored API-key credential host for discovery and protocol-specific requests", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://process.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = input instanceof Request ? input : undefined;
+      const url = request?.url ?? String(input);
+      const headers = new Headers(request?.headers ?? init?.headers);
+      requests.push({ url, authorization: headers.get("authorization") });
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "gpt-5", model_info: { mode: "chat", litellm_provider: "openai" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, []);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({
+      type: "api_key",
+      key: "stored-key",
+      env: { LITELLM_BASE_URL: "https://credential.example.com/v1" },
+    }));
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+
+    await models.refresh();
+
+    expect(requests[0]).toEqual({
+      url: "https://credential.example.com/model/info",
+      authorization: "Bearer stored-key",
+    });
+    const model = models.getModel(provider.id, "gpt-5")!;
+    expect(model.baseUrl).toBe("https://credential.example.com/v1");
+    expect(provider.filterModels?.([model], { type: "api_key", key: "other-key" })).toEqual([model]);
+  });
+
   it("uses the OAuth credential host for discovery and protocol-specific requests", async () => {
     const agentDir = await makeAgentDir();
     const helperPath = await writeHelper(agentDir, ["unexpected-helper-run"]);
@@ -734,7 +780,7 @@ describe("extension startup", () => {
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
     process.env.LITELLM_HEADERS = '{"x-tenant":"tenant-a"}';
     const requests: Array<{ url: string; authorization: string | null; tenant: string | null }> = [];
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = input instanceof Request ? input : undefined;
       const url = request?.url ?? String(input);
       const headers = new Headers(request?.headers ?? init?.headers);
@@ -807,7 +853,6 @@ describe("extension startup", () => {
     await models.streamSimple(messagesModel, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }).result();
     await models.streamSimple(openAIModel, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }).result();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://credential.example.com/model/info");
     expect(requests[0]).toEqual({
       url: "https://credential.example.com/model/info",
       authorization: "Bearer oauth-token",

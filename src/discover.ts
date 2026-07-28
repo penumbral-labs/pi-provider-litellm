@@ -64,8 +64,8 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
   return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
-const ANTHROPIC_MESSAGES_ADAPTERS = new Set(["anthropic", "bedrock_converse", "vertex_ai-anthropic_models"]);
-const ANTHROPIC_BASE_MODEL_ADAPTERS = new Set(["azure_ai", "bedrock"]);
+const ANTHROPIC_MESSAGES_ADAPTERS = new Set(["anthropic", "vertex_ai-anthropic_models"]);
+const ANTHROPIC_BASE_MODEL_ADAPTERS = new Set(["azure_ai", "bedrock", "bedrock_converse"]);
 const ANTHROPIC_BASE_MODEL_PATTERN = /(?:^|[/_.:-])(?:anthropic|claude|opus|sonnet|haiku)(?:[/_.:-]|$)/i;
 
 function selectApi(

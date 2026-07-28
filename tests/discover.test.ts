@@ -426,7 +426,7 @@ describe("discoverModels via /model/info", () => {
 });
 
 describe("discoverModels API selection", () => {
-  it.each(["anthropic", "bedrock_converse", "vertex_ai-anthropic_models"])(
+  it.each(["anthropic", "vertex_ai-anthropic_models"])(
     "selects Anthropic Messages for the exact %s adapter",
     async (litellmProvider) => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -520,7 +520,22 @@ describe("discoverModels API selection", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
-          { model_name: "normalized", model_info: { mode: "chat", litellm_provider: " BEDROCK_CONVERSE " } },
+          {
+            model_name: "normalized",
+            model_info: {
+              mode: "chat",
+              litellm_provider: " BEDROCK_CONVERSE ",
+              base_model: "anthropic.claude-sonnet-4-5",
+            },
+          },
+          {
+            model_name: "non-anthropic-converse",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              base_model: "amazon.nova-pro-v1:0",
+            },
+          },
           { model_name: "near-match", model_info: { mode: "chat", litellm_provider: "bedrock-converse" } },
           { model_name: "unknown", model_info: { mode: "chat", litellm_provider: "custom_anthropic" } },
         ],
@@ -531,6 +546,7 @@ describe("discoverModels API selection", () => {
 
     expect(result.models.map((model) => [model.id, model.api])).toEqual([
       ["normalized", "anthropic-messages"],
+      ["non-anthropic-converse", "openai-completions"],
       ["near-match", "openai-completions"],
       ["unknown", "openai-completions"],
     ]);
@@ -562,6 +578,7 @@ describe("discoverModels API selection", () => {
             model_info: {
               mode: "chat",
               litellm_provider: "bedrock_converse",
+              base_model: "anthropic.claude-opus-5",
               supports_reasoning: true,
               supports_xhigh_reasoning_effort: true,
               supports_max_reasoning_effort: true,
@@ -572,6 +589,7 @@ describe("discoverModels API selection", () => {
             model_info: {
               mode: "chat",
               litellm_provider: "bedrock_converse",
+              base_model: "anthropic.claude-sonnet-4-5",
               supports_reasoning: true,
               supports_xhigh_reasoning_effort: true,
               supports_max_reasoning_effort: true,
