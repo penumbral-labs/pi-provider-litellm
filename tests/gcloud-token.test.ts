@@ -34,8 +34,14 @@ afterEach(() => {
 });
 
 describe("getGcloudTokenCommand", () => {
-  it("targets the TypeScript helper when the extension runs from source", () => {
-    expect(getGcloudTokenCommand()).toContain("gcloud-token-cli.ts");
+  it("imports the token module directly when the extension runs from source", () => {
+    expect(getGcloudTokenCommand("file:///plugin/src/gcloud-token.ts")).toContain(
+      'import("file:///plugin/src/gcloud-token.ts")',
+    );
+  });
+
+  it("targets the JavaScript helper when the extension runs from a build", () => {
+    expect(getGcloudTokenCommand("file:///plugin/dist/gcloud-token.js")).toContain("/plugin/dist/gcloud-token-cli.js");
   });
 });
 
