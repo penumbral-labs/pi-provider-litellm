@@ -879,6 +879,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: createProviderAuth(definition),
+      credentialBaseUrl: (credential) =>
+        credential.type === "oauth" && typeof credential.baseUrl === "string" ? credential.baseUrl : undefined,
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);

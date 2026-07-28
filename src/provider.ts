@@ -13,6 +13,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
+  credentialBaseUrl?: (credential: Credential) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
@@ -39,6 +40,10 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       if (!context.credential) throw new Error("LiteLLM model discovery requires a credential");
       const result = await options.discover(context.credential, context.signal);
       return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models);
+    },
+    filterModels(models, credential) {
+      const baseUrl = credential && options.credentialBaseUrl?.(credential);
+      return baseUrl ? toNativeModels(options.id, baseUrl, models) : models;
     },
     api: createLiteLLMProtocolApis(),
   });

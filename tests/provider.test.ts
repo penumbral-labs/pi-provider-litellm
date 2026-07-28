@@ -176,6 +176,31 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
+  it("projects credential-aware bases at the availability boundary", () => {
+    const value = controller({
+      credentialBaseUrl: (current) =>
+        current.type === "oauth" && typeof current.baseUrl === "string" ? current.baseUrl : undefined,
+    });
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "https://configured.example/v1", [
+      baseModel,
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
+    ]);
+    const oauthCredential: Credential = {
+      type: "oauth",
+      access: "token",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://credential.example/v1",
+    };
+
+    expect(value.filterModels?.(models, oauthCredential).map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
+      { api: "openai-completions", baseUrl: "https://credential.example/v1" },
+      { api: "anthropic-messages", baseUrl: "https://credential.example" },
+    ]);
+    expect(value.filterModels?.(models, credential)).toBe(models);
+  });
+
   it("retains previous models when discovery rejects", async () => {
     const modelsStore = store([native("old")]);
     const discover = vi.fn(async () => {

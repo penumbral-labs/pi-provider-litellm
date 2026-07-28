@@ -1,12 +1,16 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AuthInteraction,
-  Credential,
-  Provider,
-  ProviderModelsStore,
-  RefreshModelsContext,
+import {
+  type AuthContext,
+  type AuthInteraction,
+  type Credential,
+  createModels,
+  InMemoryCredentialStore,
+  InMemoryModelsStore,
+  type Provider,
+  type ProviderModelsStore,
+  type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
@@ -723,35 +727,101 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
-  it("uses the refreshed OAuth access token during discovery", async () => {
+  it("uses the OAuth credential host for discovery and protocol-specific requests", async () => {
     const agentDir = await makeAgentDir();
     const helperPath = await writeHelper(agentDir, ["unexpected-helper-run"]);
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    process.env.LITELLM_BASE_URL = "https://configured.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
     process.env.LITELLM_HEADERS = '{"x-tenant":"tenant-a"}';
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      if (String(input).endsWith("/model/info"))
-        return jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] });
-      return jsonResponse(200, { tools: [] });
+    const requests: Array<{ url: string; authorization: string | null; tenant: string | null }> = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = input instanceof Request ? input : undefined;
+      const url = request?.url ?? String(input);
+      const headers = new Headers(request?.headers ?? init?.headers);
+      requests.push({
+        url,
+        authorization: headers.get("authorization"),
+        tenant: headers.get("x-tenant"),
+      });
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-opus-5",
+              model_info: { mode: "chat", litellm_provider: "bedrock_converse", base_model: "anthropic.claude-opus-5" },
+            },
+            { model_name: "gpt-5", model_info: { mode: "chat", litellm_provider: "openai" } },
+          ],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, []);
+      const encoder = new TextEncoder();
+      const body = url.endsWith("/v1/messages")
+        ? [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-opus-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic"}}\n\n',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ]
+        : [
+            'data: {"choices":[{"delta":{"content":"openai"},"finish_reason":null}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n',
+            "data: [DONE]\n\n",
+          ];
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const chunk of body) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
     });
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    const provider = pi.providers[0]!;
+    const credential = {
+      type: "oauth" as const,
+      access: "oauth-token",
+      refresh: `!${helperPath}`,
+      expires: Date.now() + 60_000,
+      baseUrl: "https://credential.example.com/v1",
+    };
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => credential);
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
 
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: {
-        type: "oauth",
-        access: "already-refreshed",
-        refresh: `!${helperPath}`,
-        expires: Date.now() + 60_000,
-        baseUrl: "https://current.example.com",
-      },
+    await models.refresh();
+    const available = await models.getAvailable(provider.id);
+    const messagesModel = available.find((model) => model.api === "anthropic-messages")!;
+    const openAIModel = available.find((model) => model.api === "openai-completions")!;
+    await models.streamSimple(messagesModel, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }).result();
+    await models.streamSimple(openAIModel, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }).result();
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://credential.example.com/model/info");
+    expect(requests[0]).toEqual({
+      url: "https://credential.example.com/model/info",
+      authorization: "Bearer oauth-token",
+      tenant: "tenant-a",
     });
-
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://current.example.com/model/info");
-    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer already-refreshed");
-    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("x-tenant")).toBe("tenant-a");
+    expect(messagesModel.baseUrl).toBe("https://credential.example.com");
+    expect(openAIModel.baseUrl).toBe("https://credential.example.com/v1");
+    expect(requests.map(({ url }) => url)).toEqual([
+      "https://credential.example.com/model/info",
+      "https://credential.example.com/mcp-rest/tools/list",
+      "https://credential.example.com/v1/messages",
+      "https://credential.example.com/v1/chat/completions",
+    ]);
+    expect(requests.every(({ url }) => !url.includes("/v1/v1/"))).toBe(true);
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 
