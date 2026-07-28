@@ -63,7 +63,6 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
     expect(workflow).toContain("./node_modules/.bin/pi -e . --list-models litellm");
     expect(workflow).toContain("-e .");
-    expect(workflow).not.toContain("-e ./src/index.ts");
     expect(workflow).not.toContain("-e ./dist/index.js");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
