@@ -727,7 +727,7 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
-  it("uses the stored API-key credential host for discovery and protocol-specific requests", async () => {
+  it("uses the stored API-key credential host for discovery, models, and auxiliary requests", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://process.example.com";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
@@ -743,6 +743,8 @@ describe("extension startup", () => {
         });
       }
       if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, []);
+      if (url.endsWith("/claude-code/marketplace.json")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/skills")) return jsonResponse(200, { data: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
     const extension = await loadExtension(agentDir);
@@ -771,6 +773,27 @@ describe("extension startup", () => {
     const model = models.getModel(provider.id, "gpt-5")!;
     expect(model.baseUrl).toBe("https://credential.example.com/v1");
     expect(provider.filterModels?.([model], { type: "api_key", key: "other-key" })).toEqual([model]);
+
+    const skillsPi = createPi();
+    await extension(skillsPi);
+    const beforeAgentStart = skillsPi.handlers.get("before_agent_start")?.[0];
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "stored-key" },
+            env: { LITELLM_BASE_URL: "https://credential.example.com" },
+          }),
+          getProvider: () => skillsPi.providers[0],
+        },
+      },
+    );
+
+    expect(requests.slice(-2).map(({ url }) => url)).toEqual([
+      "https://credential.example.com/claude-code/marketplace.json",
+      "https://credential.example.com/v1/skills",
+    ]);
   });
 
   it("uses the OAuth credential host for discovery and protocol-specific requests", async () => {
@@ -801,6 +824,8 @@ describe("extension startup", () => {
         });
       }
       if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, []);
+      if (url.endsWith("/claude-code/marketplace.json")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/skills")) return jsonResponse(200, { data: [] });
       const encoder = new TextEncoder();
       const body = url.endsWith("/v1/messages")
         ? [
@@ -867,6 +892,21 @@ describe("extension startup", () => {
       "https://credential.example.com/v1/chat/completions",
     ]);
     expect(requests.every(({ url }) => !url.includes("/v1/v1/"))).toBe(true);
+
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: "oauth-token", headers: { "x-tenant": "tenant-a" } } }),
+          getProvider: () => provider,
+        },
+      },
+    );
+    expect(requests.slice(-2).map(({ url }) => url)).toEqual([
+      "https://credential.example.com/claude-code/marketplace.json",
+      "https://credential.example.com/v1/skills",
+    ]);
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 

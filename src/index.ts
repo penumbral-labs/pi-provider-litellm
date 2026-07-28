@@ -794,9 +794,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth.auth.apiKey;
-    if (!baseUrl || !apiKey) return undefined;
+    if (!apiKey) return undefined;
+    const baseUrl =
+      auth.env?.[ENV_BASE_URL] ??
+      (defaultRuntimeAuth?.apiKey === apiKey ? defaultRuntimeAuth.baseUrl : undefined) ??
+      auth.auth.baseUrl ??
+      provider?.baseUrl;
+    if (!baseUrl) return undefined;
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -947,10 +952,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    defaultRuntimeAuth = undefined;
     if (!skillsEnabled || discoveryDisabledReason()) return;
     const auth = await getRuntimeAuth(ctx);
-    if (!auth) return;
+    if (!auth) {
+      defaultRuntimeAuth = undefined;
+      return;
+    }
     defaultRuntimeAuth = auth;
     const skills = await listSkills(defaultRuntimeAuth.baseUrl, defaultRuntimeAuth.apiKey, defaultRuntimeAuth.headers);
     const section = createSkillsPromptSection(skills);
