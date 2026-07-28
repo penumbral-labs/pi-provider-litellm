@@ -426,6 +426,180 @@ describe("discoverModels via /model/info", () => {
 });
 
 describe("discoverModels API selection", () => {
+  it.each(["anthropic", "bedrock", "bedrock_converse", "vertex_ai-anthropic_models"])(
+    "selects Anthropic Messages for the exact %s adapter",
+    async (litellmProvider) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "arbitrary-public-alias",
+              model_info: { mode: "chat", litellm_provider: litellmProvider },
+            },
+          ],
+        }),
+      );
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]).toMatchObject({
+        id: "arbitrary-public-alias",
+        api: "anthropic-messages",
+      });
+      expect(result.models[0]?.compat ?? {}).not.toHaveProperty("supportsStore");
+      expect(result.models[0]?.compat ?? {}).not.toHaveProperty("cacheControlFormat");
+    },
+  );
+
+  it("selects Azure Anthropic routes only with authoritative backend-model corroboration", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "arbitrary-anthropic-route",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "azure_ai",
+              base_model: "azure_ai/anthropic/claude-sonnet-4-5",
+            },
+          },
+          {
+            model_name: "claude-looking-but-not-corroborated",
+            model_info: { mode: "chat", litellm_provider: "azure_ai", base_model: "azure_ai/gpt-5" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map((model) => [model.id, model.api])).toEqual([
+      ["arbitrary-anthropic-route", "anthropic-messages"],
+      ["claude-looking-but-not-corroborated", "openai-completions"],
+    ]);
+  });
+
+  it("normalizes adapter metadata but requires an exact supported value", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "normalized", model_info: { mode: "chat", litellm_provider: " BEDROCK_CONVERSE " } },
+          { model_name: "near-match", model_info: { mode: "chat", litellm_provider: "bedrock-converse" } },
+          { model_name: "unknown", model_info: { mode: "chat", litellm_provider: "custom_anthropic" } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map((model) => [model.id, model.api])).toEqual([
+      ["normalized", "anthropic-messages"],
+      ["near-match", "openai-completions"],
+      ["unknown", "openai-completions"],
+    ]);
+  });
+
+  it("keeps Responses precedence over Anthropic adapter evidence", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "anthropic-responses-route",
+            model_info: { mode: "responses", litellm_provider: "bedrock_converse" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.api).toBe("openai-responses");
+  });
+
+  it("routes the live Bedrock Converse capability shape to Messages and exposes max", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "claude-opus-5",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+          {
+            model_name: "custom-private-route",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    for (const model of result.models) {
+      expect(model).toMatchObject({
+        api: "anthropic-messages",
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        compat: { forceAdaptiveThinking: true },
+      });
+      expect(supportedThinkingLevels(model)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+
+  it("does not infer max from supports_reasoning alone and honors explicit capability false", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "reasoning-only",
+            model_info: { mode: "chat", litellm_provider: "anthropic", supports_reasoning: true },
+          },
+          {
+            model_name: "explicitly-limited",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "anthropic",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: false,
+              supports_max_reasoning_effort: false,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    for (const model of result.models) {
+      expect(model).toMatchObject({ api: "anthropic-messages", reasoning: true });
+      expect(supportedThinkingLevels(model)).toEqual(["off", "minimal", "low", "medium", "high"]);
+    }
+  });
+
+  it("does not infer Messages from an Anthropic-looking public alias", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "anthropic/claude-opus-5", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.api).toBe("openai-completions");
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
+  });
+
   it("respects explicit chat mode instead of inferring transport from the catalog", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -446,7 +620,7 @@ describe("discoverModels API selection", () => {
     expect(catalogResponses?.api).toBe("openai-completions");
   });
 
-  it("normalizes Azure and Codex catalog APIs to the LiteLLM Responses transport", async () => {
+  it("keeps /v1/models on Chat Completions even when catalog entries use Responses APIs", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
@@ -465,12 +639,12 @@ describe("discoverModels API selection", () => {
 
     expect(result.models).toHaveLength(2);
     expect(result.models.map((model) => [model.id, model.api])).toEqual([
-      ["gpt-4", "openai-responses"],
-      ["gpt-5.6-sol", "openai-responses"],
+      ["gpt-4", "openai-completions"],
+      ["gpt-5.6-sol", "openai-completions"],
     ]);
   });
 
-  it("keeps catalog Responses transport when route mode is absent", async () => {
+  it("keeps incomplete /model/info records on Chat Completions", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [{ model_name: "openai/gpt-4o", model_info: {} }],
@@ -479,7 +653,7 @@ describe("discoverModels API selection", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]).toMatchObject({ id: "openai/gpt-4o", api: "openai-responses" });
+    expect(result.models[0]).toMatchObject({ id: "openai/gpt-4o", api: "openai-completions" });
   });
 
   it("keeps response-mode models on Responses without a catalog match", async () => {
@@ -593,7 +767,7 @@ describe("discoverModels fallback to /v1/models", () => {
       expect(result.source).toBe("models_list");
       expect(result.models.map((m) => m.id).sort()).toEqual(["anthropic/claude-3-5-sonnet", "openai/gpt-4o"]);
       const openai = result.models.find((m) => m.id === "openai/gpt-4o")!;
-      expect(openai.api).toBe("openai-responses");
+      expect(openai.api).toBe("openai-completions");
       const anthropic = result.models.find((m) => m.id === "anthropic/claude-3-5-sonnet")!;
       expect(anthropic.name).toBe("anthropic/claude-3-5-sonnet (no metadata)");
       expect(anthropic.api).toBe("openai-completions");

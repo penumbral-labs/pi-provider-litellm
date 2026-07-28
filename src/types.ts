@@ -33,6 +33,8 @@ export interface ModelInfoEntry {
   model_name?: string;
   model_info?: {
     mode?: string | null;
+    litellm_provider?: string;
+    base_model?: string;
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;
@@ -40,6 +42,8 @@ export interface ModelInfoEntry {
     max_input_tokens?: number;
     max_output_tokens?: number;
     supports_reasoning?: boolean;
+    supports_xhigh_reasoning_effort?: boolean;
+    supports_max_reasoning_effort?: boolean;
     supports_vision?: boolean;
   };
 }
