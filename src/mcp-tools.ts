@@ -191,9 +191,9 @@ function sanitizeName(name: string): string {
   return sanitized || "tool";
 }
 
-function buildPiToolName(serverName: string, toolName: string): string {
+function buildPiToolName(serverName: string, toolName: string, forceHash = false): string {
   const name = `mcp_${sanitizeName(serverName)}_${sanitizeName(toolName)}`;
-  if (name.length <= MAX_TOOL_NAME_LENGTH) return name;
+  if (!forceHash && name.length <= MAX_TOOL_NAME_LENGTH) return name;
 
   const hash = createHash("sha256").update(`${serverName}\0${toolName}`).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
   return `${name.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
@@ -224,11 +224,18 @@ export async function createMcpToolDefinitions(
     signal,
   );
 
+  const normalizedNameCounts = new Map<string, number>();
+  for (const mcpTool of tools) {
+    const normalizedName = buildPiToolName(mcpTool.server_name, mcpTool.name);
+    normalizedNameCounts.set(normalizedName, (normalizedNameCounts.get(normalizedName) ?? 0) + 1);
+  }
+
   return tools.map((mcpTool) => {
     const parameters = buildParameters(mcpTool.input_schema);
+    const normalizedName = buildPiToolName(mcpTool.server_name, mcpTool.name);
 
     return defineTool({
-      name: buildPiToolName(mcpTool.server_name, mcpTool.name),
+      name: buildPiToolName(mcpTool.server_name, mcpTool.name, normalizedNameCounts.get(normalizedName)! > 1),
       label: `${mcpTool.server_name}: ${mcpTool.name}`,
       description: `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       promptSnippet: `${mcpTool.description} via ${mcpTool.server_name} MCP server`,

@@ -216,6 +216,35 @@ describe("createMcpToolDefinitions", () => {
     expect(definitions.every((tool) => tool.name.length === 64)).toBe(true);
   });
 
+  it("adds deterministic suffixes when short names collide after sanitization", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "foo-bar",
+          server_name: "example",
+          description: "Dashed tool",
+          input_schema: { type: "object", properties: {} },
+        },
+        {
+          name: "foo_bar",
+          server_name: "example",
+          description: "Underscored tool",
+          input_schema: { type: "object", properties: {} },
+        },
+      ] satisfies LiteLLMMcpTool[]),
+    );
+
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions.map((tool) => tool.name)).toEqual([
+      "mcp_example_foo_bar_46d20f5e",
+      "mcp_example_foo_bar_c2217d87",
+    ]);
+  });
+
   it("passes complex object schemas through to Pi tools", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [

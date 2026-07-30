@@ -711,7 +711,14 @@ describe("feature parity", () => {
           thinking: { type: "enabled" },
         },
       },
-      { model: { provider: "litellm", id: "moonshotai.kimi-k2.5", api: "openai-completions" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "moonshotai.kimi-k2.5",
+          api: "openai-completions",
+          compat: { stripReasoningControls: true },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -719,6 +726,29 @@ describe("feature parity", () => {
       include_reasoning: false,
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
+    });
+  });
+
+  it("preserves reasoning controls when a Moonshot alias is not Bedrock-backed", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      { payload: { messages: [], thinking: { type: "enabled" } } },
+      { model: { provider: "litellm", id: "moonshotai.kimi-k2.5", api: "openai-completions" } },
+    );
+
+    expect(updated).toMatchObject({
+      messages: [],
+      thinking: { type: "enabled" },
     });
   });
 

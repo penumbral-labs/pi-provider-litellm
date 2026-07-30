@@ -308,10 +308,15 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
 
-  it("exposes only high thinking for dotted Bedrock Kimi routes", async () => {
+  it("exposes only high thinking for Bedrock-backed Kimi routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "moonshotai.kimi-k2.5", model_info: { mode: "chat", supports_reasoning: true } }],
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: { mode: "chat", litellm_provider: "bedrock", supports_reasoning: true },
+          },
+        ],
       }),
     );
 
@@ -321,9 +326,31 @@ describe("discoverModels via /model/info", () => {
       id: "moonshotai.kimi-k2.5",
       reasoning: true,
       thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: null, max: null },
-      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+      compat: expect.objectContaining({
+        thinkingFormat: "deepseek",
+        supportsReasoningEffort: false,
+        stripReasoningControls: true,
+      }),
     });
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
+  });
+
+  it("keeps native Moonshot aliases configurable even when they look Bedrock-shaped", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: { mode: "chat", litellm_provider: "moonshot", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.compat).not.toHaveProperty("stripReasoningControls");
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
   });
 
   it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {

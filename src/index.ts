@@ -14,12 +14,7 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import {
-  discoverModels,
-  isBedrockMoonshotRoute,
-  normalizeBaseUrl,
-  shouldSuppressReasoningContent,
-} from "./discover.js";
+import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -657,6 +652,7 @@ function prepareLiteLLMRequestPayload(
   modelId: string | undefined,
   api: Api | undefined,
   sessionId: string | undefined,
+  stripReasoningControls = false,
 ): Record<string, unknown> | undefined {
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
@@ -672,7 +668,7 @@ function prepareLiteLLMRequestPayload(
 
   if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) update(key, value);
-    if (isBedrockMoonshotRoute(modelId)) {
+    if (stripReasoningControls) {
       remove("reasoning_effort");
       remove("thinking");
     }
@@ -961,6 +957,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ctx.model?.id,
       ctx.model?.api,
       sessionId,
+      ctx.model.api === "openai-completions" &&
+        (ctx.model.compat as { stripReasoningControls?: boolean } | undefined)?.stripReasoningControls === true,
     );
   });
 
