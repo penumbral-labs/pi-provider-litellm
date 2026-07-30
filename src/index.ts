@@ -14,7 +14,12 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
+import {
+  discoverModels,
+  isBedrockMoonshotRoute,
+  normalizeBaseUrl,
+  shouldSuppressReasoningContent,
+} from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -639,13 +644,12 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
   };
 }
 
-// Reasoning fields LiteLLM forwards to chat-completions providers. The Moonshot
-// path defaults them off.
+// Response-shaping fields understood by LiteLLM itself. Do not add upstream
+// reasoning controls here; some adapters reject `thinking` or `reasoning_effort`.
 const REASONING_SUPPRESSION_DEFAULTS: Record<string, unknown> = {
   include_reasoning: false,
   reasoning_content: false,
   merge_reasoning_content_in_choices: true,
-  thinking: { type: "disabled" },
 };
 
 function prepareLiteLLMRequestPayload(
@@ -660,9 +664,18 @@ function prepareLiteLLMRequestPayload(
     next ??= { ...payload };
     next[key] = value;
   };
+  const remove = (key: string): void => {
+    if (payload[key] === undefined) return;
+    next ??= { ...payload };
+    delete next[key];
+  };
 
   if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) update(key, value);
+    if (isBedrockMoonshotRoute(modelId)) {
+      remove("reasoning_effort");
+      remove("thinking");
+    }
   }
 
   if (sessionId) {

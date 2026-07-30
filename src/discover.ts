@@ -97,11 +97,16 @@ function selectApi(
 // the `cacheControlFormat: "anthropic"` flag, pi never relays cache_control
 // markers through the proxy, so prompt caching silently no-ops on Claude models.
 const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
-const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
+const MOONSHOT_MODEL_PATTERN = /^(moonshotai[./_-]|moonshot[./_-]|kimi[-/])/i;
+const BEDROCK_MOONSHOT_ROUTE_PATTERN = /^moonshotai[.-]kimi[.-]/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
 
 export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
+}
+
+export function isBedrockMoonshotRoute(modelId: string): boolean {
+  return BEDROCK_MOONSHOT_ROUTE_PATTERN.test(modelId);
 }
 
 export function shouldSuppressReasoningContent(modelId: string): boolean {
@@ -272,6 +277,7 @@ function routeSupportsReasoning(routeSignal: ReasoningSignal, catalogModel: Mode
 
 function buildThinkingLevelMap(modelId: string, catalogModel: Model<Api> | undefined): ThinkingLevelMap | undefined {
   if (!catalogModel?.reasoning) return undefined;
+  if (isBedrockMoonshotRoute(modelId)) return ALWAYS_THINKING_LEVEL_MAP;
   if (catalogModel.thinkingLevelMap) {
     return isMoonshotRoute(modelId, catalogModel) && getReasoningCompat(catalogModel)?.thinkingFormat === "deepseek"
       ? { ...ALWAYS_THINKING_LEVEL_MAP, ...catalogModel.thinkingLevelMap }

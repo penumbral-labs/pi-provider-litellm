@@ -186,6 +186,36 @@ describe("createMcpToolDefinitions", () => {
     expect(Object.keys(parameters.properties ?? {})).toEqual(["query", "limit", "safe", "tags"]);
   });
 
+  it("bounds generated names to 64 characters without collisions", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "catalog.query-catalog-entities",
+          server_name: "compass_catalog_mcp_passthrough",
+          description: "Query catalog entities",
+          input_schema: { type: "object", properties: {} },
+        },
+        {
+          name: "catalog.query-catalog-entities-extended",
+          server_name: "compass_catalog_mcp_passthrough",
+          description: "Query extended catalog entities",
+          input_schema: { type: "object", properties: {} },
+        },
+      ] satisfies LiteLLMMcpTool[]),
+    );
+
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions.map((tool) => tool.name)).toEqual([
+      "mcp_compass_catalog_mcp_passthrough_catalog_query_catal_a1f637b2",
+      "mcp_compass_catalog_mcp_passthrough_catalog_query_catal_777e8f4d",
+    ]);
+    expect(definitions.every((tool) => tool.name.length === 64)).toBe(true);
+  });
+
   it("passes complex object schemas through to Pi tools", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
