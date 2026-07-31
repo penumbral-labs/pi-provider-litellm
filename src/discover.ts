@@ -318,8 +318,11 @@ function applyReasoningPolicy(
     return;
   }
   const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
+  const routeReasoningCompat = model.compat as ReasoningCompat | undefined;
+  const catalogReasoningCompat = getReasoningCompat(catalogModel);
   const supportsGranularReasoningEffort =
-    (model.compat as ReasoningCompat | undefined)?.supportsReasoningEffort !== false;
+    routeReasoningCompat?.supportsReasoningEffort !== false &&
+    catalogReasoningCompat?.supportsReasoningEffort !== false;
   const hasExtendedEffortMetadata =
     !stripReasoningControls &&
     supportsGranularReasoningEffort &&
@@ -337,11 +340,10 @@ function applyReasoningPolicy(
   }
 
   if (model.api !== "openai-completions") return;
-  const reasoningCompat = getReasoningCompat(catalogModel);
-  if (reasoningCompat || stripReasoningControls) {
+  if (catalogReasoningCompat || stripReasoningControls) {
     model.compat = {
       ...(model.compat ?? {}),
-      ...reasoningCompat,
+      ...catalogReasoningCompat,
       ...(stripReasoningControls ? { stripReasoningControls: true } : {}),
     };
   }

@@ -456,6 +456,32 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
   });
 
+  it("keeps catalog-disabled granular effort levels when route metadata claims support", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "Ring-2.6-1T",
+            model_info: {
+              mode: "chat",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      reasoning: true,
+      compat: expect.objectContaining({ supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high", "xhigh"]);
+  });
+
   it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
