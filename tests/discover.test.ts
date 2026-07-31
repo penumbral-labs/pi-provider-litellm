@@ -430,6 +430,32 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
   });
 
+  it("keeps native boolean Kimi routes off/high when misleading extended-effort metadata is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k2.6",
+            model_info: {
+              mode: "chat",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
   it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {

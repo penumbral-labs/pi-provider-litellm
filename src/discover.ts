@@ -318,8 +318,12 @@ function applyReasoningPolicy(
     return;
   }
   const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
+  const supportsGranularReasoningEffort =
+    (model.compat as ReasoningCompat | undefined)?.supportsReasoningEffort !== false;
   const hasExtendedEffortMetadata =
-    !stripReasoningControls && (effortCapabilities?.xhigh != null || effortCapabilities?.max != null);
+    !stripReasoningControls &&
+    supportsGranularReasoningEffort &&
+    (effortCapabilities?.xhigh != null || effortCapabilities?.max != null);
   if (thinkingLevelMap) {
     model.thinkingLevelMap = hasExtendedEffortMetadata
       ? {
