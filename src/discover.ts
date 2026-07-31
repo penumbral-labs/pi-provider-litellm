@@ -293,7 +293,7 @@ function applyReasoningPolicy(
     Partial<Pick<DiscoveredModel, "reasoning" | "thinkingLevelMap">>,
   catalogModel: Model<Api> | undefined,
   routeSignal: ReasoningSignal = catalogModel?.reasoning,
-  effortCapabilities?: { xhigh?: boolean; max?: boolean },
+  effortCapabilities?: { xhigh?: boolean | null; max?: boolean | null },
   stripReasoningControls = false,
 ): void {
   if (model.api === "anthropic-messages") {
@@ -318,15 +318,32 @@ function applyReasoningPolicy(
     return;
   }
   const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
-  if (thinkingLevelMap) model.thinkingLevelMap = thinkingLevelMap;
-  else delete model.thinkingLevelMap;
+  const routeReasoningCompat = model.compat as ReasoningCompat | undefined;
+  const catalogReasoningCompat = getReasoningCompat(catalogModel);
+  const supportsGranularReasoningEffort =
+    routeReasoningCompat?.supportsReasoningEffort !== false &&
+    catalogReasoningCompat?.supportsReasoningEffort !== false;
+  const hasExtendedEffortMetadata =
+    !stripReasoningControls &&
+    supportsGranularReasoningEffort &&
+    (effortCapabilities?.xhigh != null || effortCapabilities?.max != null);
+  if (thinkingLevelMap) {
+    model.thinkingLevelMap = hasExtendedEffortMetadata
+      ? {
+          ...thinkingLevelMap,
+          xhigh: effortCapabilities?.xhigh === true ? "xhigh" : null,
+          max: effortCapabilities?.max === true ? "max" : null,
+        }
+      : thinkingLevelMap;
+  } else {
+    delete model.thinkingLevelMap;
+  }
 
   if (model.api !== "openai-completions") return;
-  const reasoningCompat = getReasoningCompat(catalogModel);
-  if (reasoningCompat || stripReasoningControls) {
+  if (catalogReasoningCompat || stripReasoningControls) {
     model.compat = {
       ...(model.compat ?? {}),
-      ...reasoningCompat,
+      ...catalogReasoningCompat,
       ...(stripReasoningControls ? { stripReasoningControls: true } : {}),
     };
   }

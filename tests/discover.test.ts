@@ -293,6 +293,56 @@ describe("discoverModels via /model/info", () => {
     ]);
   });
 
+  it("narrows catalog extended-effort levels to authoritative /model/info capabilities", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "gpt-5.6-sol",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "custom-openai-proxy",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      reasoning: true,
+      thinkingLevelMap: { off: null, xhigh: "xhigh", max: null },
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+  });
+
+  it("preserves max when /model/info explicitly supports it", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "gpt-5.6-sol",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "custom-openai-proxy",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.thinkingLevelMap?.max).toBe("max");
+    expect(supportedThinkingLevels(result.models[0]!)).toContain("max");
+  });
+
   it("disables catalog reasoning controls when /model/info says the route does not support reasoning", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -335,6 +385,33 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
   });
 
+  it("keeps Bedrock-backed Kimi high-only when misleading extended-effort metadata is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ stripReasoningControls: true }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
+  });
+
   it("keeps native Moonshot aliases configurable even when they look Bedrock-shaped", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -351,6 +428,58 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]?.compat).not.toHaveProperty("stripReasoningControls");
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("keeps native boolean Kimi routes off/high when misleading extended-effort metadata is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k2.6",
+            model_info: {
+              mode: "chat",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("keeps catalog-disabled granular effort levels when route metadata claims support", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "Ring-2.6-1T",
+            model_info: {
+              mode: "chat",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      reasoning: true,
+      compat: expect.objectContaining({ supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high", "xhigh"]);
   });
 
   it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {
