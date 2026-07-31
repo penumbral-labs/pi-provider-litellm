@@ -318,7 +318,8 @@ function applyReasoningPolicy(
     return;
   }
   const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
-  const hasExtendedEffortMetadata = effortCapabilities?.xhigh != null || effortCapabilities?.max != null;
+  const hasExtendedEffortMetadata =
+    !stripReasoningControls && (effortCapabilities?.xhigh != null || effortCapabilities?.max != null);
   if (thinkingLevelMap) {
     model.thinkingLevelMap = hasExtendedEffortMetadata
       ? {

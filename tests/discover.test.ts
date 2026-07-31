@@ -385,6 +385,33 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
   });
 
+  it("keeps Bedrock-backed Kimi high-only when misleading extended-effort metadata is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ stripReasoningControls: true }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
+  });
+
   it("keeps native Moonshot aliases configurable even when they look Bedrock-shaped", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
