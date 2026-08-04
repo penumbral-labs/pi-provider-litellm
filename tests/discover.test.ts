@@ -258,13 +258,60 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("honors explicit false vision support over the catalog", async () => {
+  it.each([undefined, null])(
+    "uses base_model catalog vision support for aliases when /model/info reports %s",
+    async (supportsVision) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "prod-gpt4o",
+              model_info: {
+                mode: "chat",
+                base_model: "openai/gpt-4o",
+                supports_vision: supportsVision,
+              },
+            },
+          ],
+        }),
+      );
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]).toMatchObject({
+        id: "prod-gpt4o",
+        input: ["text", "image"],
+      });
+    },
+  );
+
+  it("prefers base_model catalog vision support over the route catalog match", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "gpt-4o",
+            model_info: { mode: "chat", base_model: "o3-mini" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-4o",
+      input: ["text"],
+    });
+  });
+
+  it("falls back to route catalog vision support when base_model is unresolved", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
           {
             model_name: "kimi-k3",
-            model_info: { mode: "chat", supports_vision: false },
+            model_info: { mode: "chat", base_model: "acme-internal-v1" },
           },
         ],
       }),
@@ -274,6 +321,23 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "kimi-k3",
+      input: ["text", "image"],
+    });
+  });
+
+  it.each([
+    { model_name: "kimi-k3", model_info: { mode: "chat", supports_vision: false } },
+    {
+      model_name: "prod-gpt4o",
+      model_info: { mode: "chat", base_model: "openai/gpt-4o", supports_vision: false },
+    },
+  ])("honors explicit false vision support for $model_name", async (entry) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [entry] }));
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: entry.model_name,
       input: ["text"],
     });
   });

@@ -542,8 +542,9 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
   const catalogModel = findCatalogModel(id);
+  const visionCatalogModel = (info.base_model ? findCatalogModel(info.base_model) : undefined) ?? catalogModel;
   const api = selectApi(info.mode, info.litellm_provider, info.base_model, id);
-  const supportsVision = info.supports_vision ?? catalogModel?.input.includes("image") ?? false;
+  const supportsVision = info.supports_vision ?? visionCatalogModel?.input.includes("image") ?? false;
   const model: DiscoveredModel = {
     id,
     name: id,
