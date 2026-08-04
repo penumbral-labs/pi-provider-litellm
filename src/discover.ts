@@ -543,11 +543,12 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   if (!isChatStyleMode(info.mode)) return undefined;
   const catalogModel = findCatalogModel(id);
   const api = selectApi(info.mode, info.litellm_provider, info.base_model, id);
+  const supportsVision = info.supports_vision ?? catalogModel?.input.includes("image") ?? false;
   const model: DiscoveredModel = {
     id,
     name: id,
     reasoning: false,
-    input: info.supports_vision ? ["text", "image"] : ["text"],
+    input: supportsVision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,

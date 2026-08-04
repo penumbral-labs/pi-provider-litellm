@@ -233,8 +233,63 @@ describe("discoverModels via /model/info", () => {
     const openai = result.models.find((m) => m.id === "openai/gpt-4o");
     expect(openai).toMatchObject({
       id: "openai/gpt-4o",
-      input: ["text"],
+      input: ["text", "image"],
       compat: { supportsStore: false },
+    });
+  });
+
+  it.each([undefined, null])("uses catalog vision support when /model/info reports %s", async (supportsVision) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k3",
+            model_info: { mode: "chat", supports_vision: supportsVision },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k3",
+      input: ["text", "image"],
+    });
+  });
+
+  it("honors explicit false vision support over the catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k3",
+            model_info: { mode: "chat", supports_vision: false },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k3",
+      input: ["text"],
+    });
+  });
+
+  it("defaults unknown models to text input when /model/info omits vision support", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-model", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "custom-model",
+      input: ["text"],
     });
   });
 

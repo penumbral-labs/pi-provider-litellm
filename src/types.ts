@@ -53,7 +53,7 @@ export interface ModelInfoEntry {
     supports_reasoning?: boolean;
     supports_xhigh_reasoning_effort?: boolean | null;
     supports_max_reasoning_effort?: boolean | null;
-    supports_vision?: boolean;
+    supports_vision?: boolean | null;
   };
 }
 

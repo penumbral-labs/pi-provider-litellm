@@ -178,8 +178,10 @@ state.
 Unknown custom routes are conservative. LiteLLM `/model/info` or models.dev may say only
 `supports_reasoning: true`/`reasoning: true`, but that boolean is not enough to know which Pi levels are distinct or how
 to serialize them. Such models remain usable, but Pi does not show a reasoning selector until the route can be matched
-to authoritative catalog metadata. For custom aliases, prefer model names or `owned_by` values that resolve to the
-underlying catalog model; arbitrary aliases are not assumed to support any specific reasoning controls.
+to authoritative catalog metadata. When `/model/info` omits `supports_vision` or returns `null`, the extension likewise
+uses the matched Pi catalog model's image-input capability; an explicit `true` or `false` from LiteLLM takes precedence.
+For custom aliases, prefer model names or `owned_by` values that resolve to the underlying catalog model; arbitrary
+aliases are not assumed to support any specific reasoning or vision capabilities.
 
 The exact controls depend on the installed Pi model catalog and the metadata your LiteLLM version returns. Newer LiteLLM
 proxies that preserve route `mode`, `supports_reasoning`, model names, and ownership metadata give this extension more
