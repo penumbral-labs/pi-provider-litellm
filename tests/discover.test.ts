@@ -788,6 +788,29 @@ describe("discoverModels via /model/info", () => {
     expect(urls).not.toContain("https://models.dev/api.json");
   });
 
+  it("ignores non-chat routes when deciding whether models.dev is needed", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            { model_name: "kimi-k3", model_info: { mode: "chat", max_output_tokens: 8192 } },
+            { model_name: "openai/text-embedding-3-large", model_info: { mode: "embedding" } },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({ id: "kimi-k3", maxTokens: 8192 });
+    expect(urls).not.toContain("https://models.dev/api.json");
+  });
+
   it("falls back to the default maxTokens when models.dev has no match", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

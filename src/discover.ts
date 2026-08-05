@@ -729,7 +729,9 @@ export async function discoverModels(
         model_info: { ...previous?.model_info, ...entry.model_info },
       });
     }
-    const values = [...entries.values()];
+    // Non-chat routes (embeddings, etc.) are discarded by mapFromModelInfo, so only
+    // chat-style entries decide whether catalog enrichment is needed at all.
+    const values = [...entries.values()].filter((entry) => entry.model_name && isChatStyleMode(entry.model_info?.mode));
     let modelsDev: ModelsDevResponse | undefined;
     if (options.modelsDev !== false && values.some((entry) => entry.model_info?.max_output_tokens == null)) {
       progress?.("Loading models.dev catalog for metadata enrichment...");
