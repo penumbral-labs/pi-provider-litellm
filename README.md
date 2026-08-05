@@ -200,7 +200,7 @@ remain conservative until the catalog is updated.
 | `LITELLM_OFFLINE`                | unset                   | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only                                                                                                                                                     |
 | `LITELLM_DISCOVERY_TIMEOUT_MS`   | `5000`                  | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery                                                                                                                                                                 |
 | `LITELLM_VERBOSE_DISCOVERY`      | unset                   | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default                                                                                                                               |
-| `LITELLM_MODELS_DEV`             | enabled                 | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata and defaults                                                                                                 |
+| `LITELLM_MODELS_DEV`             | enabled                 | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; discovery still uses Pi catalog metadata and defaults                                                                                                 |
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base
 URL or API key settings required to send requests when you are not using `/login litellm`.
@@ -297,6 +297,11 @@ contents.
 
 Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`.
 Legacy `litellm-models*.json` files are ignored and are not deleted.
+
+A route's output-token cap comes from `/model/info` `max_output_tokens` first; when LiteLLM leaves it null, the
+extension falls back to the `base_model` output limit on models.dev and the Pi catalog (models.dev matched across
+providers, modal value wins), then the route id's own catalog entries, then a 16384 default. Router metadata always
+wins when present.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 

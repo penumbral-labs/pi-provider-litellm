@@ -43,6 +43,27 @@ const MODELS_DEV_CATALOG = {
   },
 };
 
+// A hypothetical model the Pi catalog does not know, mirroring how models.dev providers
+// namespace ids: cross-provider entries, mixed case, and disagreeing output limits where
+// 131072 is the modal value.
+const MODELS_DEV_KIMI_K9 = {
+  moonshotai: {
+    models: {
+      "kimi-k9": { name: "Kimi K9", limit: { context: 1_048_576, output: 131_072 } },
+    },
+  },
+  "fireworks-ai": {
+    models: {
+      "accounts/fireworks/models/kimi-k9": { limit: { context: 1_048_576, output: 131_072 } },
+    },
+  },
+  nebius: {
+    models: {
+      "moonshotai/Kimi-K9": { limit: { context: 1_048_576, output: 8_000 } },
+    },
+  },
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -719,6 +740,291 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 8192,
       cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
+  });
+
+  it("enriches maxTokens from models.dev when /model/info omits it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-k9",
+              model_info: { mode: "chat", max_input_tokens: 1_048_576, max_output_tokens: null },
+            },
+          ],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.source).toBe("model_info");
+    // modal value across providers wins (131072 x2 vs 8000 x1), matched case-insensitively
+    expect(result.models[0]).toMatchObject({ id: "kimi-k9", maxTokens: 131_072 });
+  });
+
+  it("keeps router-provided maxTokens and skips models.dev when /model/info is complete", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "kimi-k3", model_info: { mode: "chat", max_output_tokens: 8192 } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "kimi-k3", maxTokens: 8192 });
+    expect(urls).not.toContain("https://models.dev/api.json");
+  });
+
+  it("ignores non-chat routes when deciding whether models.dev is needed", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            { model_name: "kimi-k3", model_info: { mode: "chat", max_output_tokens: 8192 } },
+            { model_name: "openai/text-embedding-3-large", model_info: { mode: "embedding" } },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({ id: "kimi-k3", maxTokens: 8192 });
+    expect(urls).not.toContain("https://models.dev/api.json");
+  });
+
+  it("falls back to the default maxTokens when models.dev has no match", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme-internal-v2", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
+  });
+
+  it("does not match unrelated models.dev entries for unknown id and base_model pairs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme-internal-v2", model_info: { mode: "chat", base_model: "zzz/ghost-v1" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
+  });
+
+  it("fills maxTokens from the Pi catalog when models.dev is unreachable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "kimi-k3", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // kimi-k3 is in the Pi catalog with maxTokens 131072
+    expect(result.models[0]).toMatchObject({ id: "kimi-k3", maxTokens: 131_072 });
+  });
+
+  it("resolves vanity-alias maxTokens through base_model on models.dev", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "prod-kimi9", model_info: { mode: "chat", base_model: "moonshotai/kimi-k9" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "prod-kimi9", maxTokens: 131_072 });
+  });
+
+  it("resolves vanity-alias maxTokens through base_model in the Pi catalog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "prod-kimi", model_info: { mode: "chat", base_model: "moonshotai/kimi-k3" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // prod-kimi matches nothing, but base_model moonshotai/kimi-k3 is in the Pi catalog
+    expect(result.models[0]).toMatchObject({ id: "prod-kimi", maxTokens: 131_072 });
+  });
+
+  it("prefers base_model over the route id when both match models.dev", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "kimi-k9", model_info: { mode: "chat", base_model: "acme/backend-x9" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, {
+          ...MODELS_DEV_KIMI_K9,
+          acme: { models: { "backend-x9": { limit: { context: 128_000, output: 65_536 } } } },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // route id kimi-k9 matches 131072, but base_model acme/backend-x9 is the real backend
+    expect(result.models[0]).toMatchObject({ id: "kimi-k9", maxTokens: 65_536 });
+  });
+
+  it("matches the models.dev provider section case-insensitively before the modal fallback", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme/backend-x9", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, {
+          // case-variant provider section holds the specific limit
+          Acme: { models: { "backend-x9": { limit: { context: 128_000, output: 65_536 } } } },
+          // two other providers would make 131072 the modal fallback value
+          vendorone: { models: { "vendor/backend-x9": { limit: { context: 128_000, output: 131_072 } } } },
+          vendortwo: { models: { "backend-x9": { limit: { context: 128_000, output: 131_072 } } } },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme/backend-x9", maxTokens: 65_536 });
+  });
+
+  it("prefers base_model over the route id when both match the Pi catalog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "gpt-4o", model_info: { mode: "chat", base_model: "moonshotai/kimi-k3" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // gpt-4o is in the Pi catalog, but the backend is kimi-k3 (131072)
+    expect(result.models[0]).toMatchObject({ id: "gpt-4o", maxTokens: 131_072 });
+  });
+
+  it("falls back to the default maxTokens when neither models.dev nor the Pi catalog matches", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme-internal-v2", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
+  });
+
+  it("skips models.dev enrichment in the /model/info path when disabled", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme-internal-v2", model_info: { mode: "chat" } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
+    expect(urls).not.toContain("https://models.dev/api.json");
   });
 });
 
