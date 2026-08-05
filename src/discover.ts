@@ -240,6 +240,36 @@ function findModelsDevModel(
   return models && Object.hasOwn(models, modelId) ? models[modelId] : undefined;
 }
 
+function findModelsDevMaxTokens(catalog: ModelsDevResponse | undefined, id: string): number | undefined {
+  const strict = findModelsDevModel(catalog, id);
+  if (strict?.limit?.output !== undefined) return strict.limit.output;
+  if (!catalog) return undefined;
+  // LiteLLM routers frequently rename hosted models (bare ids like "kimi-k3" with no
+  // usable provider hint), so fall back to a provider-agnostic match on the exact id or a
+  // "/{id}" suffix and take the modal output limit across providers, preferring the
+  // smallest value on a tie.
+  const counts = new Map<number, number>();
+  const wanted = id.toLowerCase();
+  for (const providerEntry of Object.values(catalog)) {
+    for (const [modelId, model] of Object.entries(providerEntry?.models ?? {})) {
+      const key = modelId.toLowerCase();
+      if (key !== wanted && !key.endsWith(`/${wanted}`)) continue;
+      const output = model?.limit?.output;
+      if (typeof output !== "number" || !Number.isFinite(output)) continue;
+      counts.set(output, (counts.get(output) ?? 0) + 1);
+    }
+  }
+  let best: number | undefined;
+  let bestCount = 0;
+  for (const [value, count] of counts) {
+    if (count > bestCount || (count === bestCount && (best === undefined || value < best))) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 const BOOLEAN_THINKING_LEVEL_MAP: ThinkingLevelMap = {
   minimal: null,
   low: null,
@@ -536,7 +566,7 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
+function mapFromModelInfo(entry: ModelInfoEntry, modelsDev?: ModelsDevResponse): DiscoveredModel | undefined {
   const id = entry.model_name;
   if (!id) return undefined;
   const info = entry.model_info ?? {};
@@ -552,7 +582,9 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
     input: supportsVision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
+    // Router metadata wins when present; models.dev and the Pi catalog fill the gaps.
+    maxTokens:
+      info.max_output_tokens ?? findModelsDevMaxTokens(modelsDev, id) ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api,
     compat: buildCompat(id, catalogModel, api),
   };
@@ -682,7 +714,15 @@ export async function discoverModels(
         model_info: { ...previous?.model_info, ...entry.model_info },
       });
     }
-    const models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
+    const values = [...entries.values()];
+    let modelsDev: ModelsDevResponse | undefined;
+    if (options.modelsDev !== false && values.some((entry) => entry.model_info?.max_output_tokens == null)) {
+      progress?.("Loading models.dev catalog for metadata enrichment...");
+      modelsDev = await getModelsDevCatalog(options);
+    }
+    const models = values
+      .map((entry) => mapFromModelInfo(entry, modelsDev))
+      .filter((m): m is DiscoveredModel => m !== undefined);
     return { source: "model_info", models };
   }
   if (![401, 403, 404].includes(infoResult.status)) {

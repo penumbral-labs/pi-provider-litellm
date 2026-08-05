@@ -812,9 +812,14 @@ describe("extension startup", () => {
           data: [
             {
               model_name: "claude-opus-5",
-              model_info: { mode: "chat", litellm_provider: "bedrock_converse", base_model: "anthropic.claude-opus-5" },
+              model_info: {
+                mode: "chat",
+                litellm_provider: "bedrock_converse",
+                base_model: "anthropic.claude-opus-5",
+                max_output_tokens: 8192,
+              },
             },
-            { model_name: "gpt-5", model_info: { mode: "chat", litellm_provider: "openai" } },
+            { model_name: "gpt-5", model_info: { mode: "chat", litellm_provider: "openai", max_output_tokens: 16384 } },
           ],
         });
       }
