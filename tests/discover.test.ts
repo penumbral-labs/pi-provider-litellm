@@ -870,6 +870,53 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({ id: "prod-kimi", maxTokens: 131_072 });
   });
 
+  it("prefers base_model over the route id when both match models.dev", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "kimi-k9", model_info: { mode: "chat", base_model: "acme/backend-x9" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, {
+          ...MODELS_DEV_KIMI_K9,
+          acme: { models: { "backend-x9": { limit: { context: 128_000, output: 65_536 } } } },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // route id kimi-k9 matches 131072, but base_model acme/backend-x9 is the real backend
+    expect(result.models[0]).toMatchObject({ id: "kimi-k9", maxTokens: 65_536 });
+  });
+
+  it("prefers base_model over the route id when both match the Pi catalog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "gpt-4o", model_info: { mode: "chat", base_model: "moonshotai/kimi-k3" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // gpt-4o is in the Pi catalog, but the backend is kimi-k3 (131072)
+    expect(result.models[0]).toMatchObject({ id: "gpt-4o", maxTokens: 131_072 });
+  });
+
   it("falls back to the default maxTokens when neither models.dev nor the Pi catalog matches", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

@@ -299,9 +299,9 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 Legacy `litellm-models*.json` files are ignored and are not deleted.
 
 A route's output-token cap comes from `/model/info` `max_output_tokens` first; when LiteLLM leaves it null, the
-extension falls back to the models.dev output limit (matched across providers, modal value wins), then the Pi catalog,
-then a 16384 default. Vanity aliases also resolve through `base_model` against both catalogs before defaulting. Router
-metadata always wins when present.
+extension falls back to the `base_model` output limit on models.dev and the Pi catalog (models.dev matched across
+providers, modal value wins), then the route id's own catalog entries, then a 16384 default. Router metadata always
+wins when present.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 

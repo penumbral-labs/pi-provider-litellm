@@ -244,16 +244,24 @@ function findModelsDevMaxTokens(catalog: ModelsDevResponse | undefined, id: stri
   const strict = findModelsDevModel(catalog, id);
   if (strict?.limit?.output !== undefined) return strict.limit.output;
   if (!catalog) return undefined;
+  // A "prefix/rest" id matches the catalog's provider section directly, regardless of
+  // whether the prefix is a known provider.
+  const slash = id.indexOf("/");
+  if (slash > 0) {
+    const direct = catalog[id.slice(0, slash)]?.models?.[id.slice(slash + 1)];
+    if (direct?.limit?.output !== undefined) return direct.limit.output;
+  }
   // LiteLLM routers frequently rename hosted models (bare ids like "kimi-k3" with no
-  // usable provider hint), so fall back to a provider-agnostic match on the exact id or a
-  // "/{id}" suffix and take the modal output limit across providers, preferring the
-  // smallest value on a tie.
+  // usable provider hint), so fall back to a provider-agnostic match on the exact id, a
+  // "/{id}" suffix, or the unprefixed tail, and take the modal output limit across
+  // providers, preferring the smallest value on a tie.
   const counts = new Map<number, number>();
-  const wanted = id.toLowerCase();
+  const wanted = new Set([id.toLowerCase()]);
+  if (slash > 0) wanted.add(id.slice(slash + 1).toLowerCase());
   for (const providerEntry of Object.values(catalog)) {
     for (const [modelId, model] of Object.entries(providerEntry?.models ?? {})) {
       const key = modelId.toLowerCase();
-      if (key !== wanted && !key.endsWith(`/${wanted}`)) continue;
+      if (![...wanted].some((candidate) => key === candidate || key.endsWith(`/${candidate}`))) continue;
       const output = model?.limit?.output;
       if (typeof output !== "number" || !Number.isFinite(output)) continue;
       counts.set(output, (counts.get(output) ?? 0) + 1);
@@ -583,14 +591,14 @@ function mapFromModelInfo(entry: ModelInfoEntry, modelsDev?: ModelsDevResponse):
     input: supportsVision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    // Router metadata wins when present; models.dev and the Pi catalog fill the gaps,
-    // resolving vanity aliases through base_model before defaulting.
+    // Router metadata wins when present. After that, base_model identifies the actual
+    // backend model, so its catalogs beat the (possibly vanity) route id's.
     maxTokens:
       info.max_output_tokens ??
-      findModelsDevMaxTokens(modelsDev, id) ??
-      catalogModel?.maxTokens ??
       (info.base_model ? findModelsDevMaxTokens(modelsDev, info.base_model) : undefined) ??
       baseCatalogModel?.maxTokens ??
+      findModelsDevMaxTokens(modelsDev, id) ??
+      catalogModel?.maxTokens ??
       DEFAULT_MAX_TOKENS,
     api,
     compat: buildCompat(id, catalogModel, api),
