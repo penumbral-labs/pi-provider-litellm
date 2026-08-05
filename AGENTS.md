@@ -25,7 +25,8 @@
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
 - The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback
   metadata tests current. The primary `/model/info` path enriches a missing `max_output_tokens` from models.dev
-  (cross-provider modal match) and the Pi catalog before defaulting; router-provided values always win.
+  (cross-provider modal match) and the Pi catalog, resolving vanity aliases through `base_model`; router-provided
+  values always win.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Discovered models are cached by Pi's native provider model store, not by this extension. The legacy

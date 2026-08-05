@@ -572,7 +572,8 @@ function mapFromModelInfo(entry: ModelInfoEntry, modelsDev?: ModelsDevResponse):
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
   const catalogModel = findCatalogModel(id);
-  const visionCatalogModel = (info.base_model ? findCatalogModel(info.base_model) : undefined) ?? catalogModel;
+  const baseCatalogModel = info.base_model ? findCatalogModel(info.base_model) : undefined;
+  const visionCatalogModel = baseCatalogModel ?? catalogModel;
   const api = selectApi(info.mode, info.litellm_provider, info.base_model, id);
   const supportsVision = info.supports_vision ?? visionCatalogModel?.input.includes("image") ?? false;
   const model: DiscoveredModel = {
@@ -582,9 +583,15 @@ function mapFromModelInfo(entry: ModelInfoEntry, modelsDev?: ModelsDevResponse):
     input: supportsVision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    // Router metadata wins when present; models.dev and the Pi catalog fill the gaps.
+    // Router metadata wins when present; models.dev and the Pi catalog fill the gaps,
+    // resolving vanity aliases through base_model before defaulting.
     maxTokens:
-      info.max_output_tokens ?? findModelsDevMaxTokens(modelsDev, id) ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      info.max_output_tokens ??
+      findModelsDevMaxTokens(modelsDev, id) ??
+      catalogModel?.maxTokens ??
+      (info.base_model ? findModelsDevMaxTokens(modelsDev, info.base_model) : undefined) ??
+      baseCatalogModel?.maxTokens ??
+      DEFAULT_MAX_TOKENS,
     api,
     compat: buildCompat(id, catalogModel, api),
   };

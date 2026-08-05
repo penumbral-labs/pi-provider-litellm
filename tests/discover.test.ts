@@ -829,6 +829,47 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({ id: "kimi-k3", maxTokens: 131_072 });
   });
 
+  it("resolves vanity-alias maxTokens through base_model on models.dev", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "prod-kimi9", model_info: { mode: "chat", base_model: "moonshotai/kimi-k9" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "prod-kimi9", maxTokens: 131_072 });
+  });
+
+  it("resolves vanity-alias maxTokens through base_model in the Pi catalog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "prod-kimi", model_info: { mode: "chat", base_model: "moonshotai/kimi-k3" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") throw new Error("network down");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    // prod-kimi matches nothing, but base_model moonshotai/kimi-k3 is in the Pi catalog
+    expect(result.models[0]).toMatchObject({ id: "prod-kimi", maxTokens: 131_072 });
+  });
+
   it("falls back to the default maxTokens when neither models.dev nor the Pi catalog matches", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
