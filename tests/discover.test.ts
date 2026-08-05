@@ -831,6 +831,26 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
   });
 
+  it("does not match unrelated models.dev entries for unknown id and base_model pairs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme-internal-v2", model_info: { mode: "chat", base_model: "zzz/ghost-v1" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_KIMI_K9);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme-internal-v2", maxTokens: 16384 });
+  });
+
   it("fills maxTokens from the Pi catalog when models.dev is unreachable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

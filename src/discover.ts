@@ -592,7 +592,8 @@ function mapFromModelInfo(entry: ModelInfoEntry, modelsDev?: ModelsDevResponse):
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     // Router metadata wins when present. After that, base_model identifies the actual
-    // backend model, so its catalogs beat the (possibly vanity) route id's.
+    // backend model, so its catalogs beat the (possibly vanity) route id's — the same
+    // backend-truth rule as vision above; reasoning and cost stay router/id-based by design.
     maxTokens:
       info.max_output_tokens ??
       (info.base_model ? findModelsDevMaxTokens(modelsDev, info.base_model) : undefined) ??
