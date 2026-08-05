@@ -244,12 +244,18 @@ function findModelsDevMaxTokens(catalog: ModelsDevResponse | undefined, id: stri
   const strict = findModelsDevModel(catalog, id);
   if (strict?.limit?.output !== undefined) return strict.limit.output;
   if (!catalog) return undefined;
-  // A "prefix/rest" id matches the catalog's provider section directly, regardless of
-  // whether the prefix is a known provider.
+  // A "prefix/rest" id matches the catalog's provider section directly (case-insensitively),
+  // regardless of whether the prefix is a known provider.
   const slash = id.indexOf("/");
   if (slash > 0) {
-    const direct = catalog[id.slice(0, slash)]?.models?.[id.slice(slash + 1)];
-    if (direct?.limit?.output !== undefined) return direct.limit.output;
+    const prefix = id.slice(0, slash).toLowerCase();
+    const rest = id.slice(slash + 1).toLowerCase();
+    for (const [providerId, providerEntry] of Object.entries(catalog)) {
+      if (providerId.toLowerCase() !== prefix) continue;
+      for (const [modelId, model] of Object.entries(providerEntry?.models ?? {})) {
+        if (modelId.toLowerCase() === rest && model?.limit?.output !== undefined) return model.limit.output;
+      }
+    }
   }
   // LiteLLM routers frequently rename hosted models (bare ids like "kimi-k3" with no
   // usable provider hint), so fall back to a provider-agnostic match on the exact id, a

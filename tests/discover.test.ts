@@ -939,6 +939,34 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({ id: "kimi-k9", maxTokens: 65_536 });
   });
 
+  it("matches the models.dev provider section case-insensitively before the modal fallback", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "acme/backend-x9", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, {
+          // case-variant provider section holds the specific limit
+          Acme: { models: { "backend-x9": { limit: { context: 128_000, output: 65_536 } } } },
+          // two other providers would make 131072 the modal fallback value
+          vendorone: { models: { "vendor/backend-x9": { limit: { context: 128_000, output: 131_072 } } } },
+          vendortwo: { models: { "backend-x9": { limit: { context: 128_000, output: 131_072 } } } },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "acme/backend-x9", maxTokens: 65_536 });
+  });
+
   it("prefers base_model over the route id when both match the Pi catalog", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
