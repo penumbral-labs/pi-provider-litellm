@@ -97,7 +97,8 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
     throw new Error("At least one smoke model must be configured in LITELLM_SMOKE_MODELS");
   }
 
-  const discovery = await discoverModels(baseUrl, options.apiKey, { timeoutMs });
+  // Smoke checks validate router connectivity only; skip third-party catalog enrichment.
+  const discovery = await discoverModels(baseUrl, options.apiKey, { timeoutMs, modelsDev: false });
   if (options.expectedSource && discovery.source !== options.expectedSource) {
     throw new Error(`Discovery source mismatch: expected ${options.expectedSource}, got ${discovery.source}`);
   }
