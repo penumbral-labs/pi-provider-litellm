@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProviderModelsStore } from "@earendil-works/pi-ai";
+import type { ModelsStoreEntry } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
@@ -15,21 +15,28 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
-  const store: ProviderModelsStore = {
-    read: async () => undefined,
-    write: async () => undefined,
-    delete: async () => undefined,
-  };
+  let stored: ModelsStoreEntry | undefined;
   await pi.providers[0]?.refreshModels?.({
     allowNetwork,
-    store,
+    stored,
+    publish: async ({ persist, update }) => {
+      stored = persist ?? undefined;
+      update?.();
+      return true;
+    },
     credential: {
       type: "api_key",
       key: process.env.LITELLM_API_KEY ?? "sk-test",
       env: { LITELLM_BASE_URL: process.env.LITELLM_BASE_URL ?? "https://litellm.example.com" },
     },
-    signal,
+    signal: signal ?? new AbortController().signal,
   });
+}
+
+async function startSession(pi: TestPi, context: unknown): Promise<void> {
+  const handler = pi.handlers.get("session_start")?.[0];
+  expect(handler).toBeTypeOf("function");
+  await handler!({ reason: "startup" }, context);
 }
 
 afterEach(() => {
@@ -41,6 +48,7 @@ afterEach(() => {
   delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
   delete process.env.LITELLM_GCLOUD_TOKEN_AUTH;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  delete process.env.PI_OFFLINE;
 });
 
 describe("feature parity", () => {
@@ -68,9 +76,325 @@ describe("feature parity", () => {
 
     await expect(
       pi.providers[0]?.auth.apiKey?.check?.({
+        signal: new AbortController().signal,
         ctx: { env: async (name) => process.env[name], fileExists: async () => false },
       }),
     ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
+  });
+
+  it("automatically discovers models and MCP tools when a session starts", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const longServerName = "corporate_router_catalog_and_governance_service_with_a_long_name";
+    const longToolName = "search_every_authorized_enterprise_catalog_for_relevant_records";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://litellm.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: longToolName,
+              description: "Search authorized enterprise records",
+              inputSchema: { type: "object", properties: { query: { type: "string" } } },
+              mcp_info: { server_name: longServerName, server_id: "enterprise-catalog" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const refresh = vi.fn().mockResolvedValue({ errors: new Map(), aborted: false });
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh,
+      },
+    };
+
+    await startSession(pi, context);
+    await vi.waitFor(() => expect(pi.tools.some((tool) => tool.name.startsWith("mcp_"))).toBe(true));
+
+    const registeredName = pi.tools.find((tool) => tool.name.startsWith("mcp_"))?.name;
+    expect(registeredName).toBe("mcp_corporate_router_catalog_and_governance_service_wit_99d4fe21");
+    expect(registeredName).toHaveLength(64);
+    expect(refresh).toHaveBeenCalledWith(
+      expect.objectContaining({ allowNetwork: true, providers: ["litellm"], signal: expect.any(AbortSignal) }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://litellm.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer startup-token" }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("reports normal model refresh errors without exposing credentials", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [] }));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-secret", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh: vi.fn().mockResolvedValue({
+          errors: new Map([["litellm", new Error("router unavailable")]]),
+          aborted: false,
+        }),
+      },
+    };
+
+    await startSession(pi, context);
+    await vi.waitFor(() => expect(stderr).toHaveBeenCalled());
+
+    const output = stderr.mock.calls.map(([message]) => String(message)).join("");
+    expect(output).toContain("automatic model discovery failed (router unavailable)");
+    expect(output).not.toContain("startup-secret");
+  });
+
+  it("suppresses aborted model refresh results", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [] }));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh: vi.fn().mockResolvedValue({
+          errors: new Map([["litellm", new Error("cancelled")]]),
+          aborted: true,
+        }),
+      },
+    };
+
+    await startSession(pi, context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("waits for automatic MCP discovery before the first agent turn", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    let releaseCatalog!: (response: Response) => void;
+    const catalog = new Promise<Response>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/mcp-rest/tools/list")) return catalog;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const auth = { auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" } };
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => auth,
+        getProvider: () => pi.providers[0],
+        refresh: vi.fn().mockResolvedValue({ errors: new Map(), aborted: false }),
+      },
+    };
+
+    await startSession(pi, context);
+    let firstTurnReady = false;
+    const firstTurn = pi.handlers
+      .get("before_agent_start")?.[0]?.({ systemPrompt: "Base prompt" }, context)
+      .then(() => {
+        firstTurnReady = true;
+      });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(firstTurnReady).toBe(false);
+
+    releaseCatalog(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "search",
+            inputSchema: { type: "object", properties: {} },
+            mcp_info: { server_name: "enterprise" },
+          },
+        ],
+      }),
+    );
+    await firstTurn;
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_enterprise_search");
+  });
+
+  it("lets the first turn proceed silently after automatic MCP discovery times out", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5";
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ litellm: { skills: { enabled: false } } }));
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh: vi.fn().mockResolvedValue({ errors: new Map(), aborted: false }),
+      },
+    };
+
+    await startSession(pi, context);
+    await expect(
+      pi.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "Base prompt" }, context),
+    ).resolves.toBeUndefined();
+
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("makes MCP tools available even while automatic model refresh is still running", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    let releaseModels!: () => void;
+    const modelRefresh = new Promise<void>((resolve) => {
+      releaseModels = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "enterprise" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh: vi.fn(async () => {
+          await modelRefresh;
+          return { errors: new Map(), aborted: false };
+        }),
+      },
+    };
+
+    await startSession(pi, context);
+    await expect(
+      pi.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "Base prompt" }, context),
+    ).resolves.toBeUndefined();
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_enterprise_search");
+
+    releaseModels();
+  });
+
+  it.each(["1", "true", "TRUE", "yes", "YES"])(
+    "honors PI_OFFLINE=%s during automatic discovery",
+    async (offlineValue) => {
+      const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+      process.env.PI_OFFLINE = offlineValue;
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      const extension = await loadExtension(agentDir);
+      const pi = createPi();
+      await extension(pi);
+      const refresh = vi.fn();
+      const context = {
+        sessionManager: { getSessionFile: () => undefined },
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+          }),
+          refresh,
+        },
+      };
+
+      await startSession(pi, context);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(refresh).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps automatic discovery online with PI_OFFLINE=0", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.PI_OFFLINE = "0";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const refresh = vi.fn().mockResolvedValue({ errors: new Map(), aborted: false });
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "startup-token", baseUrl: "https://litellm.example.com/v1" },
+        }),
+        getProvider: () => pi.providers[0],
+        refresh,
+      },
+    };
+
+    await startSession(pi, context);
+    await pi.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "Base prompt" }, context);
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  it("skips automatic discovery when no LiteLLM auth is configured", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const refresh = vi.fn();
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: { getProviderAuth: async () => undefined, refresh },
+    };
+
+    await startSession(pi, context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_"))).toBe(false);
   });
 
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {
@@ -592,6 +916,7 @@ describe("feature parity", () => {
           sessionManager: {
             getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
           },
+          modelRegistry: { getProviderAuth: async () => undefined, refresh: vi.fn() },
         },
       );
     }
@@ -642,6 +967,7 @@ describe("feature parity", () => {
           sessionManager: {
             getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
           },
+          modelRegistry: { getProviderAuth: async () => undefined, refresh: vi.fn() },
         },
       );
     }
@@ -898,7 +1224,13 @@ describe("feature parity", () => {
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+      await handler(
+        { reason: "start" },
+        {
+          sessionManager: { getSessionFile: () => undefined },
+          modelRegistry: { getProviderAuth: async () => undefined, refresh: vi.fn() },
+        },
+      );
     }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];

@@ -1,6 +1,6 @@
 # pi-provider-litellm
 
-LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.81.0+ is required.
+LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.84.1+ is required.
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is
 `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports
@@ -198,12 +198,14 @@ remain conservative until the catalog is updated.
 | `LITELLM_GCLOUD_TOKEN_AUTH`      | unset                   | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations.                                                                                                                 |
 | `LITELLM_OFFLINE`                | unset                   | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only                                                                                                                                                     |
+| `PI_OFFLINE`                     | unset                   | Pi offline mode (`1`, `true`, or `yes`, case-insensitive) disables automatic and explicit model/MCP discovery plus skill discovery                                                                                                                       |
 | `LITELLM_DISCOVERY_TIMEOUT_MS`   | `5000`                  | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery                                                                                                                                                                 |
 | `LITELLM_VERBOSE_DISCOVERY`      | unset                   | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default                                                                                                                               |
-| `LITELLM_MODELS_DEV`             | enabled                 | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; discovery still uses Pi catalog metadata and defaults                                                                                                 |
+| `LITELLM_MODELS_DEV`             | enabled                 | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; discovery still uses Pi catalog metadata and defaults                                                                                                    |
 
-`LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base
-URL or API key settings required to send requests when you are not using `/login litellm`.
+`LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. Pi's `--offline` option sets
+`PI_OFFLINE` and disables automatic and explicit model/MCP discovery plus skill discovery. Neither replaces the base URL
+or API key settings required to send requests when you are not using `/login litellm`.
 
 Models.dev metadata is cached in `litellm-models-dev.json` under the Pi agent directory for 28 days. Fresh data avoids
 the public request; stale data is used immediately while one background refresh updates the cache. Set
@@ -234,9 +236,10 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`. Names over 64 characters are
 truncated with a stable hash suffix so tools with the same truncated prefix stay distinct. Names that collide after
 sanitization also receive hash suffixes. Tools use simple JSON Schema parameters mapped to Pi/TypeBox parameters.
-Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after
-`/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient
-failures once.
+Complex schemas fall back to a single `args` object. When a Pi session starts with configured LiteLLM auth, the
+extension refreshes models in the background and waits at most `LITELLM_DISCOVERY_TIMEOUT_MS` for MCP registration
+before the first agent turn; the background model refresh shares that deadline. `/model` and `/login litellm` also
+refresh the MCP catalog. MCP tools run in Pi's parallel tool mode and retry transient failures once.
 
 ## LiteLLM Skill Hub
 
@@ -300,8 +303,8 @@ Legacy `litellm-models*.json` files are ignored and are not deleted.
 
 A route's output-token cap comes from `/model/info` `max_output_tokens` first; when LiteLLM leaves it null, the
 extension falls back to the `base_model` output limit on models.dev and the Pi catalog (models.dev matched across
-providers, modal value wins), then the route id's own catalog entries, then a 16384 default. Router metadata always
-wins when present.
+providers, modal value wins), then the route id's own catalog entries, then a 16384 default. Router metadata always wins
+when present.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
@@ -317,7 +320,7 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | No models with gcloud auth                                     | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file                                                            |
 | Enterprise SSO login shows "virtual key generation failed"     | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI                                                                                                                     |
-| MCP tools not showing                                          | Verify the proxy exposes `/mcp-rest/tools/list` and open `/model` after fixing the proxy                                                                                                        |
+| MCP tools not showing                                          | Verify LiteLLM auth is configured and the proxy exposes `/mcp-rest/tools/list`; restart Pi or open `/model` after fixing the proxy                                                              |
 | Skills not affecting prompts                                   | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills                                                                                             |
 
 ## License

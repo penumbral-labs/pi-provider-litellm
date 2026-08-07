@@ -25,16 +25,16 @@ describe("pi package compatibility", () => {
       with: { type: "json" },
     });
 
-    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.0");
-    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.0");
-    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.81.1");
-    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.81.1");
+    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.84.1");
+    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.84.1");
+    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.84.1");
+    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.84.1");
   });
 
   it("documents native Provider model persistence", async () => {
     const readme = await readFile("README.md", "utf8");
 
-    expect(readme).toContain("Pi 0.81.0+ is required");
+    expect(readme).toContain("Pi 0.84.1+ is required");
     expect(readme).toContain("native Provider");
     expect(readme).toContain("run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`");
     expect(readme).toMatch(/With\s+`\/login litellm`, choose `Sign in with an API key` directly/);
@@ -65,9 +65,11 @@ describe("dependency security overrides", () => {
     const fastXmlBuilderCopies = Object.values(copiesOf("fast-xml-builder"));
     expect(fastXmlBuilderCopies).not.toHaveLength(0);
     expect(fastXmlBuilderCopies.every((version) => version === "1.2.0")).toBe(true);
-    // Pi 0.81.1 no longer ships a nested protobufjs copy.
+    // Pi's nested @google/genai requires protobufjs 7.x; the project override still pins the root security version.
     expect(copiesOf("protobufjs")).toEqual({
+      "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs": "7.6.5",
       "node_modules/protobufjs": "8.7.1",
     });
+    expect(copiesOf("protobufjs")["node_modules/protobufjs"]).toBe("8.7.1");
   });
 });

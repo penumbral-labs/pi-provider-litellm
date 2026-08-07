@@ -38,7 +38,8 @@ describe("native provider abort compatibility", () => {
 
     const message = await models.streamSimple(model, { messages: [user("Stop")] }, { signal }).result();
 
-    expect(message.stopReason).toBe("aborted");
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toBe("This operation was aborted");
     expect(message.content).toEqual([]);
     expect(message.usage.totalTokens).toBe(0);
   });

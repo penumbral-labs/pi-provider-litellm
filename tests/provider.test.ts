@@ -2,8 +2,8 @@ import type {
   Api,
   Credential,
   Model,
+  ModelsStoreEntry,
   ProviderAuth,
-  ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
@@ -60,21 +60,34 @@ function native(id: string): Model<"anthropic-messages" | "openai-completions" |
 }
 
 function store(initial?: readonly Model<Api>[]) {
-  let entry = initial ? { models: initial, checkedAt: 1 } : undefined;
-  const value: ProviderModelsStore = {
+  let entry: ModelsStoreEntry | undefined = initial ? { models: initial, checkedAt: 1 } : undefined;
+  return {
+    get entry() {
+      return entry;
+    },
     read: vi.fn(async () => entry),
-    write: vi.fn(async (next) => {
+    write: vi.fn(async (next: ModelsStoreEntry) => {
       entry = next;
     }),
     delete: vi.fn(async () => {
       entry = undefined;
     }),
   };
-  return value;
 }
 
-function context(modelsStore: ProviderModelsStore, allowNetwork: boolean): RefreshModelsContext {
-  return { store: modelsStore, allowNetwork, credential };
+function context(modelsStore: ReturnType<typeof store>, allowNetwork: boolean): RefreshModelsContext {
+  return {
+    allowNetwork,
+    credential,
+    signal: new AbortController().signal,
+    stored: modelsStore.entry,
+    publish: async ({ persist, update }) => {
+      if (persist === null) await modelsStore.delete();
+      else if (persist) await modelsStore.write(persist);
+      update?.();
+      return true;
+    },
+  };
 }
 
 function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[0]> = {}) {
@@ -135,13 +148,13 @@ describe("createLiteLLMProvider", () => {
     vi.clearAllMocks();
   });
 
-  it("delegates native store restoration directly to createProvider", async () => {
+  it("restores the native stored snapshot through createProvider", async () => {
     const modelsStore = store([native("stored")]);
     const value = controller();
 
     await value.refreshModels?.(context(modelsStore, false));
 
-    expect(modelsStore.read).toHaveBeenCalledOnce();
+    expect(value.getModels()).toEqual([native("stored")]);
   });
 
   it("restores stored models offline without discovery", async () => {
@@ -231,7 +244,7 @@ describe("createLiteLLMProvider", () => {
     expect(modelsStore.write).not.toHaveBeenCalled();
   });
 
-  it("shares one discovery across concurrent refreshes", async () => {
+  it("supports concurrent provider refresh calls", async () => {
     let release!: (result: DiscoveryResult) => void;
     const pending = new Promise<DiscoveryResult>((resolve) => {
       release = resolve;
@@ -245,7 +258,7 @@ describe("createLiteLLMProvider", () => {
     release(discovered("fresh"));
     await Promise.all([first, second]);
 
-    expect(discover).toHaveBeenCalledOnce();
+    expect(discover).toHaveBeenCalledTimes(2);
   });
 
   it("routes Responses models through the Responses API", async () => {
