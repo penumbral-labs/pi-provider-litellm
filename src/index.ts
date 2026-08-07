@@ -739,6 +739,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const providerNames = new Set(definitions.map((definition) => definition.name));
 
   function discoveryDisabledReason(): string | null {
+    if (/^(?:1|true|yes)$/i.test(process.env.PI_OFFLINE ?? "")) return "PI_OFFLINE=1";
     if (isOffline()) return `${ENV_OFFLINE}=1`;
     if (getDiscoveryTimeoutMs() === 0) return `${ENV_TIMEOUT}=0`;
     return null;
@@ -773,6 +774,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
+  let automaticDiscovery: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
@@ -883,19 +885,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           : credential.type === "api_key"
             ? credential.env?.[ENV_BASE_URL]
             : undefined,
-      discover: async (credential, signal) => {
+      discover: async (credential) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
         const auth = await authForCredential(definition, credential);
         const result = await discoverModels(auth.baseUrl, auth.apiKey, {
           ...getModelsDevDiscoveryOptions(),
           timeoutMs: getDiscoveryTimeoutMs(),
-          signal,
           headers: auth.headers,
           silent: !isVerboseDiscovery(),
           onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
         });
-        signal?.throwIfAborted();
         return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
       },
     });
@@ -928,9 +928,38 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
+  async function discoverRouterCapabilities(ctx: ExtensionContext): Promise<void> {
+    if (discoveryDisabledReason()) return;
+    const auth = await getRuntimeAuth(ctx);
+    if (!auth) return;
+    defaultRuntimeAuth = auth;
+
+    const signal = AbortSignal.timeout(getDiscoveryTimeoutMs());
+    void ctx.modelRegistry
+      .refresh({ allowNetwork: true, providers: [PROVIDER_NAME], signal })
+      .then((result) => {
+        const error = result.errors.get(PROVIDER_NAME);
+        if (result.aborted || signal.aborted || !error) return;
+        process.stderr.write(`LiteLLM (${PROVIDER_NAME}): automatic model discovery failed (${error.message}).\n`);
+      })
+      .catch((error) => {
+        if (signal.aborted) return;
+        process.stderr.write(
+          `LiteLLM (${PROVIDER_NAME}): automatic model discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
+        );
+      });
+    await registerMcpTools(auth, signal);
+  }
+
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {
     sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+    automaticDiscovery = discoverRouterCapabilities(ctx).catch((error) => {
+      if (error?.name === "AbortError" || error?.name === "TimeoutError") return;
+      process.stderr.write(
+        `LiteLLM (${PROVIDER_NAME}): automatic discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
+      );
+    });
   });
 
   pi.on("before_provider_request", (event, ctx) => {
@@ -947,6 +976,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    await automaticDiscovery;
     if (!skillsEnabled || discoveryDisabledReason()) return;
     const auth = await getRuntimeAuth(ctx);
     if (!auth) {

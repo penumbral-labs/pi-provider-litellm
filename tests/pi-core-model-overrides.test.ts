@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
 
@@ -33,7 +33,63 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe("Pi core model overrides", () => {
+describe("Pi core model integration", () => {
+  it("runs startup discovery through a real ModelRegistry", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-startup-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ litellm: { skills: { enabled: false } } }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "startup-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "startup" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: {
+          type: "api_key",
+          key: "env-key",
+          env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+        },
+      }),
+    );
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: null,
+      allowModelNetwork: false,
+    });
+    const pi = createPi();
+    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
+    await (await loadExtension(agentDir))(pi);
+    const sessionStart = pi.handlers.get("session_start")?.[0];
+    expect(sessionStart).toBeTypeOf("function");
+    const context = {
+      sessionManager: { getSessionFile: () => undefined },
+      modelRegistry: new ModelRegistry(runtime),
+    };
+
+    await sessionStart!({ reason: "startup" }, context);
+    await pi.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "Base prompt" }, context);
+    await vi.waitFor(() => expect(runtime.getModel("litellm", "startup-model")).toBeDefined());
+
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_startup_search");
+  });
+
   it("applies reloaded overrides to cached and refreshed LiteLLM models", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-overrides-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
@@ -86,7 +142,6 @@ describe("Pi core model overrides", () => {
     expect(runtime.getModel("litellm", "cached-model")).toMatchObject({ name: "Cached override", contextWindow: 321 });
 
     await writeModelsConfig(agentDir, "refreshed-model", "Refreshed override");
-    await runtime.reloadConfig();
     await runtime.refresh({ allowNetwork: true, force: true });
 
     expect(runtime.getModel("litellm", "refreshed-model")).toMatchObject({

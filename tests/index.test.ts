@@ -8,8 +8,8 @@ import {
   createModels,
   InMemoryCredentialStore,
   InMemoryModelsStore,
+  type ModelsStoreEntry,
   type Provider,
-  type ProviderModelsStore,
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -72,12 +72,17 @@ async function readHelperCount(agentDir: string): Promise<number> {
   }
 }
 
-function createModelsStore(models: readonly any[] = []): ProviderModelsStore {
-  let entry: Awaited<ReturnType<ProviderModelsStore["read"]>> =
-    models.length > 0 ? { models, checkedAt: Date.now() } : undefined;
+type TestProviderModelsStore = {
+  read(): Promise<ModelsStoreEntry | undefined>;
+  write(entry: ModelsStoreEntry): Promise<void>;
+  delete(): Promise<void>;
+};
+
+function createModelsStore(models: readonly any[] = []): TestProviderModelsStore {
+  let entry: ModelsStoreEntry | undefined = models.length > 0 ? { models, checkedAt: Date.now() } : undefined;
   return {
     read: async () => entry,
-    write: async (next) => {
+    write: async (next: ModelsStoreEntry) => {
       entry = next;
     },
     delete: async () => {
@@ -88,15 +93,30 @@ function createModelsStore(models: readonly any[] = []): ProviderModelsStore {
 
 async function refreshProvider(
   provider: Provider,
-  options: Omit<RefreshModelsContext, "store"> & { store?: ProviderModelsStore },
+  options: Omit<RefreshModelsContext, "stored" | "publish" | "signal"> & {
+    signal?: AbortSignal;
+    store?: TestProviderModelsStore;
+  },
 ): Promise<readonly unknown[]> {
-  await provider.refreshModels?.({ ...options, store: options.store ?? createModelsStore() });
+  const { store = createModelsStore(), signal = new AbortController().signal, ...context } = options;
+  await provider.refreshModels?.({
+    ...context,
+    signal,
+    stored: await store.read(),
+    publish: async ({ persist, update }) => {
+      if (persist === null) await store.delete();
+      else if (persist) await store.write(persist);
+      update?.();
+      return true;
+    },
+  });
   return provider.getModels();
 }
 
 function resolveApiKey(provider: Provider, credential?: Extract<Credential, { type: "api_key" }>) {
   return provider.auth.apiKey?.resolve({
     credential,
+    signal: new AbortController().signal,
     ctx: {
       env: async (name) => process.env[name],
       fileExists: async () => false,
@@ -106,6 +126,7 @@ function resolveApiKey(provider: Provider, credential?: Extract<Credential, { ty
 
 function resolveApiKeyWithEnv(provider: Provider, env: Record<string, string | undefined>) {
   return provider.auth.apiKey?.resolve({
+    signal: new AbortController().signal,
     ctx: { env: async (name) => env[name], fileExists: async () => false },
   });
 }
@@ -113,8 +134,8 @@ function resolveApiKeyWithEnv(provider: Provider, env: Record<string, string | u
 function interaction(
   prompt: AuthInteraction["prompt"],
   notify: AuthInteraction["notify"] = vi.fn(),
-  signal?: AbortSignal,
-): AuthInteraction {
+  signal: AbortSignal = new AbortController().signal,
+): AuthInteraction & { signal: AbortSignal } {
   return { prompt, notify, signal };
 }
 
@@ -464,6 +485,7 @@ describe("extension startup", () => {
     await extension(pi);
 
     const result = await pi.providers[0]?.auth.apiKey?.check?.({
+      signal: new AbortController().signal,
       ctx: { env: async (name) => process.env[name], fileExists: async () => false },
     });
 
@@ -647,7 +669,13 @@ describe("extension startup", () => {
     vi.mocked(Date.now).mockReturnValue(loginTime + 25 * 60 * 60 * 1000);
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+      await handler(
+        { reason: "start" },
+        {
+          sessionManager: { getSessionFile: () => undefined },
+          modelRegistry: { getProviderAuth: async () => undefined, refresh: vi.fn() },
+        },
+      );
     }
 
     expect(callCount).toBe(0);
@@ -714,7 +742,7 @@ describe("extension startup", () => {
       baseUrl: "https://litellm.example.com",
     };
 
-    const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential);
+    const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential, new AbortController().signal);
     expect(await readHelperCount(agentDir)).toBe(1);
     await expect(pi.providers[0]?.auth.oauth?.toAuth(refreshed!)).resolves.toMatchObject({
       apiKey: "refreshed-token",
@@ -859,7 +887,7 @@ describe("extension startup", () => {
       type: "oauth" as const,
       access: "oauth-token",
       refresh: `!${helperPath}`,
-      expires: Date.now() + 60_000,
+      expires: Date.now() + 10 * 60_000,
       baseUrl: "https://credential.example.com/v1",
     };
     const credentials = new InMemoryCredentialStore();
@@ -1183,7 +1211,7 @@ describe("extension startup", () => {
       signal: new AbortController().signal,
     });
 
-    await expect(pi.providers[0]?.auth.oauth?.refresh(credential!)).rejects.toThrow(
+    await expect(pi.providers[0]?.auth.oauth?.refresh(credential!, new AbortController().signal)).rejects.toThrow(
       "LiteLLM credential cannot be refreshed; run /login litellm again",
     );
   });

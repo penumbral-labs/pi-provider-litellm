@@ -422,15 +422,7 @@ describe("discoverModels via /model/info", () => {
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     });
     expect(result.models[0]?.api).toBe("openai-completions");
-    expect(supportedThinkingLevels(result.models[0]!)).toEqual([
-      "off",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-    ]);
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
   });
 
   it("narrows catalog extended-effort levels to authoritative /model/info capabilities", async () => {
@@ -676,7 +668,7 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
   });
 
-  it("keeps explicit granular Moonshot catalog maps instead of treating them as boolean Kimi", async () => {
+  it("normalizes bare catalog-resolved kimi-k3 reasoning to off and high", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [{ model_name: "kimi-k3", model_info: { mode: "chat", supports_reasoning: true } }],
@@ -688,9 +680,36 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({
       id: "kimi-k3",
       reasoning: true,
-      thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
     });
-    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["low", "high", "max"]);
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("keeps explicit granular Moonshot catalog maps instead of treating them as boolean Kimi", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "baseten/moonshotai/Kimi-K3", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "baseten/moonshotai/Kimi-K3",
+      reasoning: true,
+      thinkingLevelMap: {
+        off: "none",
+        minimal: null,
+        low: "low",
+        medium: null,
+        high: "high",
+        xhigh: null,
+        max: "max",
+      },
+      compat: expect.objectContaining({ thinkingFormat: "openai", supportsReasoningEffort: true }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "low", "high", "max"]);
   });
 
   it("does not advertise speculative thinking levels for unknown /model/info reasoning models", async () => {

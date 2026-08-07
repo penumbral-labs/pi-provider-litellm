@@ -1,11 +1,14 @@
 import type {
   Api,
   Credential,
+  CredentialStore,
   Model,
+  ModelsStore,
+  ModelsStoreEntry,
   ProviderAuth,
-  ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveredModel, DiscoveryResult } from "../src/types.js";
@@ -60,21 +63,34 @@ function native(id: string): Model<"anthropic-messages" | "openai-completions" |
 }
 
 function store(initial?: readonly Model<Api>[]) {
-  let entry = initial ? { models: initial, checkedAt: 1 } : undefined;
-  const value: ProviderModelsStore = {
+  let entry: ModelsStoreEntry | undefined = initial ? { models: initial, checkedAt: 1 } : undefined;
+  return {
+    get entry() {
+      return entry;
+    },
     read: vi.fn(async () => entry),
-    write: vi.fn(async (next) => {
+    write: vi.fn(async (next: ModelsStoreEntry) => {
       entry = next;
     }),
     delete: vi.fn(async () => {
       entry = undefined;
     }),
   };
-  return value;
 }
 
-function context(modelsStore: ProviderModelsStore, allowNetwork: boolean): RefreshModelsContext {
-  return { store: modelsStore, allowNetwork, credential };
+function context(modelsStore: ReturnType<typeof store>, allowNetwork: boolean): RefreshModelsContext {
+  return {
+    allowNetwork,
+    credential,
+    signal: new AbortController().signal,
+    stored: modelsStore.entry,
+    publish: async ({ persist, update }) => {
+      if (persist === null) await modelsStore.delete();
+      else if (persist) await modelsStore.write(persist);
+      update?.();
+      return true;
+    },
+  };
 }
 
 function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[0]> = {}) {
@@ -86,6 +102,25 @@ function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[
     discover: vi.fn(async () => discovered("fresh")),
     ...overrides,
   });
+}
+
+async function runtimeWithDiscovery(discover: () => Promise<DiscoveryResult>) {
+  const credentials: CredentialStore = {
+    read: async () => credential,
+    list: async () => [{ providerId: "litellm", type: "api_key" }],
+    modify: async (_providerId, update) => update(credential),
+    delete: async () => {},
+  };
+  const entries = new Map<string, ModelsStoreEntry>([["litellm", { models: [native("old")], checkedAt: 1 }]]);
+  const modelsStore: ModelsStore = {
+    read: async (providerId) => entries.get(providerId),
+    write: async (providerId, entry) => void entries.set(providerId, entry),
+    delete: async (providerId) => void entries.delete(providerId),
+  };
+  const runtime = await ModelRuntime.create({ credentials, modelsStore, modelsPath: null, refreshOnCreate: false });
+  runtime.registerNativeProvider(controller({ discover }));
+  await runtime.refresh({ providers: ["litellm"], allowNetwork: false });
+  return { entries, runtime };
 }
 
 describe("toNativeModels", () => {
@@ -135,13 +170,13 @@ describe("createLiteLLMProvider", () => {
     vi.clearAllMocks();
   });
 
-  it("delegates native store restoration directly to createProvider", async () => {
+  it("restores the native stored snapshot through createProvider", async () => {
     const modelsStore = store([native("stored")]);
     const value = controller();
 
     await value.refreshModels?.(context(modelsStore, false));
 
-    expect(modelsStore.read).toHaveBeenCalledOnce();
+    expect(value.getModels()).toEqual([native("stored")]);
   });
 
   it("restores stored models offline without discovery", async () => {
@@ -231,21 +266,70 @@ describe("createLiteLLMProvider", () => {
     expect(modelsStore.write).not.toHaveBeenCalled();
   });
 
-  it("shares one discovery across concurrent refreshes", async () => {
+  it("coalesces discovery when ModelRuntime supersedes an overlapping refresh", async () => {
     let release!: (result: DiscoveryResult) => void;
+    let markStarted!: () => void;
     const pending = new Promise<DiscoveryResult>((resolve) => {
       release = resolve;
     });
-    const discover = vi.fn(() => pending);
-    const modelsStore = store([native("old")]);
-    const value = controller({ discover });
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const discover = vi.fn(() => {
+      markStarted();
+      return pending;
+    });
+    const { entries, runtime } = await runtimeWithDiscovery(discover);
 
-    const first = value.refreshModels?.(context(modelsStore, true));
-    const second = value.refreshModels?.(context(modelsStore, true));
+    expect(runtime.getModel("litellm", "old")).toEqual(native("old"));
+    const first = runtime.refresh({ providers: ["litellm"], allowNetwork: true });
+    await started;
+    const second = runtime.refresh({ providers: ["litellm"], allowNetwork: true });
+    const superseded = await first;
+
+    expect(superseded.errors).toEqual(new Map());
+    expect(runtime.getModel("litellm", "old")).toEqual(native("old"));
+    expect(entries.get("litellm")?.models).toEqual([native("old")]);
+
     release(discovered("fresh"));
-    await Promise.all([first, second]);
+    const completed = await second;
 
     expect(discover).toHaveBeenCalledOnce();
+    expect(completed).toMatchObject({ aborted: false, errors: new Map() });
+    expect(runtime.getModel("litellm", "old")).toBeUndefined();
+    expect(runtime.getModel("litellm", "fresh")).toEqual(native("fresh"));
+    expect(entries.get("litellm")?.models).toEqual([native("fresh")]);
+
+    await runtime.refresh({ providers: ["litellm"], allowNetwork: true });
+    expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a shared discovery rejection only to the surviving refresh", async () => {
+    let rejectDiscovery!: (error: Error) => void;
+    let markStarted!: () => void;
+    const pending = new Promise<DiscoveryResult>((_resolve, reject) => {
+      rejectDiscovery = reject;
+    });
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const discover = vi.fn(() => {
+      markStarted();
+      return pending;
+    });
+    const { runtime } = await runtimeWithDiscovery(discover);
+
+    const first = runtime.refresh({ providers: ["litellm"], allowNetwork: true });
+    await started;
+    const second = runtime.refresh({ providers: ["litellm"], allowNetwork: true });
+    const superseded = await first;
+    rejectDiscovery(new Error("shared discovery failed"));
+    const completed = await second;
+
+    expect(discover).toHaveBeenCalledOnce();
+    expect(superseded.errors).toEqual(new Map());
+    expect(completed.errors.get("litellm")).toMatchObject({ message: "shared discovery failed" });
+    expect(runtime.getModel("litellm", "old")).toEqual(native("old"));
   });
 
   it("routes Responses models through the Responses API", async () => {
