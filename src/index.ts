@@ -885,19 +885,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           : credential.type === "api_key"
             ? credential.env?.[ENV_BASE_URL]
             : undefined,
-      discover: async (credential, signal) => {
+      discover: async (credential) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
         const auth = await authForCredential(definition, credential);
         const result = await discoverModels(auth.baseUrl, auth.apiKey, {
           ...getModelsDevDiscoveryOptions(),
           timeoutMs: getDiscoveryTimeoutMs(),
-          signal,
           headers: auth.headers,
           silent: !isVerboseDiscovery(),
           onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
         });
-        signal?.throwIfAborted();
         return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
       },
     });

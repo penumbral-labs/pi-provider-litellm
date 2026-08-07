@@ -14,7 +14,7 @@ export type LiteLLMProviderOptions = {
   baseUrl: string;
   auth: ProviderAuth;
   credentialBaseUrl?: (credential: Credential) => string | undefined;
-  discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
+  discover(credential: Credential): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
 export function toNativeModels(
@@ -29,7 +29,26 @@ export function toNativeModels(
   }));
 }
 
+function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve(undefined);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
+  let discovery: Promise<DiscoveryResult & { baseUrl?: string }> | undefined;
   return createProvider<LiteLLMApi>({
     id: options.id,
     name: options.name,
@@ -38,8 +57,15 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     models: [],
     async fetchModels(context) {
       if (!context.credential) throw new Error("LiteLLM model discovery requires a credential");
-      const result = await options.discover(context.credential, context.signal);
-      return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models);
+      if (!discovery) {
+        const current = options.discover(context.credential);
+        const tracked = current.finally(() => {
+          if (discovery === tracked) discovery = undefined;
+        });
+        discovery = tracked;
+      }
+      const result = await waitFor(discovery, context.signal);
+      return result ? toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models) : [];
     },
     filterModels(models, credential) {
       const baseUrl = credential && options.credentialBaseUrl?.(credential);
