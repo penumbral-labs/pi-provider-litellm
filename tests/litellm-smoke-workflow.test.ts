@@ -84,13 +84,16 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC"');
     expect(workflow).toContain('grep -F "Anthropic mock response"');
-    // The Messages assertion must stay scoped to the window around Pi's own request:
-    // the smoke runner posts to all three endpoints itself, so a whole-log grep would
-    // pass even with the extension's native Messages path broken.
+    // Endpoint coverage is proven from captured request logs, not response text.
+    expect(workflow).toContain("Assert captured LiteLLM endpoint logs");
+    expect(workflow).toContain('POST /v1/chat/completions HTTP/1.1" 200');
+    expect(workflow).toContain('POST /v1/responses HTTP/1.1" 200');
+    // The smoke runner posts to /v1/messages itself, so coverage alone cannot prove the
+    // extension's own path: it is pinned by a scoped grep plus an occurrence count.
     expect(workflow).toContain('messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"');
     expect(workflow).toContain('docker logs --since "$messages_log_since" litellm-smoke');
     expect(workflow).toContain('POST /v1/messages HTTP/1.1" 200');
-    expect(workflow).not.toContain("Assert captured LiteLLM endpoint logs");
+    expect(workflow).toContain('test "$messages_requests" -ge 2');
 
     expect(workflow).not.toContain("models: read");
     expect(workflow).not.toContain("GH_MODELS_SMOKE_MODEL");
@@ -207,7 +210,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("route-distinct Chat, Responses, native Messages, and mixed-deployment models");
     expect(readme).toContain("x-litellm-response-cost");
     expect(readme).toContain("asserts each model's expected API");
-    expect(readme).toContain("the Pi CLI's own native Messages request reached `/v1/messages`");
+    expect(readme).toContain("proves endpoint coverage from captured LiteLLM request logs rather than response text");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
     expect(readme).toContain("interactive Pi TUI smoke");

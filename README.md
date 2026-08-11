@@ -227,8 +227,9 @@ The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM 
 route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock.
 The smoke runner discovers those models through LiteLLM, asserts each model's expected API, requires the union of
 `/v1/messages`, `/v1/chat/completions`, and `/v1/responses`, and checks the configured `x-litellm-response-cost`
-expectation. The workflow also asserts that the Pi CLI's own native Messages request reached `/v1/messages`
-successfully. The smoke runner authenticates with `Authorization: Bearer`, so it covers route reachability rather than
+expectation. The workflow also proves endpoint coverage from captured LiteLLM request logs rather than response text, and
+requires at least two `/v1/messages` requests so the Pi CLI's own native Messages request is proven and not merely
+the runner's. The smoke runner authenticates with `Authorization: Bearer`, so it covers route reachability rather than
 the `x-api-key` path the extension uses; that path is covered by the Pi CLI smoke and by wire-compatibility tests.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
