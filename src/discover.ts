@@ -90,7 +90,6 @@ export function buildCompat(
   modelId: string,
   api: DiscoveredModel["api"] = "openai-completions",
 ): DiscoveredModel["compat"] {
-  if (api === "anthropic-messages") return undefined;
   if (api === "openai-responses") return {};
   if (isMoonshotModel(modelId)) {
     return {

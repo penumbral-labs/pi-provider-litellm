@@ -69,7 +69,6 @@ describe("normalizeBaseUrl", () => {
 
 describe("buildCompat", () => {
   it("returns protocol-shaped compatibility metadata", () => {
-    expect(buildCompat("claude-opus", "anthropic-messages")).toBeUndefined();
     expect(buildCompat("openai/gpt-4o", "openai-responses")).toEqual({});
   });
 
