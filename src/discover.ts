@@ -137,10 +137,9 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
 }
 
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
-  // Only unqualified legacy fallback aliases lack source metadata. Qualified
-  // route groups may deliberately carry this conservative shape after reduction.
+  // Reduced deployment groups use a distinct marker; this sentinel remains
+  // exclusive to evidence-free fallback models that may be enriched safely.
   if (
-    model.id.includes("/") ||
     !model.name.endsWith(" (no metadata)") ||
     model.reasoning ||
     model.thinkingLevelMap !== undefined ||
