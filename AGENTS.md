@@ -45,7 +45,7 @@
 - `filterModels` must not throw: pi's `getAvailable()` has no per-provider isolation, so one throw empties every provider's model list. Reject a model by returning a reason and reporting it, never by throwing.
 - The fail-closed host invariant is split deliberately: `src/index.ts` resolves and validates the credential root, `src/provider.ts` compares a model against that root. Both use the shared `isPlaceholderHost`; keep placeholder and scheme rules in those helpers instead of re-deriving them.
 - Keep README's "Model host enforcement" table in sync when changing what hides a model, what a diagnostic says, or which fix resolves it.
-- Guards here have repeatedly survived full mutation with a green suite. When adding or changing one, delete its body and confirm a test fails; if none does, the guard is unpinned no matter how many tests pass.
+- A guard is only pinned if deleting its body fails a test. When adding or changing one, delete the body and confirm a failure; if none appears, the guard is unpinned no matter how many tests pass.
 
 ## Compatibility Rules
 
