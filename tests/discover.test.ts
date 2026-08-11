@@ -952,7 +952,7 @@ describe("discoverModels response-mode models", () => {
     });
   });
 
-  it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
+  it("keeps /health response-mode model_info fallbacks on Chat", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) return jsonResponse(404, {});
@@ -981,7 +981,48 @@ describe("discoverModels response-mode models", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.3-codex-openai",
-      api: "openai-responses",
+      api: "openai-completions",
+      compat: { supportsStore: false },
+    });
+  });
+
+  it.each([
+    ["K2.7 Code", "moonshot/kimi-k2.7-code", ["thinking"]],
+    ["K3", "moonshot/kimi-k3", ["reasoning_effort"]],
+  ])("preserves %s replay compat when /health keeps the reduced model on Chat", async (_name, backend, params) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, { healthy_endpoints: [{ model: "private-reasoning-route", model_id: "uuid-1" }] });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-reasoning-route",
+              litellm_params: { model: backend },
+              model_info: {
+                mode: "chat",
+                litellm_provider: "moonshot",
+                supports_reasoning: true,
+                supported_openai_params: params,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).toMatchObject({
+      id: "private-reasoning-route",
+      api: "openai-completions",
+      compat: { requiresReasoningContentOnAssistantMessages: true },
     });
   });
 

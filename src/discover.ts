@@ -514,11 +514,16 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // `/health` route text is not deployment evidence for request controls.
-  if (model) delete model.thinkingLevelMap;
-  return model;
+  const model = mapFromModelInfo(entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId });
+  // `/health` detail lookups are per deployment, not complete route groups, so they stay on Chat.
+  if (!model) return undefined;
+  if (!entry.model_name) delete model.thinkingLevelMap;
+  if (model.api === "openai-completions") return model;
+  return {
+    ...model,
+    api: "openai-completions",
+    compat: { ...buildCompat(model.id, "openai-completions"), ...model.compat },
+  };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
