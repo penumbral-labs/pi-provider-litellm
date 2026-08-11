@@ -179,7 +179,11 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
+Each discovered tool is registered as a native Pi tool with a deterministic, accepted-character name of at most 64 characters. The name includes the MCP server identity when truncation or collision handling is needed, so tools from different servers do not silently overwrite each other. Exact duplicate identities are registered once.
+
+MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. Discovery accepts at most a 5 MiB response and registers at most 512 tools. Each tool is isolated during normalization: schemas must have an object root, plain-object `properties`, at most 16 levels of nesting, and a serialized size of at most 64 KiB. Invalid tools are skipped without hiding valid siblings. Missing schemas use a synthetic `args` envelope; a real schema property named `args` remains intact. Descriptions are limited to 4 KiB with a truncation marker.
+
+MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once—timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Returned result text is limited to 64 KiB with a truncation marker. Because Pi does not expose tool unregistration, changing MCP tool identities requires restarting Pi to remove stale registrations.
 
 ## LiteLLM Skill Hub
 

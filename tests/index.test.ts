@@ -385,6 +385,46 @@ describe("extension startup", () => {
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
   });
 
+  it("propagates the production refresh signal through MCP discovery", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    const controller = new AbortController();
+    const reason = new Error("refresh cancelled");
+    let mcpStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      mcpStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        mcpStarted();
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const refresh = refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      },
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort(reason);
+
+    await expect(refresh).rejects.toBe(reason);
+  });
+
   it("retains Pi-managed models when discovery fails", async () => {
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
