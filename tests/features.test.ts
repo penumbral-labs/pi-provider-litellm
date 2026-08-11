@@ -875,6 +875,39 @@ describe("feature parity", () => {
     expect(updated).toBeUndefined();
   });
 
+  it("leaves strict-schema tool messages untouched for a Moonshot-looking model carrying no policy", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      {
+        payload: {
+          messages: [
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_1", type: "function", function: { name: "noop", arguments: "{}" } }],
+            },
+            { role: "tool", tool_call_id: "call_1", content: [{ type: "text", text: "tool output" }] },
+          ],
+        },
+      },
+      // Repairable messages and a Kimi-shaped id: only the absent policy stops
+      // the repair, so this fails if the hook ever reads the id again.
+      { model: { provider: "litellm", id: "kimi-k2.6", api: "openai-completions" } },
+    );
+
+    expect(updated).toBeUndefined();
+  });
+
   it("drops reasoning fields for llm-gateway/gpt-5.5 tool requests", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
