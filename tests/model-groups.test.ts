@@ -20,7 +20,7 @@ const catalog = new Map<string, CatalogResolution>([
     {
       provider: "anthropic",
       semanticFamily: "claude",
-      backendIdentity: { semanticFamily: "claude", source: "qualified-model" },
+      backendIdentity: { semanticFamily: "claude" },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -33,7 +33,7 @@ const catalog = new Map<string, CatalogResolution>([
     {
       provider: "amazon-bedrock",
       semanticFamily: "claude",
-      backendIdentity: { semanticFamily: "claude", source: "qualified-model" },
+      backendIdentity: { semanticFamily: "claude" },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,

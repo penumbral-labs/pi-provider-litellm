@@ -638,6 +638,69 @@ describe("discoverModels native Messages selection", () => {
             model_info: { id: "missing-mode", litellm_provider: "anthropic" },
             litellm_params: { model: "anthropic/claude-sonnet-4-6" },
           },
+          {
+            model_name: "bedrock-nova",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "bedrock-converse-llama",
+            model_info: { id: "llama", mode: "chat", litellm_provider: "bedrock_converse" },
+            litellm_params: { model: "bedrock/meta.llama3-3-70b-instruct-v1:0" },
+          },
+          {
+            model_name: "bedrock-mistral",
+            model_info: { id: "mistral", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/mistral.mistral-large-2402-v1:0" },
+          },
+          {
+            model_name: "bedrock-titan",
+            model_info: { id: "titan", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.titan-text-premier-v1:0" },
+          },
+          {
+            model_name: "bedrock-cohere",
+            model_info: { id: "cohere", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/cohere.command-r-plus-v1:0" },
+          },
+          {
+            model_name: "vertex-llama",
+            model_info: { id: "vertex-llama", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/meta/llama-3.1-405b-instruct-maas" },
+          },
+          {
+            model_name: "vertex-mistral",
+            model_info: { id: "vertex-mistral", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/mistral-large@2411" },
+          },
+          {
+            model_name: "redacted-bedrock",
+            model_info: { id: "redacted-bedrock", mode: "chat", litellm_provider: "bedrock" },
+          },
+          {
+            model_name: "redacted-anthropic",
+            model_info: { id: "redacted-anthropic", mode: "chat", litellm_provider: "anthropic" },
+          },
+          {
+            model_name: "mixed-claude-nova-forward",
+            model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "mixed-claude-nova-forward",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "mixed-claude-nova-reverse",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "mixed-claude-nova-reverse",
+            model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
         ],
       }),
     );
@@ -657,6 +720,17 @@ describe("discoverModels native Messages selection", () => {
       ["vertex-claude", "anthropic-messages"],
       ["custom-claude", "openai-completions"],
       ["missing-mode-claude", "openai-completions"],
+      ["bedrock-nova", "openai-completions"],
+      ["bedrock-converse-llama", "openai-completions"],
+      ["bedrock-mistral", "openai-completions"],
+      ["bedrock-titan", "openai-completions"],
+      ["bedrock-cohere", "openai-completions"],
+      ["vertex-llama", "openai-completions"],
+      ["vertex-mistral", "openai-completions"],
+      ["redacted-bedrock", "openai-completions"],
+      ["redacted-anthropic", "openai-completions"],
+      ["mixed-claude-nova-forward", "openai-completions"],
+      ["mixed-claude-nova-reverse", "openai-completions"],
     ]);
     expect(result.models[0]?.compat).toBeUndefined();
   });
@@ -771,6 +845,46 @@ describe("discoverModels response-mode models", () => {
     expect(result.source).toBe("health");
     expect(result.models).toHaveLength(1);
     expect(result.models[0]?.api).toBe("openai-completions");
+  });
+
+  it.each([
+    ["K2.7 Code", "moonshot/kimi-k2.7-code", ["thinking"]],
+    ["K3", "moonshot/kimi-k3", ["reasoning_effort"]],
+  ])("preserves %s replay compat when /health keeps the reduced model on Chat", async (_name, backend, params) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, { healthy_endpoints: [{ model: "private-reasoning-route", model_id: "uuid-1" }] });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-reasoning-route",
+              litellm_params: { model: backend },
+              model_info: {
+                mode: "chat",
+                litellm_provider: "moonshot",
+                supports_reasoning: true,
+                supported_openai_params: params,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).toMatchObject({
+      id: "private-reasoning-route",
+      api: "openai-completions",
+      compat: { requiresReasoningContentOnAssistantMessages: true },
+    });
   });
 
   it("does not derive thinking controls from a health-only route name", async () => {

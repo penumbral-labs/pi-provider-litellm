@@ -7,8 +7,7 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 
 export interface BackendIdentityEvidence {
-  semanticFamily: SemanticFamily;
-  source: "adapter" | "qualified-model";
+  semanticFamily: "claude";
 }
 
 export interface CatalogResolution {
@@ -231,7 +230,6 @@ export function catalogResolution(
   return {
     provider,
     semanticFamily,
-    backendIdentity: semanticFamily ? { semanticFamily, source: "qualified-model" } : undefined,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),

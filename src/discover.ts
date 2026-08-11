@@ -232,16 +232,14 @@ function resolveClaudeBackendIdentity(
   candidates: readonly string[],
 ): CatalogResolution["backendIdentity"] {
   const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
-  if (families.some((family) => family !== "claude")) return undefined;
-  if (adapter) {
-    return CLAUDE_CAPABLE_ADAPTERS.has(adapter) ? { semanticFamily: "claude", source: "adapter" } : undefined;
-  }
+  if (families.length === 0 || families.some((family) => family !== "claude")) return undefined;
+  if (adapter && !CLAUDE_CAPABLE_ADAPTERS.has(adapter)) return undefined;
   const qualifiedClaude = candidates.some((candidate) => {
     if (!candidate.includes("/")) return false;
-    const resolved = resolveCatalogModel(candidate);
-    return resolved !== undefined && semanticFamily(resolved.model.id) === "claude";
+    const prefix = candidate.slice(0, candidate.indexOf("/")).trim().toLowerCase();
+    return adapterCatalogProvider(prefix) !== undefined && semanticFamily(candidate) === "claude";
   });
-  return qualifiedClaude ? { semanticFamily: "claude", source: "qualified-model" } : undefined;
+  return qualifiedClaude ? { semanticFamily: "claude" } : undefined;
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
@@ -263,7 +261,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     }
   }
   if (family) return { semanticFamily: family, backendIdentity };
-  return backendIdentity ? { semanticFamily: "claude", backendIdentity } : undefined;
+  return undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -484,10 +482,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
     if (!catalog) return undefined;
-    const metadata = catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model);
-    // Public route aliases can enrich catalog metadata, but are not backend identity evidence.
-    delete metadata.backendIdentity;
-    return metadata;
+    return catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model);
   });
   if (!reduced) return undefined;
   const incompleteMetadataName =
@@ -515,8 +510,10 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // `/health` detail lookups are per deployment, not complete route groups, so they can never select Messages.
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
-  const semantic = model.api === "anthropic-messages" ? "claude" : undefined;
-  return { ...model, api: "openai-completions", compat: buildCompat(model.id, "openai-completions", semantic) };
+  if (model.api === "anthropic-messages") {
+    return { ...model, api: "openai-completions", compat: buildCompat(model.id, "openai-completions", "claude") };
+  }
+  return { ...model, api: "openai-completions" };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {

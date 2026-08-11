@@ -145,13 +145,16 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 
 ## Model transport
 
-A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment has non-conflicting
-Claude-family backend evidence. Mixed, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit
-Responses mode takes precedence. The underlying catalog/provider identity and pricing are unchanged by this choice.
+A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat
+mode and has strongly qualified Claude family/model evidence. Anthropic-, Bedrock-, or Vertex-capable adapters only
+corroborate that evidence; adapter names alone never select Messages. Mixed, unknown, and fallback-only groups remain on
+Chat Completions; unanimous explicit Responses mode takes precedence. The underlying catalog/provider identity and
+pricing are unchanged by this choice.
 
-Native Messages intentionally omits `litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and
-Responses requests. Actual request cost still comes from `x-litellm-response-cost` when LiteLLM returns it; otherwise Pi
-retains the discovered static estimate.
+Native Messages authenticates to LiteLLM with `x-api-key` (not `Authorization: Bearer`) and intentionally omits
+`litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and Responses requests. Actual request
+cost still comes from `x-litellm-response-cost` when LiteLLM returns it; otherwise Pi retains the discovered static
+estimate.
 
 ## Optional environment variables
 

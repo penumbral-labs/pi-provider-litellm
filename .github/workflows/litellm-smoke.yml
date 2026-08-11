@@ -290,7 +290,8 @@ jobs:
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
           grep -F "mock response" /tmp/pi-litellm-response.txt
 
-          # Anthropic-backed route: covers the native Messages serializer through LiteLLM.
+          # Anthropic-backed route: covers the source extension's native Messages serializer through LiteLLM.
+          messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ./node_modules/.bin/pi \
             -e ./dist/index.js \
             --provider litellm \
@@ -299,15 +300,17 @@ jobs:
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
+          docker logs --since "$messages_log_since" litellm-smoke > .tmp/pi-messages.log 2>&1
+          grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/pi-messages.log
 
       - name: Assert captured LiteLLM endpoint logs
         shell: bash
         run: |
           set -euo pipefail
           docker logs litellm-smoke > .tmp/litellm.log 2>&1
-          grep -E 'POST +/v1/messages' .tmp/litellm.log
-          grep -E 'POST +/v1/chat/completions' .tmp/litellm.log
-          grep -E 'POST +/v1/responses' .tmp/litellm.log
+          grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log
+          grep -F 'POST /v1/chat/completions HTTP/1.1" 200' .tmp/litellm.log
+          grep -F 'POST /v1/responses HTTP/1.1" 200' .tmp/litellm.log
 
       - name: Dump LiteLLM logs
         if: failure()

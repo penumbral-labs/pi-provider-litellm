@@ -110,7 +110,6 @@ describe("Anthropic Messages wire compatibility", () => {
     vi.restoreAllMocks();
     vi.resetModules();
     const chat = await createCompatibilityHarness(undefined, { sessionFile });
-    chat.respond(...anthropicTextResponse("unused"));
     chat.respondRaw(
       'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":null}]}\n\n' +
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
