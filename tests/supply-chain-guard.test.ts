@@ -1,9 +1,12 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { checkSupplyChain, parsePackageFiles } from "../scripts/supply-chain-guard.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("supply-chain guard", () => {
   it("parses npm 11 and npm 12 package metadata", () => {
@@ -75,7 +78,7 @@ describe("supply-chain guard", () => {
   });
 
   it("accepts this package policy while keeping the publish build gate", async () => {
-    const result = await checkSupplyChain(process.cwd(), { checkPackageContents: false });
+    const result = await checkSupplyChain(repoRoot, { checkPackageContents: false });
 
     expect(result.errors).toEqual([]);
     expect(result.ok).toBe(true);
@@ -114,10 +117,11 @@ describe("supply-chain guard", () => {
         "cost",
         "discover",
         "gcloud-token",
-        "gcloud-token-cli",
         "index",
         "litellm",
         "mcp-tools",
+        "model-groups",
+        "protocols",
         "provider",
         "skills",
         "types",

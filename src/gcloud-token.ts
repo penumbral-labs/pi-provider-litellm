@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 export const CACHE_TTL_MS = 50 * 60 * 1000;
 export const GCLOUD_TOKEN_CACHE_KEY = "gcloud-adc";
@@ -38,17 +37,6 @@ function isAuthorizedUserCredentials(credentials: GoogleCredentials): credential
 export function isGcloudTokenAuthEnabled(): boolean {
   const raw = process.env.LITELLM_GCLOUD_TOKEN_AUTH;
   return raw !== undefined && raw !== "" && raw !== "0";
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-export function getGcloudTokenCommand(moduleUrl = import.meta.url): string {
-  // Spawn the source entry through plain Node, not Pi's TypeScript loader.
-  // This module must therefore keep built-in-only imports and erasable syntax.
-  const cliUrl = new URL("./gcloud-token-cli.ts", import.meta.url).href;
-  return `!${shellQuote(process.execPath)} --experimental-strip-types ${shellQuote(fileURLToPath(cliUrl))} ${shellQuote(moduleUrl)}`;
 }
 
 function getAdcPath(): string | null {

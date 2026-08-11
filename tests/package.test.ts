@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { checkSupplyChain } from "../scripts/supply-chain-guard.js";
 import { importSpecifiers } from "./import-specifiers.js";
 
 const execFileAsync = promisify(execFile);
@@ -21,13 +22,6 @@ interface PackageManifest {
 interface LoadResult {
   errors: unknown[];
   extensions: unknown[];
-}
-
-async function expectedPackageFiles(): Promise<string[]> {
-  const sourceFiles = (await readdir(join(repoRoot, "src")))
-    .filter((file) => file.endsWith(".ts"))
-    .map((file) => `package/src/${file}`);
-  return ["package/LICENSE", "package/README.md", "package/package.json", ...sourceFiles].sort();
 }
 
 async function loadExtension(entrypoint: string, cwd: string): Promise<LoadResult> {
@@ -53,7 +47,7 @@ describe("package gallery metadata", () => {
   });
 
   it("does not expose the npm badge as gallery media", async () => {
-    const readme = await readFile("README.md", "utf8");
+    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
 
     expect(readme).not.toContain("https://img.shields.io/npm/v/pi-provider-litellm.svg");
   });
@@ -91,7 +85,7 @@ describe("pi package compatibility", () => {
     }
   }, 30_000);
 
-  it("packs only source/docs/license and loads the packed manifest entrypoint", async () => {
+  it("packs, installs, and loads the source package without TypeScript stripping in node_modules", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
     try {
       const { stdout: tarballName } = await execFileAsync(
@@ -107,10 +101,30 @@ describe("pi package compatibility", () => {
       const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as PackageManifest;
       const entrypoint = resolve(packageRoot, manifest.pi.extensions[0]);
       const result = await loadExtension(entrypoint, packageRoot);
+      await execFileAsync("npm", ["init", "--yes"], { cwd: fixture });
+      await execFileAsync(
+        "npm",
+        [
+          "install",
+          "--ignore-scripts",
+          "--no-save",
+          "--install-links",
+          tarballPath,
+          resolve(repoRoot, "node_modules/@earendil-works/pi-ai"),
+          resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent"),
+        ],
+        { cwd: fixture, env: { ...process.env, npm_config_cache: join(fixture, ".npm-cache") } },
+      );
+      const installedEntrypoint = resolve(fixture, "node_modules/pi-provider-litellm", manifest.pi.extensions[0]);
+      const installedResult = await loadExtension(installedEntrypoint, fixture);
 
-      expect(fileList.trim().split("\n").sort()).toEqual(await expectedPackageFiles());
+      const guard = await checkSupplyChain(repoRoot);
+      expect(guard.errors).toEqual([]);
+      expect(fileList.trim().split("\n").sort()).toEqual(guard.packageFiles.map((file) => `package/${file}`).sort());
       expect(result.errors).toEqual([]);
       expect(result.extensions).toHaveLength(1);
+      expect(installedResult.errors).toEqual([]);
+      expect(installedResult.extensions).toHaveLength(1);
     } finally {
       await rm(fixture, { force: true, recursive: true });
     }
@@ -154,7 +168,7 @@ describe("pi package compatibility", () => {
   });
 
   it("documents native Provider model persistence", async () => {
-    const readme = await readFile("README.md", "utf8");
+    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
 
     expect(readme).toContain("Pi 0.81.0+ is required");
     expect(readme).toContain("native Provider");
@@ -171,7 +185,7 @@ describe("pi package compatibility", () => {
 
 describe("dependency security overrides", () => {
   it("keeps vulnerable transitive dependencies above alerted ranges", async () => {
-    const lockfile = JSON.parse(await readFile("package-lock.json", "utf8")) as {
+    const lockfile = JSON.parse(await readFile(join(repoRoot, "package-lock.json"), "utf8")) as {
       packages?: Record<string, { version?: string }>;
     };
 

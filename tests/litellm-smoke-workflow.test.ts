@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -35,7 +35,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
-    expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
+    expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock");
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
@@ -45,6 +45,12 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
+    expect(workflow).toContain("Capture deployment-group model info");
+    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
+    expect(workflow).toContain("AbortSignal.timeout(3000)");
+    expect(workflow).toContain("grouped deployment is missing supported_openai_params");
+    expect(workflow).toContain("grouped deployment is missing allowed_openai_params");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
@@ -79,7 +85,12 @@ describe("LiteLLM smoke workflow", () => {
   });
 
   it("reuses the package publish gate in CI and release", () => {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
     expect(readCiWorkflow()).toContain("run: npm run prepublishOnly");
+    expect(manifest.scripts.check).toContain("npm run supply-chain:guard");
+    expect(manifest.scripts.prepublishOnly).not.toContain("npm run supply-chain:guard");
     expect(readCiWorkflow()).not.toContain("run: npm pack --dry-run");
     expect(readReleaseWorkflow()).not.toContain("run: npm run check");
     expect(readReleaseWorkflow()).not.toContain("run: npm pack --dry-run");

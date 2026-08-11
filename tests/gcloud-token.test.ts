@@ -1,15 +1,8 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCommand, resetGcloudTokenCache } from "../src/gcloud-token.js";
-import { importSpecifiers } from "./import-specifiers.js";
-
-const execFileAsync = promisify(execFile);
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCacheKey, resetGcloudTokenCache } from "../src/gcloud-token.js";
 
 const ORIGINAL_ENV = {
   APPDATA: process.env.APPDATA,
@@ -40,39 +33,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("getGcloudTokenCommand", () => {
-  it("executes a TypeScript token module through Pi's command helper", async () => {
-    const fixture = await mkdtemp(join(tmpdir(), "pi-litellm-gcloud-command-"));
-    const modulePath = join(fixture, "token-source.ts");
-    await writeFile(modulePath, 'export async function getGcloudToken() { return "ya29.subprocess-token"; }\n');
-
-    const command = getGcloudTokenCommand(pathToFileURL(modulePath).href).slice(1);
-    const { stdout } = await execFileAsync("/bin/sh", ["-c", command], { cwd: repoRoot });
-
-    expect(stdout).toBe("ya29.subprocess-token");
-  });
-
-  it("executes the production ADC module through plain Node", async () => {
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({ type: "service_account" });
-    const command = getGcloudTokenCommand().slice(1);
-
-    await expect(execFileAsync("/bin/sh", ["-c", command], { cwd: repoRoot })).rejects.toMatchObject({
-      code: 1,
-      stderr: expect.stringContaining("Service account credentials are not supported"),
-    });
-  });
-
-  it("keeps the plain-Node ADC graph built-in-only and erasable by Node", async () => {
-    const cliSource = await readFile(join(repoRoot, "src/gcloud-token-cli.ts"), "utf8");
-    const tokenSource = await readFile(join(repoRoot, "src/gcloud-token.ts"), "utf8");
-
-    expect(importSpecifiers(cliSource)).toEqual([]);
-    expect(importSpecifiers(tokenSource).every((specifier) => specifier.startsWith("node:"))).toBe(true);
-    expect(cliSource).toContain("await import(moduleUrl)");
-  });
-});
-
 describe("getGcloudToken", () => {
+  it("detects authorized_user ADC without exchanging a token", async () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "client-id",
+      client_secret: "client-secret",
+      refresh_token: "refresh-token",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(getGcloudTokenCacheKey()).resolves.toContain("gcloud-adc:authorized_user:client-id");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("exchanges authorized_user ADC credentials for an access token", async () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
       type: "authorized_user",

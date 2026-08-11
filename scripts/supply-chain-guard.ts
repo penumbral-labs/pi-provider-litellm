@@ -44,7 +44,7 @@ const allowedPackageFiles = [
   /^package\.json$/,
   /^README\.md$/,
   /^LICENSE$/,
-  /^src\/(?:cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|provider|skills|types)\.ts$/,
+  /^src\/(?:cache|cost|discover|gcloud-token|index|litellm|mcp-tools|model-groups|protocols|provider|skills|types)\.ts$/,
 ];
 
 export interface SupplyChainGuardOptions {

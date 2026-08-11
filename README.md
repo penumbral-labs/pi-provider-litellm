@@ -170,7 +170,7 @@ export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_GCLOUD_TOKEN_AUTH=1
 ```
 
-Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. Tokens are cached in memory for 50 minutes and the registered provider key is a Pi `!command`, so request-time auth resolves a fresh token when Pi sends model requests.
+Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. Tokens are refreshed in-process when Pi resolves request auth and cached in memory for 50 minutes.
 
 ## LiteLLM MCP tools
 
@@ -179,7 +179,11 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
+Each discovered tool is registered as a native Pi tool with a deterministic, accepted-character name of at most 64 characters. The name includes the MCP server identity when truncation or collision handling is needed, so tools from different servers do not silently overwrite each other. Exact duplicate identities are registered once.
+
+MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. Discovery accepts at most a 5 MiB response and registers at most 512 tools. Each tool is isolated during normalization: schemas must have an object root, plain-object `properties`, at most 16 levels of JSON nesting (about eight nested schema objects when each level uses `properties`), and a serialized size of at most 64 KiB. Invalid tools are skipped without hiding valid siblings. Missing schemas use a synthetic `args` envelope and require object-valued `args` at execution; real schema properties named `args`, `properties`, or `required` remain intact. Descriptions are limited to 4 KiB with a truncation marker.
+
+MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once—timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text is limited to 64 KiB with a truncation marker. Because Pi does not expose tool unregistration, changing MCP tool identities requires restarting Pi to remove stale registrations.
 
 ## LiteLLM Skill Hub
 
@@ -205,7 +209,7 @@ npm run check
 npm run clean && npm run build
 ```
 
-`npm run check` runs Biome, type checking, and the Vitest suite. Pi installs and local smoke checks load the shipped `src/index.ts` entrypoint directly; `dist/` is verification output only.
+`npm run check` runs Biome, type checking, the Vitest suite, and the supply-chain package-content guard. Pi installs and local smoke checks load the shipped `src/index.ts` entrypoint directly; `dist/` is verification output only.
 
 Before changing package contents or dependency policy, also run:
 
