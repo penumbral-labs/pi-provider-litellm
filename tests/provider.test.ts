@@ -206,7 +206,7 @@ describe("createLiteLLMProvider", () => {
   it("preserves conservative qualified-route metadata offline", async () => {
     const cached: Model<Api> = {
       ...native("openai/gpt-5.5"),
-      name: "openai/gpt-5.5 (no metadata)",
+      name: "openai/gpt-5.5 (incomplete metadata)",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

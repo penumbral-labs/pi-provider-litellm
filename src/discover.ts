@@ -455,9 +455,11 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
   });
   if (!reduced) return undefined;
+  const incompleteMetadataName =
+    entries.length > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
   return {
     id: reduced.id,
-    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (no metadata)`,
+    name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
     input: reduced.vision ? ["text", "image"] : ["text"],
