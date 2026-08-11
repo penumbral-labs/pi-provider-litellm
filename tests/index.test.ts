@@ -862,6 +862,69 @@ describe("extension startup", () => {
     expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
   });
 
+  // A restored session hands `complete()` a cached model directly, bypassing
+  // filterModels. pi rewrites model.baseUrl from auth.baseUrl before the provider's
+  // guard runs, so toAuth must not return one.
+  it.each([
+    [
+      "oauth",
+      {
+        type: "oauth",
+        access: "sk-oauth",
+        refresh: "",
+        expires: Number.MAX_SAFE_INTEGER,
+        baseUrl: "https://active.example.com",
+      },
+    ],
+    ["api key", { type: "api_key", key: "sk-key", env: { LITELLM_BASE_URL: "https://active.example.com" } }],
+  ])("rejects a restored stale-host model before any request (%s)", async (_label, stored) => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://active.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requestedUrls.push(String(input));
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => stored as never);
+    const models = createModels({
+      credentials,
+      modelsStore: new InMemoryModelsStore(),
+      authContext: { env: async (name) => process.env[name], fileExists: async () => false },
+    });
+    models.setProvider(provider);
+    const base = {
+      id: "restored",
+      name: "Restored",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+
+    const stale = await models.complete({ ...base, baseUrl: "https://stale.example.com/v1" }, { messages: [] });
+
+    expect(stale.stopReason).toBe("error");
+    expect(stale.errorMessage).toMatch(/stale LiteLLM model host stale\.example\.com/);
+    expect(requestedUrls).toEqual([]);
+
+    const fresh = await models.complete({ ...base, baseUrl: "https://active.example.com" }, { messages: [] });
+
+    expect(fresh.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual(["https://active.example.com/v1/chat/completions"]);
+  });
+
   it("stops using the remembered OAuth host after switching to an API key", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://api-key.example.com";
@@ -1086,10 +1149,9 @@ describe("extension startup", () => {
 
     const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential);
     expect(await readHelperCount(agentDir)).toBe(1);
-    await expect(pi.providers[0]?.auth.oauth?.toAuth(refreshed!)).resolves.toMatchObject({
-      apiKey: "refreshed-token",
-      baseUrl: "https://proxy.example.com",
-    });
+    const refreshedAuth = await pi.providers[0]?.auth.oauth?.toAuth(refreshed!);
+    expect(refreshedAuth).toMatchObject({ apiKey: "refreshed-token" });
+    expect(refreshedAuth).not.toHaveProperty("baseUrl");
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
@@ -1171,10 +1233,12 @@ describe("extension startup", () => {
       expires: Number.MAX_SAFE_INTEGER,
       baseUrl: "https://proxy.example.com",
     });
-    await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
-      apiKey: "sk-virtual-abc",
-      baseUrl: "https://proxy.example.com",
-    });
+    const ssoAuth = await pi.providers[0]?.auth.oauth?.toAuth(credential!);
+    expect(ssoAuth).toMatchObject({ apiKey: "sk-virtual-abc" });
+    // No baseUrl: pi would rewrite model.baseUrl from it and defeat the request-path
+    // stale-host guard. The credential still carries the host, and the token-keyed
+    // runtime root is what targets requests.
+    expect(ssoAuth).not.toHaveProperty("baseUrl");
     expect(seenRequests).toContainEqual(
       expect.objectContaining({
         url: "https://proxy.example.com/key/generate",

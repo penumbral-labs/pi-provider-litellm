@@ -648,6 +648,53 @@ describe("feature parity", () => {
     expect(payload).not.toHaveProperty("litellm_session_id");
   });
 
+  // pi routes a model whose transport this provider does not implement through its own
+  // generic api, bypassing the provider's transport guard, so the hook must leave those
+  // payloads alone rather than inject OpenAI-shaped fields.
+  it.each([
+    ["google-generative-ai", "gemini-2.5-pro", { contents: [] }],
+    ["bedrock-converse-stream", "us.anthropic.claude-opus-4-7", { messages: [] }],
+    ["anthropic-messages", "claude-opus-4-7", { messages: [] }],
+  ])("never mutates a %s payload", async (api, modelId, shape) => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    pi.handlers.get("session_start")?.[0]?.({}, { sessionManager: { getSessionFile: () => "/tmp/session.jsonl" } });
+    const payload = { model: modelId, ...shape, reasoning_effort: "HIGH" };
+
+    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
+      { payload },
+      { model: { provider: "litellm", id: modelId, api } },
+    );
+
+    expect(result).toBeUndefined();
+    expect(payload).not.toHaveProperty("litellm_session_id");
+    // Gemini effort lowercasing is an OpenAI-shaped rewrite and must not apply either.
+    expect(payload.reasoning_effort).toBe("HIGH");
+  });
+
+  it("still applies OpenAI rewrites to Chat Completions and Responses", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    pi.handlers.get("session_start")?.[0]?.({}, { sessionManager: { getSessionFile: () => "/tmp/session.jsonl" } });
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+
+    for (const api of ["openai-completions", "openai-responses"] as const) {
+      const payload: Record<string, unknown> = { model: "gemini-2.5-pro", messages: [], reasoning_effort: "HIGH" };
+      const result = await beforeRequest?.({ payload }, { model: { provider: "litellm", id: "gemini-2.5-pro", api } });
+      const next = (result ?? payload) as Record<string, unknown>;
+      expect(next.litellm_session_id).toBeTruthy();
+      expect(next.reasoning_effort).toBe("high");
+    }
+  });
+
   it("registers cost tracking and session grouping handlers", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

@@ -67,7 +67,7 @@ export function normalizeBaseUrl(input: string): string {
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
 // the `cacheControlFormat: "anthropic"` flag, pi never relays cache_control
 // markers through the proxy, so prompt caching silently no-ops on Claude models.
-const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
+const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku|fable)(?=$|[-_/.:]))/i;
 const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
 // Deployments expose the gpt-5.5 route under varying names (`llm-gateway/gpt-5.5`,
@@ -115,21 +115,38 @@ function toKnownProvider(provider: string | undefined): BuiltinProvider | undefi
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
-function catalogProviderCandidates(id: string, ownedBy?: string): BuiltinProvider[] {
-  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
+function catalogProviderCandidates(id: string, ownedBy?: string, adapterProvider?: BuiltinProvider): BuiltinProvider[] {
+  const candidates = [adapterProvider, toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])].filter(
+    (provider): provider is BuiltinProvider => provider !== undefined,
+  );
+  // A declared `litellm_provider` adapter is authoritative and outranks the bare-alias
+  // exception: a Vertex- or Bedrock-served Claude must not be priced from the first-party
+  // Anthropic catalog just because its alias reads like a Claude model. Messages
+  // compatibility is resolved separately and still recognizes those routes.
+  //
+  // `owned_by` from `/v1/models` is NOT such evidence — LiteLLM reports "openai" for every
+  // route there — so the exception still applies on the fallback and cache-enrichment
+  // paths, which is the behavior D-005 approves for unqualified route names.
+  if (adapterProvider) return [...new Set(candidates)];
   const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
   const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
-  if (/^(?:claude-)?(?:opus|sonnet|haiku)-\d+-\d+$/.test(anthropicAlias)) candidates.push("anthropic");
-  if (anthropicAlias === "fable-5" || anthropicAlias === "opus-5") candidates.push("anthropic");
-  return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
+  if (
+    /^(?:claude-)?(?:opus|sonnet|haiku)-\d+-\d+$/.test(anthropicAlias) ||
+    anthropicAlias === "fable-5" ||
+    anthropicAlias === "opus-5"
+  ) {
+    candidates.push("anthropic");
+  }
+  return [...new Set(candidates)];
 }
 
 function resolveCatalogModel(
   id: string,
   ownedBy?: string,
+  adapterProvider?: BuiltinProvider,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(id, ownedBy)) {
+  for (const provider of catalogProviderCandidates(id, ownedBy, adapterProvider)) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -321,7 +338,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   );
 
   for (const candidate of agreeing) {
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);
     if (resolved) {
       return {
         ...catalogResolution(resolved.provider, resolvedFamily, resolved.model),

@@ -674,11 +674,16 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
             type: "oauth" as const,
           }),
           toAuth: async (credential) => {
-            const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
-            if (!baseUrl) throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+            // Validate the credential's root, but do not return it: pi rewrites
+            // `model.baseUrl` from `auth.baseUrl` before the provider's request guard
+            // runs, which would make the stale-host comparison compare the active host
+            // against itself. The token-keyed runtime root is the canonical source, and
+            // it reads this same credential.
+            if (!resolveSanitizedCredentialRoot(definition, credential)) {
+              throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+            }
             return {
               apiKey: credential.access,
-              baseUrl,
               headers: resolveHeaders(definition),
             };
           },
@@ -755,9 +760,11 @@ function prepareLiteLLMRequestPayload(
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
   // Native Messages payloads are Anthropic-shaped and must never be rewritten by this
-  // hook. This is the single gate for that; the checks below only distinguish Chat
-  // Completions from Responses.
-  if (api === "anthropic-messages") return undefined;
+  // hook. An unknown or custom api must not be rewritten either: pi can route a model
+  // whose transport this provider does not implement through its own generic api,
+  // bypassing the provider's transport guard entirely, and an OpenAI-shaped field would
+  // reach a payload that cannot carry it.
+  if (api !== undefined && api !== "openai-completions" && api !== "openai-responses") return undefined;
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
@@ -959,6 +966,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+  // `oauth.toAuth` deliberately returns no baseUrl, so the host an SSO login resolved is
+  // recorded here for the LiteLLM-owned side channels (skills, MCP) that have no
+  // Credential of their own. Keyed to the access token it was resolved for, so it cannot
+  // outlive that credential.
+  let oauthSideChannelRoot: { apiKey: string; root: string } | undefined;
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
@@ -985,12 +997,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const apiKey = auth.auth.apiKey;
       // A remembered host from a previous resolution is only reusable for the same
       // credential; otherwise a later key could be paired with the earlier host.
+      const tokenRoot = apiKey && oauthSideChannelRoot?.apiKey === apiKey ? oauthSideChannelRoot.root : undefined;
       const rememberedBaseUrl =
         apiKey && defaultRuntimeAuth?.apiKey === apiKey ? defaultRuntimeAuth.baseUrl : undefined;
       const baseUrl = resolveSanitizedCredentialRoot(
         definitions.find((definition) => definition.name === PROVIDER_NAME)!,
         undefined,
-        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? rememberedBaseUrl,
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? tokenRoot ?? rememberedBaseUrl,
       );
       if (!baseUrl || !apiKey) return undefined;
       requireNonPlaceholderCredentialRoot(baseUrl);
@@ -1106,8 +1119,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const oauthToAuth = oauth.toAuth;
       oauth.toAuth = async (credential) => {
         const auth = await oauthToAuth(credential);
-        const root = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
+        const root = resolveSanitizedCredentialRoot(definition, credential);
         oauthRuntimeRoot = root && auth.apiKey ? { apiKey: auth.apiKey, root } : undefined;
+        if (definition.name === PROVIDER_NAME) oauthSideChannelRoot = oauthRuntimeRoot;
         return auth;
       };
     }
