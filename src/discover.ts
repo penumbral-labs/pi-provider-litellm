@@ -94,7 +94,13 @@ export function buildCompat(
   api: DiscoveredModel["api"] = "openai-completions",
 ): DiscoveredModel["compat"] {
   if (api === "anthropic-messages") return undefined;
-  if (api === "openai-responses") return {};
+  if (api === "openai-responses") {
+    // Responses defaults supportsDeveloperRole to true, but Moonshot routes apply
+    // strict OpenAI schema validation and reject the developer role. The other
+    // Moonshot flags, and the completions-only supportsStore/cacheControlFormat,
+    // are not read on this path.
+    return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
+  }
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,

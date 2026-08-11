@@ -64,7 +64,21 @@ describe("normalizeBaseUrl", () => {
 describe("buildCompat", () => {
   it("returns protocol-shaped compatibility metadata", () => {
     expect(buildCompat("claude-opus", "anthropic-messages")).toBeUndefined();
-    expect(buildCompat("openai/gpt-4o", "openai-responses")).toEqual({});
+    expect(buildCompat("openai/gpt-4o", "openai-responses")).toBeUndefined();
+  });
+
+  it("suppresses the developer role for Moonshot models on the Responses API", () => {
+    // Responses defaults supportsDeveloperRole to true, so dropping this flag
+    // sends `developer` to a route that rejects it.
+    expect(buildCompat("moonshotai/kimi-k2", "openai-responses")).toEqual({ supportsDeveloperRole: false });
+    expect(buildCompat("kimi-k2.6", "openai-responses")).toEqual({ supportsDeveloperRole: false });
+  });
+
+  it("omits completions-only compatibility fields on the Responses API", () => {
+    // supportsStore and cacheControlFormat are OpenAICompletionsCompat fields and
+    // are never read by the Responses API.
+    expect(buildCompat("anthropic/claude-sonnet-4-6", "openai-responses")).toBeUndefined();
+    expect(buildCompat("gemini/gemini-2.0-flash", "openai-responses")).toBeUndefined();
   });
 
   it("returns supportsStore: false for non-anthropic models", () => {
@@ -396,6 +410,27 @@ describe("discoverModels response-mode models", () => {
       contextWindow: 272000,
       maxTokens: 128000,
     });
+  });
+
+  it("pairs a Moonshot response-mode route with Responses-shaped compatibility", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "moonshotai/kimi-k2", model_info: { mode: "responses", supports_reasoning: true } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "moonshotai/kimi-k2",
+      api: "openai-responses",
+      compat: { supportsDeveloperRole: false },
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsStore");
   });
 
   it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
