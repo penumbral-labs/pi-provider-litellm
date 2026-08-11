@@ -46,11 +46,21 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain("Capture deployment-group model info");
+    expect(workflow).toContain("Verify deployment-group reduction");
     expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
     expect(workflow).toContain("AbortSignal.timeout(3000)");
-    expect(workflow).toContain("grouped deployment is missing supported_openai_params");
-    expect(workflow).toContain("grouped deployment is missing allowed_openai_params");
+    // The mixed-transport fixture only exercises reduction while the proxy keeps
+    // one chat and one responses deployment with asymmetric accepted parameters.
+    expect(workflow).toContain("mode: chat");
+    expect(workflow).toContain("mode: responses");
+    expect(workflow).toContain('=== "chat,responses"');
+    expect(workflow).toContain('=== "reasoning_effort,temperature"');
+    expect(workflow).toContain('=== "reasoning_effort,temperature,thinking"');
+    // Reduction outcome, not just wire shape.
+    expect(workflow).toContain('grouped[0].api === "openai-completions"');
+    expect(workflow).toContain('!grouped[0].name.endsWith(" (no metadata)")');
+    // Stdin ESM is explicit rather than inferred from top-level await.
+    expect(workflow).toContain("node --input-type=module -");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

@@ -203,29 +203,73 @@ jobs:
           docker logs litellm-smoke >&2 || true
           exit 1
 
-      - name: Capture deployment-group model info
+      - name: Verify deployment-group reduction
         shell: bash
         run: |
           set -euo pipefail
-          node - <<'NODE'
+          node --input-type=module - <<'NODE'
+          const assert = (condition, message) => {
+            if (!condition) throw new Error(message);
+          };
           const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
             headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
             signal: AbortSignal.timeout(3000),
           });
-          if (!response.ok) throw new Error(`/model/info returned ${response.status}`);
+          assert(response.ok, `/model/info returned ${response.status}`);
           const payload = await response.json();
+          assert(Array.isArray(payload.data), "/model/info response has no data array");
           const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
-          if (rows.length !== 2) throw new Error(`expected two grouped deployments, received ${rows.length}`);
-          for (const row of rows) {
-            if (!row.model_info?.id) throw new Error("grouped deployment is missing model_info.id");
-            if (!Array.isArray(row.model_info.supported_openai_params)) {
-              throw new Error("grouped deployment is missing supported_openai_params");
-            }
-            if (!Array.isArray(row.litellm_params?.allowed_openai_params)) {
-              throw new Error("grouped deployment is missing allowed_openai_params");
-            }
+          assert(rows.length === 2, `expected two grouped deployments, received ${rows.length}`);
+
+          // The fixture's premise is a mixed-transport group with asymmetric
+          // accepted parameters. If the proxy normalizes either away, the group no
+          // longer exercises reduction and this gate must fail loudly.
+          const accepted = (row) => [
+            ...new Set([
+              ...(row.model_info?.supported_openai_params ?? []),
+              ...(row.litellm_params?.allowed_openai_params ?? []),
+            ]),
+          ].sort();
+          const summary = rows
+            .map((row) => ({ id: row.model_info?.id, mode: row.model_info?.mode, accepted: accepted(row) }))
+            .sort((left, right) => String(left.mode).localeCompare(String(right.mode)));
+          console.log(JSON.stringify(summary, null, 2));
+
+          for (const row of summary) {
+            assert(row.id, "grouped deployment is missing model_info.id");
           }
-          console.log(JSON.stringify(rows, null, 2));
+          assert(
+            summary.map((row) => row.mode).join(",") === "chat,responses",
+            `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
+          );
+          assert(
+            summary[0].accepted.join(",") === "reasoning_effort,temperature",
+            `chat deployment accepted set drifted: ${summary[0].accepted.join(",")}`,
+          );
+          assert(
+            summary[1].accepted.join(",") === "reasoning_effort,temperature,thinking",
+            `responses deployment accepted set drifted: ${summary[1].accepted.join(",")}`,
+          );
+
+          // Assert the reduced outcome, not just the wire shape: a mixed-transport
+          // group must fall back to Chat, reduce to one model, and never carry the
+          // fallback-only sentinel that authorizes cache re-enrichment.
+          const { pathToFileURL } = await import("node:url");
+          const { discoverModels } = await import(pathToFileURL("dist/discover.js").href);
+          const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY, {
+            modelsDev: false,
+          });
+          const grouped = result.models.filter((model) => model.id === "grouped-vidaimock");
+          console.log(JSON.stringify(grouped, null, 2));
+          assert(grouped.length === 1, `expected one reduced group, received ${grouped.length}`);
+          assert(
+            grouped[0].api === "openai-completions",
+            `mixed-transport group must reduce to Chat, received ${grouped[0].api}`,
+          );
+          assert(
+            !grouped[0].name.endsWith(" (no metadata)"),
+            `reduced group must not use the fallback sentinel: ${grouped[0].name}`,
+          );
           NODE
 
       - name: Run provider smoke
