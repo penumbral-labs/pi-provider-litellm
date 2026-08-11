@@ -152,9 +152,28 @@ Mixed, unknown, and fallback-only groups remain on Chat Completions; unanimous e
 The underlying catalog/provider identity and pricing are unchanged by this choice.
 
 Native Messages authenticates to LiteLLM with `x-api-key` (not `Authorization: Bearer`) and intentionally omits
-`litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and Responses requests. Actual request
-cost still comes from `x-litellm-response-cost` when LiteLLM returns it; otherwise Pi retains the discovered static
-estimate.
+`litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and Responses requests.
+
+Anthropic request compatibility — adaptive versus budget thinking, whether the route accepts `temperature`, and strict
+tool schemas — comes from the backend model LiteLLM reports, never from the public route name. Deployment decoration is
+canonicalized first, so Bedrock cross-region and cross-partition inference profiles, Bedrock model versions, Vertex
+serving suffixes, and dated release snapshots resolve to the same policy as the model they are a snapshot of. That policy
+applies when every deployment in the group agrees; when deployments disagree, or the backend model is unrecognized, Pi
+uses Anthropic's defaults. Carrying compatibility never grants the route catalog provider identity, pricing, or limits.
+
+LiteLLM does not currently return `x-litellm-response-cost` on `/v1/messages`, so a Claude route on native Messages
+reports the discovered static estimate rather than LiteLLM's actual computed cost. Chat Completions and Responses
+requests still take actual cost from that header when LiteLLM returns it.
+
+## Model catalog authority
+
+Metadata enrichment from Pi's bundled model catalog requires unambiguous provider identity: a known adapter, a known provider prefix, or a recognized Anthropic alias. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog happens to list that name first. Those models appear with the id LiteLLM reported, a `(no metadata)` or `(incomplete metadata)` suffix when cost data is incomplete, default context and output limits, and no static pricing. Qualify the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) to get full metadata.
+
+## When LiteLLM models disappear
+
+Models are offered only while the host they were discovered against still matches the active credential's host. After changing `LITELLM_BASE_URL`, switching credentials, or logging in against a different proxy, open `/model` to refresh discovery. Until then LiteLLM contributes no models and the reason is written once to stderr. This is deliberate: a cached model is never silently re-pointed at a host it was not discovered from.
+
+A Claude route discovered before this version was cached as a Chat Completions model. It keeps working on that transport and moves to native Messages on the next `/model` refresh.
 
 ## Optional environment variables
 
@@ -208,8 +227,9 @@ The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM 
 route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock.
 The smoke runner discovers those models through LiteLLM, asserts each model's expected API, requires the union of
 `/v1/messages`, `/v1/chat/completions`, and `/v1/responses`, and checks the configured `x-litellm-response-cost`
-expectation. The workflow also captures successful LiteLLM logs and asserts all three POST paths. When a deployment is
-configured to permit an absent cost header, the visible fallback remains the discovered static estimate.
+expectation. The workflow also asserts that the Pi CLI's own native Messages request reached `/v1/messages`
+successfully. The smoke runner authenticates with `Authorization: Bearer`, so it covers route reachability rather than
+the `x-api-key` path the extension uses; that path is covered by the Pi CLI smoke and by wire-compatibility tests.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
 
@@ -252,6 +272,10 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 |---|---|
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
+| No LiteLLM models, with a "stale LiteLLM model host" note on stderr | Cached models were discovered against a different host than the active credential — open `/model` to refresh |
+| No LiteLLM models, with a "placeholder LiteLLM model host" note | No real base URL is configured; the sample `litellm.example.com` is never contacted — set `LITELLM_BASE_URL` or run `/login litellm` |
+| No LiteLLM models, with an "invalid LiteLLM model URL" note | `LITELLM_BASE_URL` is not an absolute `http(s)` URL (for example `localhost:4000` instead of `http://localhost:4000`) |
+| Model name ends in `(no metadata)` or `(incomplete metadata)` | The route reports incomplete cost data and its backend is not unambiguously identifiable — see [Model catalog authority](#model-catalog-authority) |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |

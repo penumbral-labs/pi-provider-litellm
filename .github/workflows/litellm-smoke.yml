@@ -304,15 +304,6 @@ jobs:
           docker logs --since "$messages_log_since" litellm-smoke > .tmp/pi-messages.log 2>&1
           grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/pi-messages.log
 
-      - name: Assert captured LiteLLM endpoint logs
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker logs litellm-smoke > .tmp/litellm.log 2>&1
-          grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log
-          grep -F 'POST /v1/chat/completions HTTP/1.1" 200' .tmp/litellm.log
-          grep -F 'POST /v1/responses HTTP/1.1" 200' .tmp/litellm.log
-
       - name: Dump LiteLLM logs
         if: failure()
         run: docker logs litellm-smoke || true
