@@ -45,12 +45,15 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    // Two rows are what makes the grouped route exercise deployment reduction.
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain("Capture deployment-group model info");
-    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
-    expect(workflow).toContain("AbortSignal.timeout(3000)");
-    expect(workflow).toContain("grouped deployment is missing supported_openai_params");
-    expect(workflow).toContain("grouped deployment is missing allowed_openai_params");
+    expect(workflow).toContain("Verify deployment-group model info contract");
+    // The contract step must retry rather than fail on a cold proxy, and must
+    // check every field the reduction reads.
+    expect(workflow).toMatch(/while \(Date\.now\(\) < deadline\)/);
+    for (const field of ["model_info.id", "mode", "supported_openai_params", "allowed_openai_params"]) {
+      expect(workflow).toContain(field);
+    }
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

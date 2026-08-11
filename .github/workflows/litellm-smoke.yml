@@ -203,21 +203,38 @@ jobs:
           docker logs litellm-smoke >&2 || true
           exit 1
 
-      - name: Capture deployment-group model info
+      - name: Verify deployment-group model info contract
         shell: bash
         run: |
           set -euo pipefail
           node - <<'NODE'
-          const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
-            headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
-            signal: AbortSignal.timeout(3000),
-          });
-          if (!response.ok) throw new Error(`/model/info returned ${response.status}`);
-          const payload = await response.json();
-          const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
-          if (rows.length !== 2) throw new Error(`expected two grouped deployments, received ${rows.length}`);
+          const deadline = Date.now() + 60_000;
+          async function fetchRows() {
+            const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
+              headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!response.ok) throw new Error(`/model/info returned ${response.status}`);
+            const payload = await response.json();
+            if (!Array.isArray(payload.data)) throw new Error("/model/info payload has no data array");
+            return payload.data.filter((row) => row.model_name === "grouped-vidaimock");
+          }
+          let rows = [];
+          let lastError;
+          while (Date.now() < deadline) {
+            try {
+              rows = await fetchRows();
+              if (rows.length === 2) break;
+              lastError = new Error(`expected two grouped deployments, received ${rows.length}`);
+            } catch (error) {
+              lastError = error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+          if (rows.length !== 2) throw lastError ?? new Error("grouped deployments never became available");
           for (const row of rows) {
             if (!row.model_info?.id) throw new Error("grouped deployment is missing model_info.id");
+            if (typeof row.model_info.mode !== "string") throw new Error("grouped deployment is missing mode");
             if (!Array.isArray(row.model_info.supported_openai_params)) {
               throw new Error("grouped deployment is missing supported_openai_params");
             }
@@ -225,7 +242,9 @@ jobs:
               throw new Error("grouped deployment is missing allowed_openai_params");
             }
           }
-          console.log(JSON.stringify(rows, null, 2));
+          const modes = rows.map((row) => row.model_info.mode).sort();
+          if (modes.join(",") !== "chat,responses") throw new Error(`unexpected grouped modes: ${modes.join(",")}`);
+          console.log(JSON.stringify(rows.map((row) => ({ ...row, litellm_params: undefined })), null, 2));
           NODE
 
       - name: Run provider smoke
