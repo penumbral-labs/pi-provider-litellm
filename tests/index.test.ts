@@ -993,6 +993,112 @@ describe("extension startup", () => {
     expect(harness.requests.map((entry) => entry.authorization)).toEqual(["Bearer sk-before", "Bearer sk-after"]);
   });
 
+  it("contains a stored invalid OAuth root at the real registry seam", async () => {
+    // The throw originates inside getProviderAuth, which runs our own oauth.toAuth,
+    // so a stub getProviderAuth cannot reach this path. Drive real resolution.
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    // Exactly what /login litellm stored before the prompt validated the scheme.
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-sso",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "localhost:4000",
+    }));
+    const authContext: AuthContext = { env: async (name) => process.env[name], fileExists: async () => false };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+    const registry = { getProviderAuth: () => models.getAuth(provider.id), getProvider: () => provider };
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+
+    // A LiteLLM turn and a turn on another provider both have to survive it.
+    await expect(
+      beforeAgentStart?.({ systemPrompt: "p" }, { model: { provider: "litellm" }, modelRegistry: registry }),
+    ).resolves.toBeUndefined();
+    await expect(
+      beforeAgentStart?.({ systemPrompt: "p" }, { model: { provider: "anthropic" }, modelRegistry: registry }),
+    ).resolves.toBeUndefined();
+
+    // One bounded diagnostic across both turns, and no request attempted.
+    const litellmWrites = stderr.mock.calls.filter(([line]) => String(line).startsWith("LiteLLM (litellm):"));
+    expect(litellmWrites).toHaveLength(1);
+    expect(String(litellmWrites[0]?.[0])).toContain("Invalid LiteLLM base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("recovers once the stored credential root is corrected", async () => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.startsWith("https://recovered.example.com/")) {
+        return jsonResponse(200, [{ name: "deep-research", description: "Research", enabled: true }]);
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    const authContext: AuthContext = { env: async (name) => process.env[name], fileExists: async () => false };
+    const oauthCredential = (baseUrl: string): Credential => ({
+      type: "oauth",
+      access: "sk-sso",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl,
+    });
+    const startWith = async (baseUrl: string) => {
+      await credentials.modify(provider.id, async () => oauthCredential(baseUrl));
+      const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+      models.setProvider(provider);
+      return pi.handlers.get("before_agent_start")?.[0]?.(
+        { systemPrompt: "Base prompt" },
+        { modelRegistry: { getProviderAuth: () => models.getAuth(provider.id), getProvider: () => provider } },
+      );
+    };
+
+    expect(await startWith("localhost:4000")).toBeUndefined();
+    const recovered = await startWith("https://recovered.example.com");
+
+    expect(recovered?.systemPrompt).toContain("Base prompt");
+    expect(recovered?.systemPrompt).toContain("<litellm_skills>");
+  });
+
+  it.each([
+    ["a scheme-less URL", "localhost:4000", /include the scheme/],
+    ["a non-http scheme", "ftp://proxy.example.com", /must use http or https/],
+    ["the documentation placeholder", PLACEHOLDER_BASE_URL, /documentation placeholder/],
+  ])("rejects %s at api-key login before storing it", async (_label, typed, expected) => {
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(pi.providers[0]?.auth.apiKey?.login?.(interaction(vi.fn().mockResolvedValue(typed)))).rejects.toThrow(
+      expected,
+    );
+  });
+
+  it("rejects a scheme-less URL at SSO login before storing it", async () => {
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      loginOAuth(pi.providers[0]!, {
+        onPrompt: async () => "localhost:4000",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/include the scheme/);
+  });
+
   it.each([
     ["an api key", { type: "api_key" as const, key: "sk-secret", env: { LITELLM_BASE_URL: PLACEHOLDER_BASE_URL } }],
     [

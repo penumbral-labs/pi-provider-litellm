@@ -482,18 +482,45 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
   return definitions;
 }
 
+// Rejects a typed proxy URL at the prompt rather than storing it. A credential
+// carrying a scheme-less or non-http(s) root fails on every later turn, far from
+// the place the value was entered, so the clean error belongs here.
+function requireLoginBaseUrl(rawBaseUrl: string): string {
+  const normalized = normalizeBaseUrl(rawBaseUrl);
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(
+      `"${rawBaseUrl}" is not a valid URL; include the scheme, for example https://litellm.your-domain.com`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    // `localhost:4000` parses as a `localhost:` scheme rather than failing above, so
+    // this branch is what a missing scheme actually lands on.
+    throw new Error(
+      `"${rawBaseUrl}" must use http or https; include the scheme, for example https://litellm.your-domain.com`,
+    );
+  }
+  if (isPlaceholderHost(parsed.host)) {
+    throw new Error(`"${rawBaseUrl}" is the documentation placeholder; enter your own LiteLLM proxy URL`);
+  }
+  return normalized;
+}
+
 async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredential> {
   const rawBaseUrl = (
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
-      placeholder: "https://litellm.example.com",
+      placeholder: "https://litellm.your-domain.com",
     })
   ).trim();
   if (!rawBaseUrl) throw new Error("Base URL is required");
+  const baseUrl = requireLoginBaseUrl(rawBaseUrl);
   const key = (await interaction.prompt({ type: "secret", message: "Enter API key:" })).trim();
   if (!key) throw new Error("Both base URL and API key are required");
-  return { type: "api_key", key, env: { [ENV_BASE_URL]: normalizeBaseUrl(rawBaseUrl) } };
+  return { type: "api_key", key, env: { [ENV_BASE_URL]: baseUrl } };
 }
 
 async function loginOAuth(interaction: AuthInteraction, headers?: Record<string, string>): Promise<OAuthCredential> {
@@ -501,11 +528,11 @@ async function loginOAuth(interaction: AuthInteraction, headers?: Record<string,
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
-      placeholder: "https://litellm.example.com",
+      placeholder: "https://litellm.your-domain.com",
     })
   ).trim();
   if (!rawBaseUrl) throw new Error("Base URL is required");
-  const baseUrl = normalizeBaseUrl(rawBaseUrl);
+  const baseUrl = requireLoginBaseUrl(rawBaseUrl);
   interaction.notify({
     type: "auth_url",
     url: `${baseUrl}/sso/key/generate`,
@@ -957,6 +984,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+  const reportedRuntimeAuthFailures = new Set<string>();
+  const reportRuntimeAuthOnce = (message: string): void => {
+    if (reportedRuntimeAuthFailures.has(message)) return;
+    reportedRuntimeAuthFailures.add(message);
+    process.stderr.write(`LiteLLM (${PROVIDER_NAME}): ${message}\n`);
+  };
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
@@ -972,34 +1005,40 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // must not surface as a per-turn extension error. filterModels already reports the
   // reason once per session, and the LiteLLM tool surfaces raise their own error via
   // resolveDefaultRuntimeAuth.
+  // Containment wraps the ENTIRE derivation, including getProviderAuth. Pi resolves
+  // credentials inside that call, which runs our own oauth.toAuth, so a stored
+  // credential with an invalid root throws from there rather than from the validator
+  // we call directly. This runs from before_agent_start on every turn, including
+  // turns that never touch LiteLLM, so nothing here may escape: filterModels owns
+  // the model-list explanation and resolveDefaultRuntimeAuth owns the tool-surface
+  // error. The reason is reported once so a real misconfiguration is not silent.
   async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
-    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
-    if (!auth) return undefined;
-    const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const apiKey = auth.auth.apiKey;
-    if (!apiKey) return undefined;
-    let baseUrl: string | undefined;
     try {
+      const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
+      if (!auth) return undefined;
+      const apiKey = auth.auth.apiKey;
+      if (!apiKey) return undefined;
+      const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
       const root = resolveSanitizedCredentialRoot(
         definitions[0],
         undefined,
         auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL],
       );
-      baseUrl = root && !isPlaceholderHost(new URL(root).host) ? root : undefined;
-    } catch {
-      baseUrl = undefined;
+      if (!root || isPlaceholderHost(new URL(root).host)) return undefined;
+      const headers = Object.fromEntries(
+        Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
+      return {
+        baseUrl: normalizeBaseUrl(root),
+        apiKey,
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+      };
+    } catch (error) {
+      reportRuntimeAuthOnce(error instanceof Error ? error.message : String(error));
+      return undefined;
     }
-    if (!baseUrl) return undefined;
-    const headers = Object.fromEntries(
-      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-    return {
-      baseUrl: normalizeBaseUrl(baseUrl),
-      apiKey,
-      headers: Object.keys(headers).length > 0 ? headers : undefined,
-    };
   }
 
   async function resolveDefaultRuntimeAuth(ctx?: ExtensionContext): Promise<LiteLLMRuntimeAuth> {
