@@ -1,10 +1,36 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { checkSupplyChain, parsePackageFiles } from "../scripts/supply-chain-guard.js";
+import { allowedSourceModules, checkSupplyChain, parsePackageFiles } from "../scripts/supply-chain-guard.js";
+
+async function writeFixturePackage(
+  fixture: string,
+  files: string[],
+  contents: Array<{ path: string; body?: string }>,
+): Promise<void> {
+  await writeFile(
+    join(fixture, "package.json"),
+    JSON.stringify({ name: "allowed-fixture", version: "1.0.0", files }, null, 2),
+  );
+  await writeFile(
+    join(fixture, "package-lock.json"),
+    JSON.stringify({
+      name: "allowed-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      packages: { "": { name: "allowed-fixture", version: "1.0.0" } },
+    }),
+  );
+  await writeFile(join(fixture, "README.md"), "# fixture\n");
+  await writeFile(join(fixture, "LICENSE"), "MIT\n");
+  for (const { path, body } of contents) {
+    await mkdir(join(fixture, dirname(path)), { recursive: true });
+    await writeFile(join(fixture, path), body ?? "export {};\n");
+  }
+}
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -84,55 +110,68 @@ describe("supply-chain guard", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("authorizes exactly the source modules this branch ships", async () => {
+    const shipped = (await readdir(join(repoRoot, "src")))
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => file.replace(/\.ts$/, ""))
+      .sort();
+
+    expect([...allowedSourceModules].sort()).toEqual(shipped);
+  });
+
   it("accepts only the intentional source modules in the package", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-allowed-"));
 
     try {
-      await mkdir(join(fixture, "src"), { recursive: true });
-      await writeFile(
-        join(fixture, "package.json"),
-        JSON.stringify(
-          {
-            name: "allowed-fixture",
-            version: "1.0.0",
-            files: ["src", "README.md", "LICENSE"],
-          },
-          null,
-          2,
-        ),
+      await writeFixturePackage(
+        fixture,
+        ["src", "README.md", "LICENSE"],
+        allowedSourceModules.map((module) => ({ path: `src/${module}.ts` })),
       );
-      await writeFile(
-        join(fixture, "package-lock.json"),
-        JSON.stringify({
-          name: "allowed-fixture",
-          version: "1.0.0",
-          lockfileVersion: 3,
-          packages: { "": { name: "allowed-fixture", version: "1.0.0" } },
-        }),
-      );
-      await writeFile(join(fixture, "README.md"), "# fixture\n");
-      await writeFile(join(fixture, "LICENSE"), "MIT\n");
-      for (const file of [
-        "cache",
-        "cost",
-        "discover",
-        "gcloud-token",
-        "index",
-        "litellm",
-        "mcp-tools",
-        "model-groups",
-        "protocols",
-        "provider",
-        "skills",
-        "types",
-      ]) {
-        await writeFile(join(fixture, "src", `${file}.ts`), "export {};\n");
-      }
 
       const result = await checkSupplyChain(fixture);
 
       expect(result.errors).toEqual([]);
       expect(result.ok).toBe(true);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a published build directory", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-dist-"));
+
+    try {
+      await writeFixturePackage(
+        fixture,
+        ["src", "dist", "README.md", "LICENSE"],
+        [{ path: "src/index.ts" }, { path: "dist/index.js" }, { path: "dist/index.d.ts" }],
+      );
+
+      const result = await checkSupplyChain(fixture);
+
+      expect(result.ok).toBe(false);
+      expect(result.errors).toContain("npm package: unexpected published file dist/index.js");
+      expect(result.errors).toContain("npm package: unexpected published file dist/index.d.ts");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a source module outside the allowlist", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-unlisted-"));
+
+    try {
+      await writeFixturePackage(
+        fixture,
+        ["src", "README.md", "LICENSE"],
+        [{ path: "src/index.ts" }, { path: "src/exfiltrate.ts" }],
+      );
+
+      const result = await checkSupplyChain(fixture);
+
+      expect(result.ok).toBe(false);
+      expect(result.errors).toContain("npm package: unexpected published file src/exfiltrate.ts");
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }

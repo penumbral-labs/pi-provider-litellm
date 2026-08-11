@@ -40,11 +40,27 @@ const nonRegistrySpecPrefixes = [
   "./",
 ];
 
+// The published source modules, listed explicitly so adding one is a reviewed
+// decision. `tests/supply-chain-guard.test.ts` asserts this list matches `src/`
+// exactly, so an entry for a module this branch does not ship fails the suite.
+export const allowedSourceModules = [
+  "cache",
+  "cost",
+  "discover",
+  "gcloud-token",
+  "index",
+  "litellm",
+  "mcp-tools",
+  "provider",
+  "skills",
+  "types",
+];
+
 const allowedPackageFiles = [
   /^package\.json$/,
   /^README\.md$/,
   /^LICENSE$/,
-  /^src\/(?:cache|cost|discover|gcloud-token|index|litellm|mcp-tools|model-groups|protocols|provider|skills|types)\.ts$/,
+  new RegExp(`^src/(?:${allowedSourceModules.join("|")})\\.ts$`),
 ];
 
 export interface SupplyChainGuardOptions {
