@@ -89,6 +89,7 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
 export function buildCompat(
   modelId: string,
   api: DiscoveredModel["api"] = "openai-completions",
+  semanticFamily?: SemanticFamily,
 ): DiscoveredModel["compat"] {
   if (api === "anthropic-messages") return undefined;
   if (api === "openai-responses") return {};
@@ -101,7 +102,7 @@ export function buildCompat(
       maxTokensField: "max_tokens",
     };
   }
-  if (ANTHROPIC_MODEL_PATTERN.test(modelId)) {
+  if (semanticFamily === "claude" || ANTHROPIC_MODEL_PATTERN.test(modelId)) {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
@@ -505,7 +506,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat: buildCompat(reduced.id, reduced.api),
+    compat: buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
   };
 }
 
