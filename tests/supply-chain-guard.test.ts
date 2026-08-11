@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -81,18 +81,27 @@ describe("supply-chain guard", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("accepts the intentional runtime dist files in the package", async () => {
+  it("loads one source entrypoint and omits compiled library metadata", async () => {
+    const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as Record<string, unknown>;
+
+    expect((manifest.pi as { extensions?: string[] }).extensions).toEqual(["./src/index.ts"]);
+    expect(manifest).not.toHaveProperty("main");
+    expect(manifest).not.toHaveProperty("types");
+    expect(manifest).not.toHaveProperty("exports");
+  });
+
+  it("accepts only the intentional source modules in the package", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-allowed-"));
 
     try {
-      await mkdir(join(fixture, "dist"), { recursive: true });
+      await mkdir(join(fixture, "src"), { recursive: true });
       await writeFile(
         join(fixture, "package.json"),
         JSON.stringify(
           {
             name: "allowed-fixture",
             version: "1.0.0",
-            files: ["dist", "README.md", "LICENSE"],
+            files: ["src", "README.md", "LICENSE"],
           },
           null,
           2,
@@ -122,8 +131,7 @@ describe("supply-chain guard", () => {
         "skills",
         "types",
       ]) {
-        await writeFile(join(fixture, "dist", `${file}.js`), "export {};\n");
-        await writeFile(join(fixture, "dist", `${file}.d.ts`), "export {};\n");
+        await writeFile(join(fixture, "src", `${file}.ts`), "export {};\n");
       }
 
       const result = await checkSupplyChain(fixture);

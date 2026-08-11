@@ -44,9 +44,9 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-export function getGcloudTokenCommand(): string {
-  const cliPath = fileURLToPath(new URL("./gcloud-token-cli.js", import.meta.url));
-  return `!${shellQuote(process.execPath)} ${shellQuote(cliPath)}`;
+export function getGcloudTokenCommand(moduleUrl = import.meta.url): string {
+  const cliUrl = new URL("./gcloud-token-cli.ts", import.meta.url).href;
+  return `!${shellQuote(process.execPath)} --experimental-strip-types ${shellQuote(fileURLToPath(cliUrl))} ${shellQuote(moduleUrl)}`;
 }
 
 function getAdcPath(): string | null {

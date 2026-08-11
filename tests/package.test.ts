@@ -1,10 +1,54 @@
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const execFileAsync = promisify(execFile);
+const repoRoot = process.cwd();
+
+interface PackageManifest {
+  main?: string;
+  types?: string;
+  exports?: unknown;
+  files: string[];
+  pi: { extensions: string[]; image: string };
+}
+
+interface LoadResult {
+  errors: unknown[];
+  extensions: unknown[];
+}
+
+const expectedPackageFiles = [
+  "package/LICENSE",
+  "package/README.md",
+  "package/package.json",
+  "package/src/cache.ts",
+  "package/src/cost.ts",
+  "package/src/discover.ts",
+  "package/src/gcloud-token-cli.ts",
+  "package/src/gcloud-token.ts",
+  "package/src/index.ts",
+  "package/src/litellm.ts",
+  "package/src/mcp-tools.ts",
+  "package/src/provider.ts",
+  "package/src/skills.ts",
+  "package/src/types.ts",
+];
+
+async function loadExtension(entrypoint: string, cwd: string): Promise<LoadResult> {
+  const loaderUrl = pathToFileURL(
+    resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
+  ).href;
+  const { loadExtensions } = (await import(loaderUrl)) as {
+    loadExtensions(paths: string[], cwd: string): Promise<LoadResult>;
+  };
+
+  return loadExtensions([entrypoint], cwd);
+}
 
 describe("package gallery metadata", () => {
   it("uses the gallery image URL expected by pi.dev", async () => {
@@ -25,25 +69,88 @@ describe("package gallery metadata", () => {
 });
 
 describe("pi package compatibility", () => {
-  it("loads outside the repository without Pi peer dependencies", async () => {
-    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-package-"));
-    try {
-      const source = join(fixture, "src");
-      await cp(join(repoRoot, "src"), source, { recursive: true });
-      const loaderUrl = pathToFileURL(
-        resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
-      ).href;
-      const { loadExtensions } = (await import(loaderUrl)) as {
-        loadExtensions(paths: string[], cwd: string): Promise<{ errors: unknown[] }>;
-      };
+  it("declares a single source-only Pi entrypoint", async () => {
+    const manifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")) as PackageManifest;
 
-      const result = await loadExtensions([join(source, "index.ts")], fixture);
+    expect(manifest.pi.extensions).toEqual(["./src/index.ts"]);
+    expect(manifest.files).toEqual(["src", "README.md", "LICENSE"]);
+    expect(manifest).not.toHaveProperty("main");
+    expect(manifest).not.toHaveProperty("types");
+    expect(manifest).not.toHaveProperty("exports");
+  });
+
+  it("loads a production-only Git archive from its manifest entrypoint", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-git-package-"));
+    try {
+      const archivePath = join(fixture, "git-package.tar");
+      const { stdout: worktreeCommit } = await execFileAsync("git", ["stash", "create"], { cwd: repoRoot });
+      const revision = worktreeCommit.trim() || "HEAD";
+      await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, revision], { cwd: repoRoot });
+      await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
+      await rm(archivePath);
+      const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as PackageManifest;
+      const entrypoint = resolve(fixture, manifest.pi.extensions[0]);
+
+      const result = await loadExtension(entrypoint, fixture);
 
       expect(result.errors).toEqual([]);
+      expect(result.extensions).toHaveLength(1);
     } finally {
       await rm(fixture, { force: true, recursive: true });
     }
-  }, 15_000);
+  }, 30_000);
+
+  it("packs only source/docs/license and loads the packed manifest entrypoint", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
+    try {
+      const { stdout: tarballName } = await execFileAsync("npm", ["pack", "--ignore-scripts"], {
+        cwd: repoRoot,
+      });
+      const tarballPath = resolve(repoRoot, tarballName.trim().split("\n").at(-1) ?? "");
+      const { stdout: fileList } = await execFileAsync("tar", ["-tzf", tarballPath]);
+      await execFileAsync("tar", ["-xzf", tarballPath, "-C", fixture]);
+      await rm(tarballPath);
+
+      const packageRoot = join(fixture, "package");
+      const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as PackageManifest;
+      const entrypoint = resolve(packageRoot, manifest.pi.extensions[0]);
+      const result = await loadExtension(entrypoint, packageRoot);
+
+      expect(fileList.trim().split("\n").sort()).toEqual(expectedPackageFiles);
+      expect(result.errors).toEqual([]);
+      expect(result.extensions).toHaveLength(1);
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  }, 30_000);
+
+  it("keeps source runtime imports loader-provided or built-in", async () => {
+    const sourceDir = join(repoRoot, "src");
+    const sourceFiles = (await readdir(sourceDir)).filter((file) => file.endsWith(".ts"));
+    const imports = await Promise.all(
+      sourceFiles.map(
+        async (file) =>
+          [
+            file,
+            [...(await readFile(join(sourceDir, file), "utf8")).matchAll(/from\s+["']([^"']+)["']/g)].map(
+              (match) => match[1],
+            ),
+          ] as const,
+      ),
+    );
+
+    for (const [file, specifiers] of imports) {
+      expect(specifiers, file).toSatisfy((values: string[]) =>
+        values.every(
+          (specifier) =>
+            specifier.startsWith("node:") ||
+            specifier.startsWith("./") ||
+            specifier.startsWith("@earendil-works/pi-ai") ||
+            specifier === "@earendil-works/pi-coding-agent",
+        ),
+      );
+    }
+  });
 
   it("requires the native Provider extension API", async () => {
     const { default: manifest } = await import("../package.json", {

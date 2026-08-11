@@ -61,7 +61,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Run interactive Pi terminal smoke");
     expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");
     expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
-    expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
+    expect(workflow).toContain("./node_modules/.bin/pi -e . --list-models litellm");
+    expect(workflow).not.toContain("-e ./dist/index.js");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");

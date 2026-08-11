@@ -1,8 +1,14 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CACHE_TTL_MS, getGcloudToken, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCommand, resetGcloudTokenCache } from "../src/gcloud-token.js";
+
+const execFileAsync = promisify(execFile);
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const ORIGINAL_ENV = {
   APPDATA: process.env.APPDATA,
@@ -31,6 +37,26 @@ afterEach(() => {
   }
   resetGcloudTokenCache();
   vi.restoreAllMocks();
+});
+
+describe("getGcloudTokenCommand", () => {
+  it("executes a TypeScript token module through Pi's command helper", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-litellm-gcloud-command-"));
+    const modulePath = join(fixture, "token-source.ts");
+    await writeFile(modulePath, 'export async function getGcloudToken() { return "ya29.subprocess-token"; }\n');
+
+    const command = getGcloudTokenCommand(new URL(`file://${modulePath}`).href).slice(1);
+    const { stdout } = await execFileAsync("/bin/sh", ["-c", command], { cwd: repoRoot });
+
+    expect(stdout).toBe("ya29.subprocess-token");
+  });
+
+  it("keeps the plain-Node CLI import graph limited to built-ins and the supplied module URL", async () => {
+    const source = await readFile(join(repoRoot, "src/gcloud-token-cli.ts"), "utf8");
+
+    expect(source.match(/(?:from\s+|import\()["']([^"']+)/g) ?? []).toEqual([]);
+    expect(source).toContain("await import(moduleUrl)");
+  });
 });
 
 describe("getGcloudToken", () => {

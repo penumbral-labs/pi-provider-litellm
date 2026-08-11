@@ -4,8 +4,8 @@
 
 - This package is a Pi extension that registers a `litellm` provider from `src/index.ts`.
 - Source is TypeScript ESM under `src/`; tests are Vitest specs under `tests/`.
-- Build output is `dist/`; do not edit generated output by hand.
-- The package entrypoint is `./dist/index.js`, and the Pi extension registration comes from `package.json` `pi.extensions`.
+- Build output is `dist/`; do not edit generated output by hand or publish it.
+- Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 
 ## Commands
@@ -45,14 +45,14 @@
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
-- The non-interactive Pi CLI smoke uses `./dist/index.js`, so runtime changes need a fresh build before running it.
+- Pi CLI smoke tests load the package root so they exercise the shipped `./src/index.ts` entrypoint.
 
 ## Release And Packaging
 
 - The release workflow is tag-driven for `v*.*.*`; it publishes with `npm publish --access public --provenance` and creates a GitHub release.
 - Local release prep should keep `package.json` and `package-lock.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
 - Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag.
-- The npm package should stay limited to `dist`, `README.md`, and `LICENSE`.
+- The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only.
 - `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files; update tests before changing that policy.
 
 ## Package Metadata
