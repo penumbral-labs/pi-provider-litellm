@@ -370,6 +370,38 @@ describe("createLiteLLMProvider", () => {
     ]);
   });
 
+  it("drops a cached model whose URL uses a non-http scheme", () => {
+    // Host and port match; only the scheme differs. Without the http(s) restriction
+    // the host comparison alone would accept this.
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    const cached = { ...native("ws"), baseUrl: "ws://proxy.example/v1" };
+
+    expect(value.filterModels?.([cached], credential)).toEqual([]);
+  });
+
+  it("names the placeholder host rather than staleness for a cached placeholder model", () => {
+    // Both the placeholder branch and the stale-host branch would hide this model, so
+    // only the message distinguishes them. The placeholder wording is the actionable
+    // one, and it is what README documents for this row.
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
+    const cached = { ...native("ph"), baseUrl: "https://litellm.example.com/v1" };
+
+    expect(value.filterModels?.([cached], credential)).toEqual([]);
+    expect(String(stderr.mock.calls.at(-1)?.[0])).toContain("Cached model uses a placeholder LiteLLM model host");
+  });
+
+  it("reports a repeated diagnostic only once per provider instance", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
+    const stale = { ...native("stale"), baseUrl: "https://old.example/v1" };
+
+    expect(value.filterModels?.([stale], credential)).toEqual([]);
+    expect(value.filterModels?.([stale], credential)).toEqual([]);
+
+    expect(stderr.mock.calls.filter(([line]) => String(line).includes("stale LiteLLM model host"))).toHaveLength(1);
+  });
+
   it("treats a differing port as a different host", () => {
     // The likeliest real mismatch: a local proxy moved port. Port is part of the
     // host comparison, so the cached entry is dropped rather than repointed.

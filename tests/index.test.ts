@@ -1255,6 +1255,96 @@ describe("extension startup", () => {
     expect(streamOnce).toThrow(/do not identify a LiteLLM model host/);
   });
 
+  it("does not lend the remembered SSO root to a different credential", async () => {
+    // Pins the token binding specifically. Precedence cannot help here (no request
+    // base URL) and neither can invalidation (no api key resolved), so an unbound
+    // memo would hand this request the SSO host.
+    const harness = await oauthTransitionHarness();
+    const model = {
+      id: "other-cred",
+      name: "Other credential",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://sso.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+    await harness.provider.auth.oauth?.toAuth({
+      type: "oauth",
+      access: "sk-owner",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://sso.example.com",
+    });
+
+    // The owning token still reaches it...
+    expect(() => harness.provider.stream(model, { messages: [] }, { apiKey: "sk-owner" } as never)).not.toThrow();
+    // ...but a different credential must not.
+    expect(() => harness.provider.stream(model, { messages: [] }, { apiKey: "sk-other" } as never)).toThrow(
+      /do not identify a LiteLLM model host/,
+    );
+  });
+
+  it("prefers the credential's own host over ambient env on the Skills surface", async () => {
+    // getRuntimeAuth reads auth.env[LITELLM_BASE_URL]; dropping that read silently
+    // sends the credential's key to whatever host the environment names.
+    process.env.LITELLM_BASE_URL = "https://environment.example.com";
+    const requested: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requested.push(String(input));
+      if (String(input).endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      return jsonResponse(200, []);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "litellm_skill_list");
+
+    await tool?.execute?.("call-1", {}, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "sk-credential" },
+          env: { LITELLM_BASE_URL: "https://credential.example.com" },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(requested.filter((url) => url.startsWith("https://credential.example.com/"))).not.toHaveLength(0);
+    expect(requested.filter((url) => url.startsWith("https://environment.example.com/"))).toHaveLength(0);
+  });
+
+  it("drops null header sentinels instead of serializing them", async () => {
+    // ProviderHeaders allows null as pi's header-removal sentinel. It must never reach
+    // the wire as the string "null".
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      return jsonResponse(200, []);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "litellm_skill_list");
+
+    await tool?.execute?.("call-1", {}, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: { apiKey: "sk-test", headers: { "x-keep": "yes", "x-drop": null } },
+          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    const headers = new Headers(fetchMock.mock.lastCall?.[1]?.headers as Record<string, string>);
+    expect(headers.get("x-keep")).toBe("yes");
+    expect(headers.has("x-drop")).toBe(false);
+  });
+
   it("routes OAuth requests by remembered root when nothing supplies a request base URL", async () => {
     // No LITELLM_BASE_URL at all: OAuth resolution contributes no request env, so
     // the remembered root is the only thing that can identify the proxy.
