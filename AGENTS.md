@@ -25,7 +25,7 @@
 - The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Model catalogs are persisted by Pi in `~/.pi/agent/models-store.json`; this extension owns no model cache. `src/cache.ts` provides only `writeJsonAtomic`, used for the models.dev catalog. Legacy `litellm-models*.json` files are ignored and never deleted.
+- Model catalogs are persisted by Pi in `~/.pi/agent/models-store.json`; this extension owns no model cache. `src/cache.ts` provides only `writeJsonAtomic`, used for the models.dev catalog it writes as `litellm-models-dev.json`. The legacy `litellm-models.json` cache is ignored and never deleted.
 
 ## LiteLLM Request Hooks
 
@@ -36,12 +36,16 @@
 
 ## Protocols And Model Hosts
 
-- `src/protocols.ts` is the single place a protocol's request base URL shape is defined. Add a `LiteLLMApi` member there and in `createLiteLLMProtocolApis()`; its explicit `Record` return type makes a missing entry a typecheck failure.
-- `api` values arriving from user `models.json` are unconstrained. Narrow with `isLiteLLMApi` before calling `resolveModelBaseUrl`, which assumes its `api` is already in the registry.
+- `src/protocols.ts` is the single place a protocol's request base URL shape is defined. Add a `LiteLLMApi` member there and in `createLiteLLMProtocolApis()`; its explicit `Record` return type makes a missing entry a typecheck failure. `src/index.ts` still hardcodes `/v1` when composing the provider default and the discovery result; both survive only because `normalizeBaseUrl` strips one trailing `/v1` before `modelBaseUrl` runs.
+- `api` values arriving from user `models.json` are unconstrained. Narrow with `isLiteLLMApi` before calling `resolveModelBaseUrl`, which assumes its `api` is already in the registry. `toNativeModels` is exempt because its input is discovery output, which is typed.
+- Host enforcement only covers models Pi routes to this provider. Pi's composer delegates to us only when we already list a model with the same `api`, so a `models.json` entry with an otherwise-unused `api` bypasses `filterModels` and the request guard entirely. Do not describe the guarantee as unconditional.
+- Pair `api` and `compat` by spreading one `modelProtocol()` result rather than assigning the two fields separately; that is what makes a cross-protocol pairing a compile error instead of a convention.
+- Any host remembered across calls ranks below an explicit per-request base URL and must be discarded when a non-OAuth credential resolves. Ordering a remembered root first lets a stale value outrank the live credential.
+- `getRuntimeAuth` runs from `before_agent_start` on every turn, including turns that never touch LiteLLM. It must return `undefined` for configuration problems rather than throw; only the LiteLLM tool surfaces should raise.
 - `filterModels` must not throw: pi's `getAvailable()` has no per-provider isolation, so one throw empties every provider's model list. Reject a model by returning a reason and reporting it, never by throwing.
 - The fail-closed host invariant is split deliberately: `src/index.ts` resolves and validates the credential root, `src/provider.ts` compares a model against that root. Both use the shared `isPlaceholderHost`; keep placeholder and scheme rules in those helpers instead of re-deriving them.
-- Any host remembered across calls must be scoped to the credential it came from. An unscoped root outlives `/logout` and can send a new key to a previously authenticated host.
-- Keep README's "Model host enforcement" section in sync when changing what hides a model or what the diagnostics say.
+- Keep README's "Model host enforcement" table in sync when changing what hides a model, what a diagnostic says, or which fix resolves it.
+- Guards here have repeatedly survived full mutation with a green suite. When adding or changing one, delete its body and confirm a test fails; if none does, the guard is unpinned no matter how many tests pass.
 
 ## Compatibility Rules
 

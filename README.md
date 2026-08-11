@@ -224,35 +224,46 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 
 ## Model catalog
 
-Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models*.json` files are ignored and are not deleted.
+Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. The legacy `litellm-models.json` cache is ignored and is not deleted; `litellm-models-dev.json` is the live models.dev cache described above and is still used.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
 ### Model host enforcement
 
-Every request is sent to the host the active credential resolves to, and a model is hidden rather than requested when it cannot be matched to that host. A model is dropped when:
+Models this provider dispatches are sent to the host the active credential resolves to. A model that cannot be matched to that host is hidden from `/model` rather than requested, and its request URL is derived from the credential's root rather than from whatever base URL the model carries.
 
-- no base URL resolves at all — nothing is configured and no credential supplies one
-- the resolved base URL is not a valid `http`/`https` URL, such as `localhost:4000` with no scheme
-- the resolved base URL is still the documentation placeholder `https://litellm.example.com`
-- the model was discovered against a different host than the active credential, which happens after switching proxies
-- the model declares an `api` this extension does not implement (see [Protocols](#protocols))
+**Scope.** The guarantee covers models this provider streams, which is the models discovery produced and any `models.json` model whose `api` matches one of theirs. It is not a guarantee about every model Pi can name. Pi routes a model to this provider only when the provider already lists a model using the same `api`; a `models.json` entry with an otherwise-unused `api` is hidden from `/model` but, if selected by id or restored from a saved session, is streamed by Pi directly at its configured `baseUrl`. Do not rely on this enforcement to contain a hand-written custom-API entry.
 
-Each reason is reported once per session on stderr. When a provider goes completely empty, that message is the explanation. Rediscover models for the current host by opening `/model`.
+A model is dropped when:
+
+| Reason | Diagnostic mentions | Fix |
+|---|---|---|
+| Nothing configured — no base URL resolves and no credential supplies one | `no LiteLLM base URL is configured` | Set `LITELLM_BASE_URL` or run `/login litellm` |
+| Base URL is not a valid `http`/`https` URL, such as `localhost:4000` with no scheme | `invalid LiteLLM base URL` / `invalid LiteLLM model URL` | Correct `LITELLM_BASE_URL`; include the scheme |
+| Base URL is still the documentation placeholder `https://litellm.example.com` | `placeholder LiteLLM model host` | Set your proxy's URL, or run `/login litellm` |
+| A cached model's URL is unparseable | `Cached model has an invalid LiteLLM model URL` | Refresh the catalog by opening `/model` |
+| A cached model's host is the placeholder | `Cached model uses a placeholder LiteLLM model host` | Refresh the catalog by opening `/model` |
+| A cached model was discovered against another host, as after switching proxies | `stale LiteLLM model host` | Refresh against the current proxy by opening `/model` |
+| The model declares an `api` this extension does not implement | `declares unsupported protocol` | Correct `api` in `models.json` (see [Protocols](#protocols)) |
+
+Each distinct diagnostic is written once per session to stderr; the message names the model or host, so several offending models produce several lines. Opening `/model` fixes only the cached-model rows — the first three are configuration problems a refresh cannot resolve.
 
 Because enforcement is keyed on the credential, `LITELLM_OFFLINE=1` does not recover a host mismatch on its own: offline mode serves the persisted catalog, and a catalog discovered against another host is still dropped. Clear the mismatch with one online refresh against the current proxy, after which offline mode works normally again.
 
 ### Protocols
 
-Discovery maps each model to one of three request protocols and derives its request URL from the proxy root:
+Discovery maps each model to a request protocol and derives its request URL from the proxy root:
 
 | `api` | Request base | Selected when |
 |---|---|---|
 | `openai-completions` | `<root>/v1` | default for chat-style routes |
 | `openai-responses` | `<root>/v1` | `/model/info` reports `mode: "responses"` |
-| `anthropic-messages` | `<root>` | not produced by discovery; set explicitly in `models.json` |
 
-A model whose `api` is set to any other value in `~/.pi/agent/models.json` is dropped with a diagnostic naming the supported values. A per-model `baseUrl` in `models.json` is not honored as a request target: it is re-derived from the active credential host, and the model is dropped when its host differs.
+A model whose `api` is set to anything else in `~/.pi/agent/models.json` is dropped with a diagnostic naming the supported values.
+
+An `anthropic-messages` request path exists internally, but discovery never selects it and it is not supported for selection yet: a `models.json` entry using it is hidden from `/model` and escapes the host enforcement described above. Native Messages support is a separate piece of work.
+
+For models this provider dispatches, a per-model `baseUrl` in `models.json` is not honored as a request target — it is re-derived from the active credential host, and the model is dropped when its host differs.
 
 ## Troubleshooting
 
@@ -262,7 +273,7 @@ A model whose `api` is set to any other value in `~/.pi/agent/models.json` is dr
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models. Offline mode does not recover a host mismatch — see [Model host enforcement](#model-host-enforcement) |
-| A provider shows no models at all | The base URL is missing, scheme-less, still the placeholder, or differs from the host the cached models were discovered against. Check stderr for the reason and see [Model host enforcement](#model-host-enforcement) |
+| A provider shows no models at all | The base URL is missing, scheme-less, still the placeholder, or differs from the host the cached models were discovered against. Check stderr for the reason and match it against the table in [Model host enforcement](#model-host-enforcement) |
 | A model configured in `models.json` never appears | Its `api` is not one of the supported protocols, or its `baseUrl` host differs from the active credential host — see [Protocols](#protocols) |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |

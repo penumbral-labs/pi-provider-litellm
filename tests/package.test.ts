@@ -70,7 +70,10 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
     expect(readme).not.toContain("/litellm-refresh");
-    expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
+    // Named exactly, not globbed: `litellm-models*.json` also matches the live
+    // models.dev cache this extension writes.
+    expect(readme).toContain("The legacy `litellm-models.json` cache is ignored and is not deleted");
+    expect(readme).not.toContain("`litellm-models*.json`");
     expect(readme).not.toContain("older than 24 hours");
     expect(readme).not.toContain("enter `2` for SSO");
   });
