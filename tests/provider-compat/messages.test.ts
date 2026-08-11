@@ -174,7 +174,8 @@ describe("Anthropic Messages wire compatibility", () => {
   );
 
   it("reduces a mixed-generation Claude alias to Chat instead of a wrong Messages shape", async () => {
-    const { models, model, requestUrls, requests, respondRaw } = await createCompatibilityHarness(mixedGenerationRoutes);
+    const { models, model, requestUrls, requests, respondRaw } =
+      await createCompatibilityHarness(mixedGenerationRoutes);
     respondRaw(
       'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
         "data: [DONE]\n\n",

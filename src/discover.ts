@@ -183,14 +183,7 @@ function undecoratedBackendIds(id: string): string[] {
   const routed = (id.split("/").pop() ?? id).toLowerCase();
   const undecorated = routed.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
   return [
-    ...new Set(
-      [
-        routed,
-        routed.replace(/:\d+$/, ""),
-        undecorated,
-        undecorated.replace(/-\d{8}$/, ""),
-      ].filter(Boolean),
-    ),
+    ...new Set([routed, routed.replace(/:\d+$/, ""), undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean)),
   ];
 }
 
