@@ -767,7 +767,9 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
-    expect(getSupportedThinkingLevels(result.models[0]!)).toEqual([]);
+    expect(
+      getSupportedThinkingLevels({ ...result.models[0]!, provider: "litellm", baseUrl: "https://litellm.example.com" }),
+    ).toEqual([]);
     expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
   });
 
@@ -793,7 +795,9 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
-    expect(getSupportedThinkingLevels(result.models[0]!)).toEqual([]);
+    expect(
+      getSupportedThinkingLevels({ ...result.models[0]!, provider: "litellm", baseUrl: "https://litellm.example.com" }),
+    ).toEqual([]);
     expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
   });
 
