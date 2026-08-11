@@ -368,6 +368,30 @@ describe("createLiteLLMProvider", () => {
     ]);
   });
 
+  // The remembered OAuth root is keyed by access token, so a refresh that rotates the
+  // token is the one event that can break the match. Each of these drives the request
+  // path with the apiKey pi would supply after that resolution.
+  it("follows an access token across a refresh and refuses a token it never saw", () => {
+    let remembered: { apiKey: string; root: string } | undefined;
+    const value = controller({
+      resolveCredentialRoot: ({ requestBaseUrl, apiKey }) =>
+        (apiKey && remembered?.apiKey === apiKey ? remembered.root : undefined) ?? requestBaseUrl,
+    });
+    const model = native("stored");
+
+    remembered = { apiKey: "token-1", root: "https://proxy.example" };
+    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-1" })).not.toThrow();
+
+    // Refresh rotates the token; the new resolution re-remembers under the new token.
+    remembered = { apiKey: "token-2", root: "https://proxy.example" };
+    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-2" })).not.toThrow();
+
+    // The superseded token no longer matches and has no env root to fall back to.
+    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-1" })).toThrow(
+      /do not identify a LiteLLM model host/i,
+    );
+  });
+
   it("drops a model with an unsupported transport instead of failing the whole list", () => {
     const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
     const usable = native("usable");

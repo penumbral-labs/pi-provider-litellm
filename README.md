@@ -146,10 +146,16 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 ## Model transport
 
 A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat
-mode and has positive Claude family/model evidence through an Anthropic-, Bedrock-, or Vertex-capable adapter.
-Provider-prefixed and valid unprefixed Claude model identifiers are supported; adapter names alone never select Messages.
-Mixed, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit Responses mode takes precedence.
-The underlying catalog/provider identity and pricing are unchanged by this choice.
+mode, has positive Claude family/model evidence through an Anthropic-, Bedrock-, or Vertex-capable adapter, and resolves
+the same Anthropic compatibility policy. Provider-prefixed and valid unprefixed Claude model identifiers are supported;
+adapter names alone never select Messages. Mixed, unknown, and fallback-only groups remain on Chat Completions;
+unanimous explicit Responses mode takes precedence. The underlying catalog/provider identity and pricing are unchanged
+by this choice.
+
+Requiring unanimous compatibility matters when one public alias is load-balanced across two Claude generations, as
+happens mid-migration: if one deployment requires adaptive thinking and another requires budget thinking, no single
+Messages request satisfies both, so the group stays on Chat Completions and LiteLLM adapts the payload per deployment.
+A backend the bundled catalog does not recognize is treated the same way, rather than guessing a request shape.
 
 Native Messages authenticates to LiteLLM with `x-api-key` (not `Authorization: Bearer`) and intentionally omits
 `litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and Responses requests.
@@ -157,9 +163,10 @@ Native Messages authenticates to LiteLLM with `x-api-key` (not `Authorization: B
 Anthropic request compatibility — adaptive versus budget thinking, whether the route accepts `temperature`, and strict
 tool schemas — comes from the backend model LiteLLM reports, never from the public route name. Deployment decoration is
 canonicalized first, so Bedrock cross-region and cross-partition inference profiles, Bedrock model versions, Vertex
-serving suffixes, and dated release snapshots resolve to the same policy as the model they are a snapshot of. That policy
-applies when every deployment in the group agrees; when deployments disagree, or the backend model is unrecognized, Pi
-uses Anthropic's defaults. Carrying compatibility never grants the route catalog provider identity, pricing, or limits.
+serving suffixes, and dated release snapshots resolve to the same policy as the model they are a snapshot of. The same
+canonical identifiers are looked up in the adapter's own catalog, so a decorated Bedrock Claude route keeps its Amazon
+Bedrock provider identity, prices, limits, and thinking levels. A route whose backend has no entry in the bundled catalog
+at all (Vertex Claude today) still carries compatibility while its identity and pricing stay withheld.
 
 LiteLLM does not currently return `x-litellm-response-cost` on `/v1/messages`, so a Claude route on native Messages
 reports the discovered static estimate rather than LiteLLM's actual computed cost. Chat Completions and Responses
@@ -167,7 +174,9 @@ requests still take actual cost from that header when LiteLLM returns it.
 
 ## Model catalog authority
 
-Metadata enrichment from Pi's bundled model catalog requires unambiguous provider identity: a known adapter, a known provider prefix, or a recognized Anthropic alias. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog happens to list that name first. Those models appear with the id LiteLLM reported, a `(no metadata)` or `(incomplete metadata)` suffix when cost data is incomplete, default context and output limits, and no static pricing. Qualify the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) to get full metadata.
+Metadata enrichment from Pi's bundled model catalog requires two things: unambiguous provider identity (a known adapter, a known provider prefix, or a recognized Anthropic alias) **and** an entry for that backend model in the bundled catalog. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog happens to list that name first, and a model newer than the bundled catalog stays unknown even when its provider is obvious. Those models appear with the id LiteLLM reported, a `(no metadata)` or `(incomplete metadata)` suffix when cost data is incomplete, default context and output limits, and no static pricing.
+
+Qualifying the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) supplies the identity half. Router-reported limits and per-token costs in `/model/info` are always used when present, so a proxy that fills those in reports correct pricing and limits regardless of catalog coverage.
 
 ## When LiteLLM models disappear
 
@@ -274,7 +283,8 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | No LiteLLM models, with a "stale LiteLLM model host" note on stderr | Cached models were discovered against a different host than the active credential — open `/model` to refresh |
-| No LiteLLM models, with a "placeholder LiteLLM model host" note | No real base URL is configured; the sample `litellm.example.com` is never contacted — set `LITELLM_BASE_URL` or run `/login litellm` |
+| No LiteLLM models, with a "placeholder LiteLLM model host" note | `LITELLM_BASE_URL` or a stored credential is literally the sample `litellm.example.com`, which is never contacted — set your own proxy URL |
+| No LiteLLM models and no note at all | No base URL is configured anywhere — set `LITELLM_BASE_URL` or run `/login litellm` |
 | No LiteLLM models, with an "invalid LiteLLM model URL" note | `LITELLM_BASE_URL` is not an absolute `http(s)` URL (for example `localhost:4000` instead of `http://localhost:4000`) |
 | Model name ends in `(no metadata)` or `(incomplete metadata)` | The route reports incomplete cost data and its backend is not unambiguously identifiable — see [Model catalog authority](#model-catalog-authority) |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |

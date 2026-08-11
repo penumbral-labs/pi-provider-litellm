@@ -167,6 +167,64 @@ describe("runSmoke", () => {
     expect(requests).toEqual(["http://127.0.0.1:4000/model/info"]);
   });
 
+  it("rejects a response-cost expectation mismatch", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "ok" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedResponseCost: new Map([["chat-route", true]]),
+      }),
+    ).rejects.toThrow(/Response-cost header mismatch for chat-route: expected present, got absent/);
+  });
+
+  it("rejects a configured expectation map that omits a requested model", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["other-route", "openai-completions"]]),
+      }),
+    ).rejects.toThrow(/No expected API configured for smoke model chat-route/);
+  });
+
+  it.each([
+    ["missing separator", "vidaimock-openai"],
+    ["leading separator", "=openai-completions"],
+    ["unknown value", "vidaimock-openai=openai-chat"],
+    ["empty value", "vidaimock-openai="],
+  ])("rejects a malformed expected-API entry (%s)", (_label, raw) => {
+    expect(() => parseExpectedApis(raw)).toThrow(/LITELLM_SMOKE_EXPECT_APIS entries must use model=value/);
+  });
+
+  it("rejects a malformed response-cost entry", () => {
+    expect(() => parseExpectedResponseCost("vidaimock-openai=maybe")).toThrow(
+      /LITELLM_SMOKE_EXPECT_RESPONSE_COST entries must use model=value/,
+    );
+  });
+
   it("discovers models and sends a chat completion request to each requested model", async () => {
     const requests: Array<{ url: string; body?: unknown; headers?: Record<string, string> }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

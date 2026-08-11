@@ -133,6 +133,20 @@ describe("supply-chain guard", () => {
 
       expect(result.errors).toEqual([]);
       expect(result.ok).toBe(true);
+
+      // The allow-list is per module, not `dist/*`: an unexpected emitted file must
+      // still be rejected, so widening the pattern cannot pass unnoticed.
+      await writeFile(join(fixture, "dist", "backdoor.js"), "export {};\n");
+      await writeFile(join(fixture, "dist", "discover.js.map"), "{}\n");
+      const widened = await checkSupplyChain(fixture);
+
+      expect(widened.ok).toBe(false);
+      expect(widened.errors).toEqual(
+        expect.arrayContaining([
+          "npm package: unexpected published file dist/backdoor.js",
+          "npm package: unexpected published file dist/discover.js.map",
+        ]),
+      );
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
