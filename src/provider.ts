@@ -9,7 +9,12 @@ import {
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
-import { createLiteLLMProtocolApis, isLiteLLMApi, LITELLM_API_NAMES, resolveModelBaseUrl } from "./protocols.js";
+import {
+  createLiteLLMProtocolApis,
+  isLiteLLMApi,
+  resolveModelBaseUrl,
+  SELECTABLE_LITELLM_API_NAMES,
+} from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -80,7 +85,7 @@ function modelError(model: Model<LiteLLMApi>, activeHost: string): Error | undef
   if (!isLiteLLMApi(model.api)) {
     return new Error(
       `LiteLLM model ${model.id} declares unsupported protocol "${model.api}"; ` +
-        `set "api" to one of ${LITELLM_API_NAMES.join(", ")} in models.json`,
+        `set "api" to one of ${SELECTABLE_LITELLM_API_NAMES.join(", ")} in models.json`,
     );
   }
   const storedHost = parseHost(model.baseUrl);

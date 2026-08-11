@@ -261,7 +261,7 @@ Discovery maps each model to a request protocol and derives its request URL from
 
 A model whose `api` is set to anything else in `~/.pi/agent/models.json` is dropped with a diagnostic naming the supported values.
 
-An `anthropic-messages` request path exists internally, but discovery never selects it and it is not supported for selection yet: a `models.json` entry using it is hidden from `/model` and escapes the host enforcement described above. Native Messages support is a separate piece of work.
+An `anthropic-messages` request path exists internally, but discovery never selects it and it is not supported for configuration yet. Do not set it in `models.json`: because no discovered model shares that `api`, Pi streams such an entry outside this provider, so it escapes the host enforcement above and is sent to whatever `baseUrl` the entry names — while still appearing in `/model` as though it were governed. Native Messages support is separate work.
 
 For models this provider dispatches, a per-model `baseUrl` in `models.json` is not honored as a request target — it is re-derived from the active credential host, and the model is dropped when its host differs.
 

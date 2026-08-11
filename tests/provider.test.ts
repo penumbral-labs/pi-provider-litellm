@@ -416,7 +416,7 @@ describe("createLiteLLMProvider", () => {
     expect(value.filterModels?.([foreignApiModel("gemini"), native("valid")], credential)).toEqual([native("valid")]);
     expect(stderr).toHaveBeenCalledWith(
       'LiteLLM (litellm): LiteLLM model gemini declares unsupported protocol "google-generative-ai"; ' +
-        'set "api" to one of anthropic-messages, openai-completions, openai-responses in models.json\n',
+        'set "api" to one of openai-completions, openai-responses in models.json\n',
     );
   });
 
@@ -572,7 +572,7 @@ describe("createLiteLLMProvider", () => {
       /declares unsupported protocol "google-generative-ai"/,
     );
     expect(() => value.streamSimple(foreignApiModel("gemini"), { messages: [] })).toThrow(
-      /set "api" to one of anthropic-messages, openai-completions, openai-responses/,
+      /set "api" to one of openai-completions, openai-responses/,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
     expect(apiSpies.responses).not.toHaveBeenCalled();
