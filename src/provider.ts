@@ -17,13 +17,10 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
-  /**
-   * Resolves the proxy root the given request/credential must target.
-   *
-   * `apiKey` identifies the resolved credential on request paths, where no
-   * `Credential` is available; implementations use it to scope any remembered
-   * root to the credential it came from.
-   */
+  // Resolves the proxy root the given request/credential must target. `apiKey`
+  // identifies the resolved credential on request paths, where no Credential is
+  // available; implementations use it to scope any remembered root to the
+  // credential it came from.
   resolveCredentialRoot?: (request: {
     credential?: Credential;
     requestBaseUrl?: string;
@@ -47,7 +44,8 @@ export function toNativeModels(
 export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
 const PLACEHOLDER_HOSTS = new Set([new URL(DEFAULT_LITELLM_BASE_URL).host]);
 
-/** Shared with the extension entrypoint so both auth and request paths reject the same hosts. */
+// Shared with the extension entrypoint so both auth and request paths reject the
+// same hosts.
 export function isPlaceholderHost(host: string): boolean {
   return PLACEHOLDER_HOSTS.has(host.toLowerCase());
 }
@@ -73,14 +71,11 @@ function activeCredentialRoot(root: string): { root: string; host: string } {
   return { root: normalizeBaseUrl(root), host };
 }
 
-/**
- * Returns why a model cannot be requested with the active credentials, or
- * undefined when it can be.
- *
- * Callers must reject before deriving a request URL: the protocol check here is
- * what keeps `resolveModelBaseUrl`'s registry lookup in bounds for models that
- * came from user `models.json` config rather than from our own discovery.
- */
+// Returns why a model cannot be requested with the active credentials, or
+// undefined when it can be. Callers must reject before deriving a request URL:
+// the protocol check here is what keeps resolveModelBaseUrl's registry lookup in
+// bounds for models that came from user models.json config rather than from our
+// own discovery.
 function modelError(model: Model<LiteLLMApi>, activeHost: string): Error | undefined {
   if (!isLiteLLMApi(model.api)) {
     return new Error(

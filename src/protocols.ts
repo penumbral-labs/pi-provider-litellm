@@ -27,13 +27,10 @@ export const LITELLM_PROTOCOLS = {
 
 export const LITELLM_API_NAMES = Object.keys(LITELLM_PROTOCOLS) as LiteLLMApi[];
 
-/**
- * Narrows an arbitrary `Model.api` to a protocol this provider implements.
- *
- * Pi hands us models assembled from `models.json`, where `api` is copied
- * verbatim from user config, so callers must narrow before deriving a request
- * URL — `resolveModelBaseUrl` assumes its `api` is already in the registry.
- */
+// Narrows an arbitrary Model.api to a protocol this provider implements. Pi hands
+// us models assembled from models.json, where `api` is copied verbatim from user
+// config, so callers must narrow before deriving a request URL: resolveModelBaseUrl
+// assumes its `api` is already in the registry.
 export function isLiteLLMApi(api: string): api is LiteLLMApi {
   return Object.hasOwn(LITELLM_PROTOCOLS, api);
 }
