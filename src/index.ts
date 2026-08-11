@@ -21,14 +21,9 @@ import {
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
-import {
-  getGcloudToken,
-  getGcloudTokenCacheKey,
-  getGcloudTokenCommand,
-  isGcloudTokenAuthEnabled,
-} from "./gcloud-token.js";
+import { getGcloudToken, getGcloudTokenCacheKey, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions } from "./mcp-tools.js";
+import { createMcpToolDefinitions, reportMcpRegistrationFailure } from "./mcp-tools.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -402,11 +397,7 @@ async function resolveCredentials(
   const apiKey = gcloudKey || configuredKey || helperKey || envKey;
 
   let apiKeyConfig: string | undefined;
-  if (gcloudKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (!executeHelpers && gcloudCacheKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (configuredKey && definition.apiKeyConfig) {
+  if (configuredKey && definition.apiKeyConfig) {
     apiKeyConfig = definition.apiKeyConfig;
   } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
     apiKeyConfig = definition.apiKeyConfig;
@@ -639,7 +630,11 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
           { executeHelpers: false },
         );
-        if (configured.apiKey || configured.apiKeyConfig)
+        if (
+          configured.apiKey ||
+          configured.apiKeyConfig ||
+          (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+        )
           return {
             type: "api_key",
             source:
@@ -924,7 +919,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function requestBaseUrl(definition: ProviderDefinition): string {
-    return `${resolveSanitizedCredentialRoot(definition) ?? normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
+    try {
+      return `${resolveSanitizedCredentialRoot(definition) ?? normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
+    } catch {
+      return `${normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
+    }
   }
 
   async function authForCredential(definition: ProviderDefinition, credential: Credential) {
@@ -953,7 +952,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
-  const oauthRuntimeRoots = new Map<string, string>();
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
@@ -971,10 +969,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const baseUrl = resolveSanitizedCredentialRoot(
       definitions.find((definition) => definition.name === PROVIDER_NAME)!,
       undefined,
-      auth.env?.[ENV_BASE_URL] ??
-        auth.auth.baseUrl ??
-        (apiKey ? oauthRuntimeRoots.get(apiKey) : undefined) ??
-        defaultRuntimeAuth?.baseUrl,
+      auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? defaultRuntimeAuth?.baseUrl,
     );
     if (!baseUrl || !apiKey) return undefined;
     requireNonPlaceholderCredentialRoot(baseUrl);
@@ -1037,7 +1032,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
         );
         signal?.throwIfAborted();
-        for (const tool of tools) pi.registerTool(tool);
+for (const tool of tools) pi.registerTool(tool);
         registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
@@ -1055,13 +1050,23 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   for (const definition of definitions) {
+    let oauthRuntimeRoot: string | undefined;
+    const providerAuth = createProviderAuth(definition);
+    const oauthToAuth = providerAuth.oauth?.toAuth;
+    if (oauthToAuth) {
+      providerAuth.oauth!.toAuth = async (credential) => {
+        const auth = await oauthToAuth(credential);
+        oauthRuntimeRoot = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
+        return auth;
+      };
+    }
     const provider = createLiteLLMProvider({
       id: definition.name,
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
-      auth: createProviderAuth(definition),
+      auth: providerAuth,
       resolveCredentialRoot: (credential, requestBaseUrl) =>
-        resolveSanitizedCredentialRoot(definition, credential, requestBaseUrl),
+        resolveSanitizedCredentialRoot(definition, credential, oauthRuntimeRoot ?? requestBaseUrl),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
@@ -1078,15 +1083,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
       },
     });
-    const oauthToAuth = provider.auth.oauth?.toAuth;
-    if (oauthToAuth) {
-      provider.auth.oauth!.toAuth = async (credential) => {
-        const auth = await oauthToAuth(credential);
-        const baseUrl = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
-        if (baseUrl && auth.apiKey) oauthRuntimeRoots.set(auth.apiKey, baseUrl);
-        return auth;
-      };
-    }
     Object.assign(provider, { headers: resolveHeaders(definition) });
     const refreshModels = provider.refreshModels!;
     provider.refreshModels = async (context) => {

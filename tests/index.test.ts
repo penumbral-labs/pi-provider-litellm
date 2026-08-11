@@ -1,12 +1,16 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AuthInteraction,
-  Credential,
-  Provider,
-  ProviderModelsStore,
-  RefreshModelsContext,
+import {
+  type AuthContext,
+  type AuthInteraction,
+  type Credential,
+  createModels,
+  InMemoryCredentialStore,
+  InMemoryModelsStore,
+  type Provider,
+  type ProviderModelsStore,
+  type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
@@ -417,7 +421,8 @@ describe("extension startup", () => {
       if (url.endsWith("/mcp-rest/tools/list")) {
         return jsonResponse(200, {
           tools: [
-            { name: "bad", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "bad-one", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "bad-two", server_name: "server", inputSchema: { type: "object", properties: {} } },
             { name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } },
           ],
         });
@@ -428,7 +433,7 @@ describe("extension startup", () => {
     const pi = createPi();
     const registered: string[] = [];
     pi.registerTool = (tool) => {
-      if (tool.name === "mcp_server_bad") throw new Error("definition rejected");
+      if (tool.name.startsWith("mcp_server_bad")) throw new Error("definition rejected");
       registered.push(tool.name);
       pi.tools.push(tool);
     };
@@ -446,8 +451,12 @@ describe("extension startup", () => {
     });
 
     expect(registered).toContain("mcp_server_good");
-    expect(registered).not.toContain("mcp_server_bad");
-    expect(stderr).toHaveBeenCalledWith("LiteLLM (litellm): An MCP tool could not be registered.\n");
+    expect(registered).not.toContain("mcp_server_bad_one");
+    expect(registered).not.toContain("mcp_server_bad_two");
+    expect(stderr.mock.calls.filter(([message]) => String(message).includes("could not be registered"))).toHaveLength(
+      1,
+    );
+    expect(stderr).toHaveBeenCalledWith("LiteLLM MCP: An MCP tool could not be registered.\n");
     expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
   });
 
@@ -849,6 +858,71 @@ describe("extension startup", () => {
     expect(pi.providers).toHaveLength(1);
     expect(registeredModels).toBeUndefined();
     expect(vi.mocked(globalThis.fetch).mock.calls.every(([url]) => !String(url).endsWith("/model/info"))).toBe(true);
+  });
+
+  it("streams OAuth requests to the credential host over a conflicting environment host", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://environment.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-oauth",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://credential.example.com",
+    }));
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+    const model = {
+      id: "oauth-model",
+      name: "OAuth model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://credential.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+
+    const result = await models.complete(model, { messages: [] });
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
+  });
+
+  it("registers unconfigured when the configured base URL is invalid", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "localhost:4000";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await expect(extension(pi)).resolves.toBeUndefined();
+
+    expect(pi.providers).toHaveLength(1);
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-test" } });
+    expect(pi.providers[0]?.filterModels?.([], { type: "api_key", key: "sk-test" })).toEqual([]);
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {
