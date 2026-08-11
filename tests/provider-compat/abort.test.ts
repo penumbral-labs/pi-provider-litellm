@@ -1,6 +1,12 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createCompatibilityHarness, sseChunk } from "./helpers.js";
+import { anthropicSseChunk, createCompatibilityHarness, sseChunk } from "./helpers.js";
+
+const anthropicRoute = {
+  model_name: "claude-sonnet",
+  model_info: { mode: "chat", litellm_provider: "anthropic" },
+  litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+};
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -30,6 +36,43 @@ describe("native provider abort compatibility", () => {
     const recovered = await models.streamSimple(model, { messages: [user("Second")] }).result();
     expect(recovered.stopReason).toBe("stop");
     expect(recovered.content).toEqual([{ type: "text", text: "recovered" }]);
+  });
+
+  it("aborts a Messages stream without leaking a later chunk", async () => {
+    const { models, model, respond } = await createCompatibilityHarness(anthropicRoute);
+    const controller = new AbortController();
+    respond(
+      anthropicSseChunk({
+        type: "message_start",
+        message: {
+          id: "msg_abort",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "claude-sonnet",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      anthropicSseChunk({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+      anthropicSseChunk({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } }),
+      anthropicSseChunk(
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " ignored" } },
+        true,
+      ),
+      anthropicSseChunk({ type: "message_stop" }),
+    );
+
+    const stream = models.streamSimple(model, { messages: [user("First")] }, { signal: controller.signal });
+    for await (const event of stream) {
+      if (event.type === "text_delta") controller.abort();
+    }
+    const aborted = await stream.result();
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(aborted.stopReason).toBe("aborted");
+    expect(aborted.content).toEqual([{ type: "text", text: "partial" }]);
   });
 
   it("handles an already-aborted signal", async () => {

@@ -135,6 +135,32 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([responses, unknown], resolveCatalog)?.api).toBe("openai-completions");
   });
 
+  it("selects Messages only for homogeneous Claude groups after Responses precedence", () => {
+    const anthropic = row({ model_info: { id: "anthropic", mode: "chat", litellm_provider: "anthropic" } });
+    const bedrock = row({
+      model_info: { id: "bedrock", mode: "chat", litellm_provider: "bedrock" },
+      litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+    });
+    const openai = row({
+      model_info: { id: "openai", mode: "chat", litellm_provider: "openai" },
+      litellm_params: { model: "openai/gpt-4o" },
+    });
+    const unknown = row({
+      model_info: { id: "unknown", mode: "chat" },
+      litellm_params: { model: "internal/private-model" },
+    });
+    const responses = row({ model_info: { id: "responses", mode: "responses" } });
+
+    for (const order of permutations([anthropic, bedrock])) {
+      expect(reduceModelGroup(order, resolveCatalog)?.api).toBe("anthropic-messages");
+    }
+    for (const order of permutations([anthropic, openai])) {
+      expect(reduceModelGroup(order, resolveCatalog)?.api).toBe("openai-completions");
+    }
+    expect(reduceModelGroup([anthropic, unknown], resolveCatalog)?.api).toBe("openai-completions");
+    expect(reduceModelGroup([responses, responses], resolveCatalog)?.api).toBe("openai-responses");
+  });
+
   it("lets unsupported transport evidence force Chat without affecting metadata", () => {
     const responses = row({ model_info: { id: "responses", mode: "responses" } });
     const unsupported = row({

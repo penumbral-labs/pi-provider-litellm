@@ -36,7 +36,7 @@ jobs:
       LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
-      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock
+      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
@@ -143,6 +143,13 @@ jobs:
               litellm_params:
                 model: anthropic/claude-3-5-sonnet
                 api_base: http://host.docker.internal:8100
+                api_key: sk-vidaimock
+            - model_name: vidaimock-responses
+              model_info:
+                mode: responses
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
                 api_key: sk-vidaimock
             - model_name: grouped-vidaimock
               model_info:
@@ -267,6 +274,7 @@ jobs:
           ./node_modules/.bin/pi -e ./dist/index.js --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
+          grep -F "vidaimock-responses" /tmp/pi-litellm-models.txt
           grep -F "grouped-vidaimock" /tmp/pi-litellm-models.txt
 
           ./node_modules/.bin/pi \
@@ -278,8 +286,7 @@ jobs:
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
           grep -F "mock response" /tmp/pi-litellm-response.txt
 
-          # Anthropic-backed route: covers the cacheControlFormat "anthropic"
-          # compat path through LiteLLM's Anthropic translation.
+          # Anthropic-backed route: covers the native Messages serializer through LiteLLM.
           ./node_modules/.bin/pi \
             -e ./dist/index.js \
             --provider litellm \

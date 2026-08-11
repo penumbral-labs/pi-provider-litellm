@@ -522,6 +522,25 @@ describe("feature parity", () => {
     expect(pi.tools.some((tool) => tool.name.startsWith("mcp_"))).toBe(false);
   });
 
+  it("omits session grouping from native Messages payloads", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    pi.handlers.get("session_start")?.[0]?.({}, { sessionManager: { getSessionFile: () => "/tmp/session.jsonl" } });
+    const payload = { model: "claude-sonnet", messages: [{ role: "user", content: "hello" }] };
+
+    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
+      { payload },
+      { model: { provider: "litellm", id: "claude-sonnet", api: "anthropic-messages" } },
+    );
+
+    expect(result).toBeUndefined();
+    expect(payload).not.toHaveProperty("litellm_session_id");
+  });
+
   it("registers cost tracking and session grouping handlers", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

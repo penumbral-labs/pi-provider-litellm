@@ -22,7 +22,7 @@ export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | und
 export interface ReducedModelGroup {
   id: string;
   deploymentCount: number;
-  api: "openai-completions" | "openai-responses";
+  api: "anthropic-messages" | "openai-completions" | "openai-responses";
   reasoning: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision: boolean;
@@ -193,10 +193,16 @@ export function reduceModelGroup(
     ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
     : undefined;
 
+  const api = candidateModes.every((mode) => mode === "responses")
+    ? "openai-responses"
+    : candidateModes.every((mode) => mode === "chat") && semanticFamily === "claude"
+      ? "anthropic-messages"
+      : "openai-completions";
+
   return {
     id: deployments[0]?.model_name as string,
     deploymentCount: unique.deploymentCount,
-    api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
+    api,
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
     vision,

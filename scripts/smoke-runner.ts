@@ -1,12 +1,15 @@
 import { discoverModels, normalizeBaseUrl } from "../src/discover.js";
-import type { DiscoverySource } from "../src/types.js";
+import type { DiscoverySource, LiteLLMApi } from "../src/types.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const SMOKE_PROMPT = "Reply with one short word.";
 
 export type SmokeCompletion = {
   modelId: string;
+  api: LiteLLMApi;
+  endpoint: string;
   content: string;
+  hasResponseCost: boolean;
 };
 
 export type SmokeResult = {
@@ -42,6 +45,15 @@ type ChatCompletionResponse = {
   }>;
 };
 
+type ResponsesResponse = {
+  output_text?: unknown;
+  output?: Array<{ content?: Array<{ text?: unknown }> }>;
+};
+
+type MessagesResponse = {
+  content?: Array<{ type?: unknown; text?: unknown }>;
+};
+
 export function parseSmokeModels(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(/[,\s]+/)
@@ -58,36 +70,69 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
-export async function smokeChatCompletion(
+export async function smokeCompletion(
   baseUrl: string,
   apiKey: string,
   modelId: string,
+  api: LiteLLMApi,
   timeoutMs: number,
 ): Promise<SmokeCompletion> {
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const endpoint =
+    api === "anthropic-messages"
+      ? "/v1/messages"
+      : api === "openai-responses"
+        ? "/v1/responses"
+        : "/v1/chat/completions";
+  const body =
+    api === "anthropic-messages"
+      ? { model: modelId, messages: [{ role: "user", content: SMOKE_PROMPT }], max_tokens: 16 }
+      : api === "openai-responses"
+        ? { model: modelId, input: SMOKE_PROMPT, max_output_tokens: 16 }
+        : {
+            model: modelId,
+            messages: [{ role: "user", content: SMOKE_PROMPT }],
+            max_tokens: 16,
+            temperature: 0,
+          };
+  const response = await fetch(`${baseUrl}${endpoint}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [{ role: "user", content: SMOKE_PROMPT }],
-      max_tokens: 16,
-      temperature: 0,
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    throw new Error(`/v1/chat/completions for ${modelId} returned ${response.status}${await readErrorBody(response)}`);
+    throw new Error(`${endpoint} for ${modelId} returned ${response.status}${await readErrorBody(response)}`);
   }
-  const data = (await response.json()) as ChatCompletionResponse;
-  const content = data.choices?.[0]?.message?.content;
+  const data = (await response.json()) as ChatCompletionResponse & ResponsesResponse & MessagesResponse;
+  const content =
+    api === "anthropic-messages"
+      ? data.content?.find((part) => part.type === "text")?.text
+      : api === "openai-responses"
+        ? (data.output_text ?? data.output?.flatMap((item) => item.content ?? []).find((part) => part.text)?.text)
+        : data.choices?.[0]?.message?.content;
   if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error(`/v1/chat/completions for ${modelId} returned no assistant text`);
+    throw new Error(`${endpoint} for ${modelId} returned no assistant text`);
   }
-  return { modelId, content };
+  return {
+    modelId,
+    api,
+    endpoint,
+    content,
+    hasResponseCost: response.headers.has("x-litellm-response-cost"),
+  };
+}
+
+export function smokeChatCompletion(
+  baseUrl: string,
+  apiKey: string,
+  modelId: string,
+  timeoutMs: number,
+): Promise<SmokeCompletion> {
+  return smokeCompletion(baseUrl, apiKey, modelId, "openai-completions", timeoutMs);
 }
 
 export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
@@ -101,7 +146,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
   if (options.expectedSource && discovery.source !== options.expectedSource) {
     throw new Error(`Discovery source mismatch: expected ${options.expectedSource}, got ${discovery.source}`);
   }
-  const discovered = new Set(discovery.models.map((model) => model.id));
+  const discovered = new Map(discovery.models.map((model) => [model.id, model]));
   const missing = options.modelIds.filter((modelId) => !discovered.has(modelId));
   if (missing.length > 0) {
     throw new Error(`Requested smoke models were not discovered: ${missing.join(", ")}`);
@@ -109,7 +154,9 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
 
   const completions: SmokeCompletion[] = [];
   for (const modelId of options.modelIds) {
-    completions.push(await smokeChatCompletion(baseUrl, options.apiKey, modelId, timeoutMs));
+    const model = discovered.get(modelId);
+    if (!model) continue;
+    completions.push(await smokeCompletion(baseUrl, options.apiKey, modelId, model.api, timeoutMs));
   }
 
   return {
@@ -144,7 +191,10 @@ if (import.meta.main) {
       console.log(`Source: ${result.source}`);
       console.log(`Discovered ${result.discoveredCount} models.`);
       for (const completion of result.completions) {
-        console.log(`Smoke OK: ${completion.modelId} -> ${JSON.stringify(completion.content)}`);
+        const cost = completion.hasResponseCost ? "cost header present" : "cost header absent; static estimate remains";
+        console.log(
+          `Smoke OK: ${completion.modelId} ${completion.endpoint} (${cost}) -> ${JSON.stringify(completion.content)}`,
+        );
       }
     })
     .catch((error) => {

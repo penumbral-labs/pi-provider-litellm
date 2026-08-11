@@ -143,6 +143,16 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 /model
 ```
 
+## Model transport
+
+A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment has non-conflicting
+Claude-family backend evidence. Mixed, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit
+Responses mode takes precedence. The underlying catalog/provider identity and pricing are unchanged by this choice.
+
+Native Messages intentionally omits `litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and
+Responses requests. Actual request cost still comes from `x-litellm-response-cost` when LiteLLM returns it; otherwise Pi
+retains the discovered static estimate.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |
@@ -191,7 +201,10 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 ## Mocked LiteLLM smoke workflow
 
-The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
+The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes
+route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock.
+The smoke runner discovers those models through LiteLLM, calls the selected endpoint for each model, and records whether
+LiteLLM returned `x-litellm-response-cost`.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
 

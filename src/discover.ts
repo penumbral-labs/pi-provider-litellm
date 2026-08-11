@@ -482,8 +482,13 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // `/health` route text is not deployment evidence for request controls.
-  if (model) delete model.thinkingLevelMap;
+  // `/health` route text and detail lookups are not group-level transport evidence.
+  if (model) {
+    delete model.thinkingLevelMap;
+    if (model.api === "anthropic-messages") {
+      return { ...model, api: "openai-completions", compat: buildCompat(model.id) };
+    }
+  }
   return model;
 }
 

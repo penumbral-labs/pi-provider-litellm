@@ -34,12 +34,82 @@ describe("smokeChatCompletion", () => {
 
     await expect(smokeChatCompletion("http://127.0.0.1:4000", "sk-smoke", "vidaimock-openai", 1000)).resolves.toEqual({
       modelId: "vidaimock-openai",
+      api: "openai-completions",
+      endpoint: "/v1/chat/completions",
       content: "pong",
+      hasResponseCost: false,
     });
   });
 });
 
 describe("runSmoke", () => {
+  it("uses each discovered model's route-distinct endpoint and records response-cost availability", async () => {
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-route",
+              model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            },
+            { model_name: "chat-route", model_info: { id: "chat", mode: "chat" } },
+            { model_name: "responses-route", model_info: { id: "responses", mode: "responses" } },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ content: [{ type: "text", text: "messages" }] }), {
+          headers: { "content-type": "application/json", "x-litellm-response-cost": "0.01" },
+        });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "chat" } }] });
+      }
+      if (url.endsWith("/v1/responses")) return jsonResponse(200, { output_text: "responses" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await runSmoke({
+      baseUrl: "http://127.0.0.1:4000",
+      apiKey: "sk-smoke",
+      modelIds: ["claude-route", "chat-route", "responses-route"],
+      timeoutMs: 1000,
+    });
+
+    expect(result.completions).toEqual([
+      {
+        modelId: "claude-route",
+        api: "anthropic-messages",
+        endpoint: "/v1/messages",
+        content: "messages",
+        hasResponseCost: true,
+      },
+      {
+        modelId: "chat-route",
+        api: "openai-completions",
+        endpoint: "/v1/chat/completions",
+        content: "chat",
+        hasResponseCost: false,
+      },
+      {
+        modelId: "responses-route",
+        api: "openai-responses",
+        endpoint: "/v1/responses",
+        content: "responses",
+        hasResponseCost: false,
+      },
+    ]);
+    expect(requests.slice(1)).toEqual([
+      "http://127.0.0.1:4000/v1/messages",
+      "http://127.0.0.1:4000/v1/chat/completions",
+      "http://127.0.0.1:4000/v1/responses",
+    ]);
+  });
+
   it("discovers models and sends a chat completion request to each requested model", async () => {
     const requests: Array<{ url: string; body?: unknown; headers?: Record<string, string> }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -76,8 +146,20 @@ describe("runSmoke", () => {
       source: "model_info",
       discoveredCount: 2,
       completions: [
-        { modelId: "github-gpt-4.1-mini", content: "pong" },
-        { modelId: "gemini-flash", content: "pong" },
+        {
+          modelId: "github-gpt-4.1-mini",
+          api: "openai-completions",
+          endpoint: "/v1/chat/completions",
+          content: "pong",
+          hasResponseCost: false,
+        },
+        {
+          modelId: "gemini-flash",
+          api: "openai-completions",
+          endpoint: "/v1/chat/completions",
+          content: "pong",
+          hasResponseCost: false,
+        },
       ],
     });
     expect(requests.filter((request) => request.url.endsWith("/v1/chat/completions"))).toMatchObject([
@@ -294,7 +376,15 @@ describe("runSmokeFromEnv", () => {
       LITELLM_SMOKE_TIMEOUT_MS: "1000",
     });
 
-    expect(result.completions).toEqual([{ modelId: "github-models-openai", content: "pong" }]);
+    expect(result.completions).toEqual([
+      {
+        modelId: "github-models-openai",
+        api: "openai-completions",
+        endpoint: "/v1/chat/completions",
+        content: "pong",
+        hasResponseCost: false,
+      },
+    ]);
     expect(requests[0]).toMatchObject({
       url: "http://127.0.0.1:4000/model/info",
       headers: { Authorization: "Bearer sk-env" },

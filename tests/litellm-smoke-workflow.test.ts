@@ -35,7 +35,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
-    expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock");
+    expect(workflow).toContain(
+      "LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock",
+    );
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
@@ -45,6 +47,8 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    expect(workflow).toContain("model_name: vidaimock-responses");
+    expect(workflow).toContain("mode: responses");
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
     expect(workflow).toContain("Capture deployment-group model info");
     expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
@@ -186,7 +190,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("VidaiMock");
     expect(readme).toContain("does not call real LLM APIs");
     expect(readme).toContain("No provider API keys or GitHub Models permission are required");
-    expect(readme).toContain("OpenAI-compatible and Anthropic routes");
+    expect(readme).toContain("route-distinct Chat, Responses, native Messages, and mixed-deployment models");
+    expect(readme).toContain("x-litellm-response-cost");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
     expect(readme).toContain("interactive Pi TUI smoke");
