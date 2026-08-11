@@ -249,23 +249,26 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const baseModel = entry.model_info?.base_model?.trim() || undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
-  const compatibleBase = !routingModel || (routingFamily !== undefined && routingFamily === baseFamily);
-  const family = routingModel ? routingFamily : baseFamily;
-  const candidates = [routingModel, ...(compatibleBase ? [baseModel] : [])].filter(
-    (candidate): candidate is string => candidate !== undefined,
+  const conflictingFamilies = routingFamily !== undefined && baseFamily !== undefined && routingFamily !== baseFamily;
+  const family = routingFamily ?? baseFamily;
+  const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
+  const backendIdentity = resolveClaudeBackendIdentity(
+    adapter,
+    routingModel,
+    conflictingFamilies ? undefined : baseModel,
   );
-  const backendIdentity = resolveClaudeBackendIdentity(adapter, routingModel, compatibleBase ? baseModel : undefined);
+  const semanticFamily = family ?? (backendIdentity ? "claude" : undefined);
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved) {
       return {
-        ...catalogResolution(resolved.provider, family, resolved.model),
+        ...catalogResolution(resolved.provider, semanticFamily, resolved.model),
         backendIdentity,
       };
     }
   }
-  if (family) return { semanticFamily: family, backendIdentity };
+  if (semanticFamily) return { semanticFamily, backendIdentity };
   return undefined;
 }
 

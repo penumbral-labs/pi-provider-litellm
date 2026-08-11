@@ -403,6 +403,94 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["azure/gpt-4o", 128_000, 16_384, 2.5],
+    ["azure/gpt-5", 400_000, 128_000, 1.25],
+  ])(
+    "enriches an opaque Azure deployment from base_model %s",
+    async (baseModel, contextWindow, maxTokens, inputCost) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "azure-production",
+              litellm_params: { model: "azure/prod-deployment-01" },
+              model_info: { mode: "chat", litellm_provider: "azure", base_model: baseModel },
+            },
+          ],
+        }),
+      );
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]).toMatchObject({
+        id: "azure-production",
+        input: ["text", "image"],
+        contextWindow,
+        maxTokens,
+        cost: { input: inputCost },
+      });
+    },
+  );
+
+  it("enriches every deployment in an opaque Azure group from base_model", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: ["a", "b"].map((deployment) => ({
+          model_name: "azure-production-group",
+          litellm_params: { model: `azure/prod-deployment-${deployment}` },
+          model_info: {
+            id: deployment,
+            mode: "chat",
+            litellm_provider: "azure",
+            base_model: "azure/gpt-4o",
+          },
+        })),
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "azure-production-group",
+      input: ["text", "image"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 2.5, output: 10 },
+    });
+  });
+
+  it("enriches an opaque Bedrock ARN with Claude cache compatibility without changing transport", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "bedrock-production",
+            litellm_params: {
+              model: "bedrock/arn:aws:bedrock:us-east-1:123456789012:inference-profile/production",
+            },
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "bedrock-production",
+      api: "openai-completions",
+      input: ["text", "image"],
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      compat: { cacheControlFormat: "anthropic" },
+    });
+  });
+
   it("does not use a qualified public route as evidence for a multi-deployment group", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -658,6 +746,16 @@ describe("discoverModels native Messages selection", () => {
             litellm_params: { model: "internal/private" },
           },
           {
+            model_name: "adapter-absent-claude",
+            model_info: { id: "adapter-absent", mode: "chat" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "anthropic-nonclaude",
+            model_info: { id: "anthropic-nonclaude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/amazon.nova-pro-v1:0" },
+          },
+          {
             model_name: "bedrock-nova-claude-base",
             model_info: {
               id: "nova-conflict",
@@ -767,6 +865,8 @@ describe("discoverModels native Messages selection", () => {
       ["anthropic-unprefixed-claude", "anthropic-messages"],
       ["bedrock-unprefixed-claude", "anthropic-messages"],
       ["adapter-only-anthropic", "openai-completions"],
+      ["adapter-absent-claude", "openai-completions"],
+      ["anthropic-nonclaude", "openai-completions"],
       ["bedrock-nova-claude-base", "openai-completions"],
       ["azure-claude-base", "openai-completions"],
       ["missing-mode-claude", "openai-completions"],

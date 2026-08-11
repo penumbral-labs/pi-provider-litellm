@@ -47,6 +47,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain(`- model_name: anthropic/vidaimock-claude
               model_info:
                 mode: chat
+                litellm_provider: anthropic
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
