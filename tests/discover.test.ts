@@ -68,10 +68,6 @@ describe("normalizeBaseUrl", () => {
 });
 
 describe("buildCompat", () => {
-  it("returns protocol-shaped compatibility metadata", () => {
-    expect(buildCompat("openai/gpt-4o", "openai-responses")).toEqual({});
-  });
-
   it("returns supportsStore: false for non-anthropic models", () => {
     expect(buildCompat("openai/gpt-4o")).toEqual({ supportsStore: false });
     expect(buildCompat("gemini/gemini-2.0-flash")).toEqual({ supportsStore: false });

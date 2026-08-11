@@ -86,11 +86,7 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(
-  modelId: string,
-  api: DiscoveredModel["api"] = "openai-completions",
-): DiscoveredModel["compat"] {
-  if (api === "openai-responses") return {};
+export function buildCompat(modelId: string): DiscoveredModel["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -470,7 +466,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat: buildCompat(reduced.id, reduced.api),
+    compat: buildCompat(reduced.id),
   };
 }
 
