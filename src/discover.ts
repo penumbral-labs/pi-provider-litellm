@@ -237,7 +237,8 @@ function resolveClaudeBackendIdentity(
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   if (routingModel && routingFamily !== "claude") return undefined;
   const candidates = routingModel ? [routingModel] : baseModel ? [baseModel] : [];
-  if (candidates.length === 0 || candidates.some((candidate) => !CLAUDE_MODEL_PATTERN.test(candidate))) return undefined;
+  if (candidates.length === 0 || candidates.some((candidate) => !CLAUDE_MODEL_PATTERN.test(candidate)))
+    return undefined;
   return { semanticFamily: "claude" };
 }
 
