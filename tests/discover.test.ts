@@ -1019,10 +1019,7 @@ describe("discoverModels response-mode models", () => {
     });
   });
 
-  it.each([
-    ["K2.7 Code", "moonshot/kimi-k2.7-code", ["thinking"]],
-    ["K3", "moonshot/kimi-k3", ["reasoning_effort"]],
-  ])("preserves %s replay compat when /health keeps the reduced model on Chat", async (_name, backend, params) => {
+  function mockHealthDeployment(backend: string, params: string[], mode: string): void {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(404, {});
@@ -1037,7 +1034,7 @@ describe("discoverModels response-mode models", () => {
               model_name: "private-reasoning-route",
               litellm_params: { model: backend },
               model_info: {
-                mode: "chat",
+                mode,
                 litellm_provider: "moonshot",
                 supports_reasoning: true,
                 supported_openai_params: params,
@@ -1048,15 +1045,78 @@ describe("discoverModels response-mode models", () => {
       }
       throw new Error(`unexpected URL: ${url}`);
     });
+  }
+
+  it.each([
+    { name: "K2.7 Code", backend: "moonshot/kimi-k2.7-code", params: ["thinking"], mode: "chat" },
+    { name: "K2.7 Code", backend: "moonshot/kimi-k2.7-code", params: ["thinking"], mode: "responses" },
+    { name: "K3", backend: "moonshot/kimi-k3", params: ["reasoning_effort"], mode: "chat" },
+    { name: "K3", backend: "moonshot/kimi-k3", params: ["reasoning_effort"], mode: "responses" },
+  ])(
+    "preserves $name replay and vendor compat when /health keeps a $mode-mode deployment on Chat",
+    async ({ backend, params, mode }) => {
+      mockHealthDeployment(backend, params, mode);
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.source).toBe("health");
+      expect(result.models[0]).toMatchObject({
+        id: "private-reasoning-route",
+        api: "openai-completions",
+        compat: {
+          requiresReasoningContentOnAssistantMessages: true,
+          // Route text does not name Moonshot, so these prove the reduction
+          // supplied the vendor family rather than an alias guess.
+          maxTokensField: "max_tokens",
+          supportsDeveloperRole: false,
+        },
+        litellmPolicy: { normalizeStrictToolMessages: true },
+      });
+    },
+  );
+
+  it("reduces a /health responses-mode deployment exactly like the same Chat deployment", async () => {
+    mockHealthDeployment("moonshot/kimi-k3", ["reasoning_effort"], "chat");
+    const chat = await discoverModels("https://litellm.example.com", "sk-test", {});
+    vi.restoreAllMocks();
+    mockHealthDeployment("moonshot/kimi-k3", ["reasoning_effort"], "responses");
+    const responses = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // The downgrade rewrites the mode before reduction instead of patching the
+    // mapped model, so no capability can be lost on the way through.
+    expect(responses.models).toEqual(chat.models);
+    expect(responses.models[0]?.compat).toMatchObject({ supportsReasoningEffort: true, thinkingFormat: "openai" });
+  });
+
+  it("still drops a /health deployment whose mode this provider cannot serve", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "embed-route", model_id: "uuid-e" },
+            { model: "chat-route", model_id: "uuid-c" },
+          ],
+        });
+      }
+      if (url.includes("uuid-e")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "embed-route", model_info: { mode: "embedding" } }],
+        });
+      }
+      if (url.includes("uuid-c")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "chat-route", model_info: { mode: "responses" } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.source).toBe("health");
-    expect(result.models[0]).toMatchObject({
-      id: "private-reasoning-route",
-      api: "openai-completions",
-      compat: { requiresReasoningContentOnAssistantMessages: true },
-    });
+    expect(result.models.map((model) => model.id)).toEqual(["chat-route"]);
   });
 
   it("does not derive thinking controls from a health-only route name", async () => {

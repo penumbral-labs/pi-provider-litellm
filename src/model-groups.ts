@@ -60,6 +60,10 @@ const CHAT_STYLE_MODE_PATTERN = /^chat$/i;
 const COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 type CostField = (typeof COST_FIELDS)[number];
 
+export function isResponsesMode(mode: string | null | undefined): boolean {
+  return mode != null && RESPONSES_MODE_PATTERN.test(mode.trim());
+}
+
 function normalizedMode(mode: string | null | undefined): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = mode.trim();

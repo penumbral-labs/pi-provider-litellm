@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_TOKENS,
   effectiveDeploymentCount,
   type FamilyEvidence,
+  isResponsesMode,
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
@@ -524,16 +525,19 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  const model = mapFromModelInfo(entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId });
-  // `/health` detail lookups are per deployment, not complete route groups, so they stay on Chat.
+  const named = entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId };
+  // `/health` detail lookups are per deployment, not complete route groups, so
+  // they stay on Chat. Rewriting the mode before reduction keeps the deployment
+  // on the ordinary Chat path, so vendor and reasoning-replay compatibility are
+  // built for it instead of being patched back on afterwards. Modes this
+  // discovery cannot serve at all are left alone so they still drop out.
+  const chatOnly = isResponsesMode(named.model_info?.mode)
+    ? { ...named, model_info: { ...named.model_info, mode: "chat" } }
+    : named;
+  const model = mapFromModelInfo(chatOnly);
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
-  if (model.api === "openai-completions") return model;
-  return {
-    ...model,
-    api: "openai-completions",
-    compat: { ...buildCompat(model.id, "openai-completions"), ...model.compat },
-  };
+  return model;
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
