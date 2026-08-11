@@ -788,6 +788,59 @@ describe("discoverModels response-mode models", () => {
     expect(result.source).toBe("health");
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
+
+  it("does not derive thinking controls from a health endpoint without deployment detail", async () => {
+    // No `model_id`, so the route name is the only input. It still enriches
+    // limits and pricing, but it must not produce a reasoning selector.
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "openai/gpt-5.5" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).toMatchObject({ id: "openai/gpt-5.5", reasoning: true });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+});
+
+describe("catalog provider candidates", () => {
+  it.each([
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+    "opus-4-7",
+    "sonnet-4-6",
+    "haiku-4-5",
+    "opus-4.7",
+    "fable-5",
+    "opus-5",
+  ])("resolves the bare Anthropic catalog id %s from the shared lookup rule", async (id) => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [{ model_name: id, model_info: { mode: "chat" } }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.name).not.toContain("metadata");
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+  });
+
+  it.each(["claudia-x", "opusclip-2", "gpt-4o", "haiku"])("does not treat %s as an Anthropic alias", async (id) => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [{ model_name: id, model_info: { mode: "chat" } }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.name).toBe(`${id} (incomplete metadata)`);
+    expect(result.models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  });
 });
 
 describe("discoverModels fallback to /v1/models", () => {

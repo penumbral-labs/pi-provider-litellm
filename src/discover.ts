@@ -107,12 +107,13 @@ function toKnownProvider(provider: string | undefined): BuiltinProvider | undefi
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
-function catalogProviderCandidates(id: string, ownedBy?: string): BuiltinProvider[] {
+// Anthropic recognition is derived from the single `catalogLookupIds` rule so a
+// second alias pattern cannot drift away from it. Every Anthropic catalog id and
+// every alias that maps onto one is canonicalized to a `claude-` lookup id,
+// including single-number names and dated snapshots.
+function catalogProviderCandidates(lookupIds: readonly string[], id: string, ownedBy?: string): BuiltinProvider[] {
   const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
-  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
-  const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
-  if (/^(?:claude-)?(?:opus|sonnet|haiku)-\d+-\d+$/.test(anthropicAlias)) candidates.push("anthropic");
-  if (anthropicAlias === "fable-5" || anthropicAlias === "opus-5") candidates.push("anthropic");
+  if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
   return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
 }
 
@@ -121,7 +122,7 @@ function resolveCatalogModel(
   ownedBy?: string,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(id, ownedBy)) {
+  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy)) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -515,7 +516,8 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     id,
     name: catalogModel?.name ?? id,
     reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    // `/health` route text is not deployment evidence for request controls, so
+    // no thinking/reasoning selector is derived from it on this path either.
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
