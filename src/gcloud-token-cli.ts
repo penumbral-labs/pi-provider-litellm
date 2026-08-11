@@ -1,3 +1,5 @@
+// Pi loads the extension through its TypeScript loader, but this helper runs
+// under plain Node type stripping; keep this file and its target graph erasable.
 const moduleUrl = process.argv[2];
 if (!moduleUrl) {
   throw new Error("Google ADC token module URL is required");

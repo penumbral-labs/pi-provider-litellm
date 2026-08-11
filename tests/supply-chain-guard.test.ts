@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -79,15 +79,6 @@ describe("supply-chain guard", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.ok).toBe(true);
-  });
-
-  it("loads one source entrypoint and omits compiled library metadata", async () => {
-    const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as Record<string, unknown>;
-
-    expect((manifest.pi as { extensions?: string[] }).extensions).toEqual(["./src/index.ts"]);
-    expect(manifest).not.toHaveProperty("main");
-    expect(manifest).not.toHaveProperty("types");
-    expect(manifest).not.toHaveProperty("exports");
   });
 
   it("accepts only the intentional source modules in the package", async () => {

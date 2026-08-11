@@ -45,6 +45,8 @@ function shellQuote(value: string): string {
 }
 
 export function getGcloudTokenCommand(moduleUrl = import.meta.url): string {
+  // Spawn the source entry through plain Node, not Pi's TypeScript loader.
+  // This module must therefore keep built-in-only imports and erasable syntax.
   const cliUrl = new URL("./gcloud-token-cli.ts", import.meta.url).href;
   return `!${shellQuote(process.execPath)} --experimental-strip-types ${shellQuote(fileURLToPath(cliUrl))} ${shellQuote(moduleUrl)}`;
 }

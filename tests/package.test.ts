@@ -1,13 +1,13 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
-const repoRoot = process.cwd();
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 interface PackageManifest {
   main?: string;
@@ -22,22 +22,18 @@ interface LoadResult {
   extensions: unknown[];
 }
 
-const expectedPackageFiles = [
-  "package/LICENSE",
-  "package/README.md",
-  "package/package.json",
-  "package/src/cache.ts",
-  "package/src/cost.ts",
-  "package/src/discover.ts",
-  "package/src/gcloud-token-cli.ts",
-  "package/src/gcloud-token.ts",
-  "package/src/index.ts",
-  "package/src/litellm.ts",
-  "package/src/mcp-tools.ts",
-  "package/src/provider.ts",
-  "package/src/skills.ts",
-  "package/src/types.ts",
-];
+async function expectedPackageFiles(): Promise<string[]> {
+  const sourceFiles = (await readdir(join(repoRoot, "src")))
+    .filter((file) => file.endsWith(".ts"))
+    .map((file) => `package/src/${file}`);
+  return ["package/LICENSE", "package/README.md", "package/package.json", ...sourceFiles].sort();
+}
+
+function importSpecifiers(source: string): string[] {
+  return [...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g)].map(
+    (match) => match[1],
+  );
+}
 
 async function loadExtension(entrypoint: string, cwd: string): Promise<LoadResult> {
   const loaderUrl = pathToFileURL(
@@ -103,20 +99,21 @@ describe("pi package compatibility", () => {
   it("packs only source/docs/license and loads the packed manifest entrypoint", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
     try {
-      const { stdout: tarballName } = await execFileAsync("npm", ["pack", "--ignore-scripts"], {
-        cwd: repoRoot,
-      });
-      const tarballPath = resolve(repoRoot, tarballName.trim().split("\n").at(-1) ?? "");
+      const { stdout: tarballName } = await execFileAsync(
+        "npm",
+        ["pack", "--ignore-scripts", "--pack-destination", fixture],
+        { cwd: repoRoot },
+      );
+      const tarballPath = resolve(fixture, tarballName.trim().split("\n").at(-1) ?? "");
       const { stdout: fileList } = await execFileAsync("tar", ["-tzf", tarballPath]);
       await execFileAsync("tar", ["-xzf", tarballPath, "-C", fixture]);
-      await rm(tarballPath);
 
       const packageRoot = join(fixture, "package");
       const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as PackageManifest;
       const entrypoint = resolve(packageRoot, manifest.pi.extensions[0]);
       const result = await loadExtension(entrypoint, packageRoot);
 
-      expect(fileList.trim().split("\n").sort()).toEqual(expectedPackageFiles);
+      expect(fileList.trim().split("\n").sort()).toEqual(await expectedPackageFiles());
       expect(result.errors).toEqual([]);
       expect(result.extensions).toHaveLength(1);
     } finally {
@@ -128,15 +125,7 @@ describe("pi package compatibility", () => {
     const sourceDir = join(repoRoot, "src");
     const sourceFiles = (await readdir(sourceDir)).filter((file) => file.endsWith(".ts"));
     const imports = await Promise.all(
-      sourceFiles.map(
-        async (file) =>
-          [
-            file,
-            [...(await readFile(join(sourceDir, file), "utf8")).matchAll(/from\s+["']([^"']+)["']/g)].map(
-              (match) => match[1],
-            ),
-          ] as const,
-      ),
+      sourceFiles.map(async (file) => [file, importSpecifiers(await readFile(join(sourceDir, file), "utf8"))] as const),
     );
 
     for (const [file, specifiers] of imports) {
@@ -145,7 +134,9 @@ describe("pi package compatibility", () => {
           (specifier) =>
             specifier.startsWith("node:") ||
             specifier.startsWith("./") ||
-            specifier.startsWith("@earendil-works/pi-ai") ||
+            specifier === "@earendil-works/pi-ai" ||
+            specifier === "@earendil-works/pi-ai/compat" ||
+            specifier === "@earendil-works/pi-ai/providers/all" ||
             specifier === "@earendil-works/pi-coding-agent",
         ),
       );
