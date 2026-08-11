@@ -21,7 +21,7 @@ import {
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
-import { getGcloudToken, getGcloudTokenCacheKey, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
+import { getGcloudToken, hasUsableGcloudAdc, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
@@ -32,6 +32,7 @@ const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
+const GCLOUD_ADC_SOURCE = "gcloud ADC";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
@@ -345,8 +346,10 @@ async function resolveCredentials(
   const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
   const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
   const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
-  const gcloudCacheKey = useGcloudToken ? ((await getGcloudTokenCacheKey()) ?? undefined) : undefined;
-  const gcloudKey = executeHelpers && gcloudCacheKey ? (await getGcloudToken())?.trim() : undefined;
+  // Evidence that ADC can actually mint a token, resolved even when helpers are not
+  // executed so `apiKey.check` can report availability truthfully.
+  const hasGcloudAdc = useGcloudToken ? await hasUsableGcloudAdc() : false;
+  const gcloudKey = executeHelpers && hasGcloudAdc ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
   // higher-precedence credential (saved auth, gcloud token) already won.
   let configuredKey: string | undefined;
@@ -378,6 +381,8 @@ async function resolveCredentials(
     baseUrl: configuredBase ? normalizeBaseUrl(configuredBase) : undefined,
     apiKey: apiKey || undefined,
     apiKeyConfig,
+    hasGcloudAdc,
+    apiKeyFromGcloudAdc: Boolean(gcloudKey),
   };
 }
 
@@ -577,7 +582,7 @@ async function resolveApiKeyAuth(
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
-    source: source ?? creds.apiKeyConfig ?? ENV_API_KEY,
+    source: source ?? (creds.apiKeyFromGcloudAdc ? GCLOUD_ADC_SOURCE : undefined) ?? creds.apiKeyConfig ?? ENV_API_KEY,
   };
 }
 
@@ -597,17 +602,10 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
           { executeHelpers: false },
         );
-        if (
-          configured.apiKey ||
-          configured.apiKeyConfig ||
-          (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
-        )
+        if (configured.apiKey || configured.apiKeyConfig || configured.hasGcloudAdc)
           return {
             type: "api_key",
-            source:
-              definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
-                ? "gcloud ADC"
-                : (configured.apiKeyConfig ?? ENV_API_KEY),
+            source: configured.hasGcloudAdc ? GCLOUD_ADC_SOURCE : (configured.apiKeyConfig ?? ENV_API_KEY),
           };
         if (definition.apiKeyConfig) {
           const configuredKey = definition.apiKeyConfig.startsWith("!")

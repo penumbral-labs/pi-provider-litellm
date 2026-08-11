@@ -43,36 +43,73 @@ afterEach(() => {
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
 });
 
-describe("feature parity", () => {
-  it("registers a command-backed gcloud token provider key when ADC auth is enabled", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    const adcPath = join(agentDir, "adc.json");
-    await writeFile(
-      adcPath,
-      JSON.stringify({
-        type: "authorized_user",
-        client_id: "client-id",
-        client_secret: "client-secret",
-        refresh_token: "refresh-token",
-      }),
-      "utf8",
-    );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+const VALID_ADC = {
+  type: "authorized_user",
+  client_id: "client-id",
+  client_secret: "client-secret",
+  refresh_token: "refresh-token",
+};
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+// Builds a provider whose only credential source is Google ADC, so `check` and
+// `resolve` can be compared directly for one ADC file shape.
+async function setupAdcProvider(adc: unknown | undefined): Promise<{
+  check: () => Promise<unknown>;
+  resolve: () => Promise<unknown>;
+}> {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+  const adcPath = join(agentDir, "adc.json");
+  if (adc !== undefined) await writeFile(adcPath, JSON.stringify(adc), "utf8");
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+  process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+  process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
+  process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
-    await expect(
-      pi.providers[0]?.auth.apiKey?.check?.({
-        ctx: { env: async (name) => process.env[name], fileExists: async () => false },
-      }),
-    ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
+  const extension = await loadExtension(agentDir);
+  const pi = createPi();
+  await extension(pi);
+  const ctx = { env: async (name: string) => process.env[name], fileExists: async () => false };
+
+  return {
+    check: async () => pi.providers[0]?.auth.apiKey?.check?.({ ctx }),
+    resolve: async () => pi.providers[0]?.auth.apiKey?.resolve?.({ ctx }),
+  };
+}
+
+describe("gcloud ADC provider auth", () => {
+  it("resolves an in-process ADC token and labels both auth paths consistently", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse(200, { access_token: "ya29.minted", expires_in: 3600 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    await expect(provider.check()).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+    expect(resolved.auth.apiKey).toBe("ya29.minted");
+    // The deleted `!command` delivery would have produced a shell string here.
+    expect(resolved.auth.apiKey.startsWith("!")).toBe(false);
+    expect(resolved.source).toBe("gcloud ADC");
   });
 
+  it.for([
+    ["an unreadable ADC file", undefined],
+    ["service_account credentials", { type: "service_account", client_email: "a@b.iam.gserviceaccount.com" }],
+    ["external_account credentials", { type: "external_account", audience: "//iam.googleapis.com/x" }],
+    ["a malformed authorized_user file", { type: "authorized_user", client_id: "client-id" }],
+  ] as const)("reports the provider unconfigured for %s", async ([, adc]) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const provider = await setupAdcProvider(adc);
+
+    await expect(provider.check()).resolves.toBeUndefined();
+    await expect(provider.resolve()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("feature parity", () => {
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
