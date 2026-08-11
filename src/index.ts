@@ -21,12 +21,7 @@ import {
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
-import {
-  getGcloudToken,
-  getGcloudTokenCacheKey,
-  getGcloudTokenCommand,
-  isGcloudTokenAuthEnabled,
-} from "./gcloud-token.js";
+import { getGcloudToken, getGcloudTokenCacheKey, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
@@ -368,11 +363,7 @@ async function resolveCredentials(
   const apiKey = gcloudKey || configuredKey || helperKey || envKey;
 
   let apiKeyConfig: string | undefined;
-  if (gcloudKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (!executeHelpers && gcloudCacheKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (configuredKey && definition.apiKeyConfig) {
+  if (configuredKey && definition.apiKeyConfig) {
     apiKeyConfig = definition.apiKeyConfig;
   } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
     apiKeyConfig = definition.apiKeyConfig;
@@ -606,7 +597,11 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
           { executeHelpers: false },
         );
-        if (configured.apiKey || configured.apiKeyConfig)
+        if (
+          configured.apiKey ||
+          configured.apiKeyConfig ||
+          (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+        )
           return {
             type: "api_key",
             source:
