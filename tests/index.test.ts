@@ -12,7 +12,7 @@ import {
   type ProviderModelsStore,
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
 
 const ENV_KEYS = [
@@ -142,6 +142,14 @@ async function loginOAuth(
     ),
   );
 }
+
+// Start every test from an unset environment. afterEach restores the developer's
+// real values, so without this a machine that exports LITELLM_BASE_URL runs a
+// different suite than CI does, and "nothing configured" cases silently resolve a
+// live host.
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
+});
 
 afterEach(() => {
   for (const key of ENV_KEYS) {
@@ -867,14 +875,16 @@ describe("extension startup", () => {
     expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
   });
 
-  it("does not pin api-key requests to a previously authenticated OAuth host", async () => {
+  // Drives real credential resolution through createModels so each transition
+  // exercises the same auth -> stream ordering pi uses in production.
+  async function oauthTransitionHarness(envBaseUrl?: string) {
     const agentDir = await makeAgentDir();
-    process.env.LITELLM_BASE_URL = "https://environment.example.com";
+    if (envBaseUrl) process.env.LITELLM_BASE_URL = envBaseUrl;
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const requestedUrls: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      requestedUrls.push(url);
+      requests.push({ url, authorization: new Headers(init?.headers as Record<string, string>).get("authorization") });
       if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
       return new Response(
         'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
@@ -889,49 +899,213 @@ describe("extension startup", () => {
       env: async (name) => process.env[name],
       fileExists: async () => false,
     };
+    const completeWith = async (credential: Credential, baseUrl: string) => {
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(provider.id, async () => credential);
+      const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+      models.setProvider(provider);
+      return models.complete(
+        {
+          id: "shared-model",
+          name: "Shared model",
+          provider: "litellm",
+          api: "openai-completions" as const,
+          baseUrl,
+          reasoning: false,
+          input: ["text"] as ("text" | "image")[],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 4096,
+          maxTokens: 1024,
+        },
+        { messages: [] },
+      );
+    };
+    const oauth = (access: string, baseUrl: string): Credential => ({
+      type: "oauth",
+      access,
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl,
+    });
+    return { provider, requests, urls: () => requests.map((entry) => entry.url), completeWith, oauth };
+  }
+
+  it("does not pin api-key requests to a previously authenticated OAuth host", async () => {
+    const harness = await oauthTransitionHarness("https://environment.example.com");
+
+    // Authenticate via SSO first, which is what makes the extension remember a
+    // runtime host at all.
+    await harness.completeWith(harness.oauth("sk-oauth", "https://sso.example.com"), "https://sso.example.com/v1");
+    // Then switch to an api key for a different proxy, as /logout followed by
+    // env-based auth does, without reloading the extension.
+    const switched = await harness.completeWith(
+      { type: "api_key", key: "sk-second", env: { LITELLM_BASE_URL: "https://second.example.com" } },
+      "https://second.example.com/v1",
+    );
+
+    expect(switched.stopReason).toBe("stop");
+    expect(harness.urls()).toEqual([
+      "https://sso.example.com/v1/chat/completions",
+      "https://second.example.com/v1/chat/completions",
+    ]);
+  });
+
+  it("follows the live credential when an api key reuses a previous SSO access token", async () => {
+    // Same key string, different proxies. Keying the remembered root on the token
+    // alone is not enough here: the request base URL has to outrank it, or the
+    // provider stays pinned to the SSO host and reports the live host as stale.
+    const harness = await oauthTransitionHarness("https://environment.example.com");
+
+    await harness.completeWith(harness.oauth("sk-shared", "https://sso.example.com"), "https://sso.example.com/v1");
+    const switched = await harness.completeWith(
+      { type: "api_key", key: "sk-shared", env: { LITELLM_BASE_URL: "https://second.example.com" } },
+      "https://second.example.com/v1",
+    );
+
+    expect(switched.stopReason).toBe("stop");
+    expect(harness.urls()).toEqual([
+      "https://sso.example.com/v1/chat/completions",
+      "https://second.example.com/v1/chat/completions",
+    ]);
+    expect(harness.requests.at(-1)?.authorization).toBe("Bearer sk-shared");
+  });
+
+  it("follows a refreshed OAuth access token to the credential host", async () => {
+    // A refresh replaces the access token. If the remembered root stayed bound to
+    // the pre-refresh token it would miss, and the conflicting environment host
+    // would decide the request instead.
+    const harness = await oauthTransitionHarness("https://environment.example.com");
+
+    await harness.completeWith(harness.oauth("sk-before", "https://sso.example.com"), "https://sso.example.com/v1");
+    const refreshed = await harness.completeWith(
+      harness.oauth("sk-after", "https://sso.example.com"),
+      "https://sso.example.com/v1",
+    );
+
+    expect(refreshed.stopReason).toBe("stop");
+    expect(harness.urls()).toEqual([
+      "https://sso.example.com/v1/chat/completions",
+      "https://sso.example.com/v1/chat/completions",
+    ]);
+    expect(harness.requests.map((entry) => entry.authorization)).toEqual(["Bearer sk-before", "Bearer sk-after"]);
+  });
+
+  it.each([
+    ["placeholder", "https://litellm.example.com"],
+    ["scheme-less", "localhost:4000"],
+  ])("keeps a %s base URL from failing agent start", async (_label, baseUrl) => {
+    // before_agent_start runs on every turn, including turns that never touch
+    // LiteLLM, so a bad base URL must not surface as an extension error there.
+    // filterModels owns the user-facing explanation instead.
+    process.env.LITELLM_BASE_URL = baseUrl;
+    process.env.LITELLM_API_KEY = "sk-secret";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+
+    const result = await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: "sk-secret" }, env: { LITELLM_BASE_URL: baseUrl } }),
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+
+    expect(result).toBeUndefined();
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([]);
+  });
+
+  it("lets an explicit request base URL outrank the remembered SSO root", async () => {
+    // Isolates precedence from invalidation: the memo is still live here, because
+    // OAuth is still the active credential. Only the ordering decides the host, so
+    // this fails if the memo is consulted before the explicit request value.
+    const harness = await oauthTransitionHarness();
+    const auth = await harness.provider.auth.oauth?.toAuth({
+      type: "oauth",
+      access: "sk-memo",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://sso.example.com",
+    });
+    expect(auth?.baseUrl).toBe("https://sso.example.com");
     const model = {
-      id: "shared-model",
-      name: "Shared model",
+      id: "explicit-model",
+      name: "Explicit model",
       provider: "litellm",
       api: "openai-completions" as const,
+      baseUrl: "https://explicit.example.com/v1",
       reasoning: false,
       input: ["text"] as ("text" | "image")[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 4096,
       maxTokens: 1024,
     };
-    const completeWith = async (credential: Credential, baseUrl: string) => {
-      const credentials = new InMemoryCredentialStore();
-      await credentials.modify(provider.id, async () => credential);
-      const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
-      models.setProvider(provider);
-      return models.complete({ ...model, baseUrl }, { messages: [] });
-    };
 
-    // First authenticate via SSO, which is what makes the extension remember a
-    // runtime host at all.
-    await completeWith(
-      {
-        type: "oauth",
-        access: "sk-oauth",
-        refresh: "",
-        expires: Number.MAX_SAFE_INTEGER,
-        baseUrl: "https://sso.example.com",
-      },
+    const stream = harness.provider.stream(model, { messages: [] }, {
+      apiKey: "sk-memo",
+      env: { LITELLM_BASE_URL: "https://explicit.example.com" },
+    } as never);
+    for await (const _event of stream) {
+      // drain
+    }
+
+    expect(harness.urls()).toEqual(["https://explicit.example.com/v1/chat/completions"]);
+  });
+
+  it("discards the remembered SSO root when an api key resolves", async () => {
+    // Isolates invalidation from precedence. With no base URL configured anywhere
+    // there is no request value to outrank the memo, so only discarding it on the
+    // non-OAuth transition keeps the api key off the SSO host. Driven at the auth
+    // seam because the transition is what matters, not the streaming stack.
+    const harness = await oauthTransitionHarness();
+    const model = {
+      id: "orphan-model",
+      name: "Orphan model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://sso.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+    const streamOnce = () => harness.provider.stream(model, { messages: [] }, { apiKey: "sk-shared" } as never);
+
+    await harness.provider.auth.oauth?.toAuth({
+      type: "oauth",
+      access: "sk-shared",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://sso.example.com",
+    });
+    // Precondition: the remembered root is live and would carry this request.
+    expect(streamOnce).not.toThrow();
+
+    await harness.provider.auth.apiKey?.resolve({
+      ctx: { env: async (name: string) => process.env[name] },
+      credential: { type: "api_key", key: "sk-shared" },
+    } as never);
+
+    expect(streamOnce).toThrow(/do not identify a LiteLLM model host/);
+  });
+
+  it("routes OAuth requests by remembered root when nothing supplies a request base URL", async () => {
+    // No LITELLM_BASE_URL at all: OAuth resolution contributes no request env, so
+    // the remembered root is the only thing that can identify the proxy.
+    const harness = await oauthTransitionHarness();
+
+    const result = await harness.completeWith(
+      harness.oauth("sk-only", "https://sso.example.com"),
       "https://sso.example.com/v1",
     );
-    // Then switch to an api key for a different proxy, as /logout followed by
-    // env-based auth does, without reloading the extension.
-    const switched = await completeWith(
-      { type: "api_key", key: "sk-second", env: { LITELLM_BASE_URL: "https://second.example.com" } },
-      "https://second.example.com/v1",
-    );
 
-    expect(switched.stopReason).toBe("stop");
-    expect(requestedUrls).toEqual([
-      "https://sso.example.com/v1/chat/completions",
-      "https://second.example.com/v1/chat/completions",
-    ]);
+    expect(result.stopReason).toBe("stop");
+    expect(harness.urls()).toEqual(["https://sso.example.com/v1/chat/completions"]);
   });
 
   it("registers unconfigured when the configured base URL is invalid", async () => {

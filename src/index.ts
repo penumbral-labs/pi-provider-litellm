@@ -966,18 +966,30 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
+  // Returns undefined rather than throwing when the configured base URL is absent,
+  // malformed, or still the placeholder. This runs from before_agent_start on every
+  // turn, including turns that never touch LiteLLM, so a configuration problem here
+  // must not surface as a per-turn extension error. filterModels already reports the
+  // reason once per session, and the LiteLLM tool surfaces raise their own error via
+  // resolveDefaultRuntimeAuth.
   async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
     const apiKey = auth.auth.apiKey;
-    const baseUrl = resolveSanitizedCredentialRoot(
-      definitions.find((definition) => definition.name === PROVIDER_NAME)!,
-      undefined,
-      auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? defaultRuntimeAuth?.baseUrl,
-    );
-    if (!baseUrl || !apiKey) return undefined;
-    requireNonPlaceholderCredentialRoot(baseUrl);
+    if (!apiKey) return undefined;
+    let baseUrl: string | undefined;
+    try {
+      const root = resolveSanitizedCredentialRoot(
+        definitions[0],
+        undefined,
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL],
+      );
+      baseUrl = root && !isPlaceholderHost(new URL(root).host) ? root : undefined;
+    } catch {
+      baseUrl = undefined;
+    }
+    if (!baseUrl) return undefined;
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -1056,9 +1068,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   for (const definition of definitions) {
     // Request paths get no Credential, so the host an OAuth login resolved has to
-    // be remembered here. It is bound to that login's access token: an unscoped
-    // root would outlive /logout and pin later api-key requests -- potentially
-    // sending a new key to the previously authenticated host.
+    // be remembered here. Two rules keep that memory from outliving its credential:
+    // it is bound to the access token it was resolved for, and it is discarded as
+    // soon as a non-OAuth credential resolves. Without both, the remembered root
+    // survives /logout and can send a later api key to the SSO host.
     let oauthRuntimeRoot: { apiKey: string; root: string } | undefined;
     const providerAuth = createProviderAuth(definition);
     const oauth = providerAuth.oauth;
@@ -1071,16 +1084,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return auth;
       };
     }
+    const apiKeyAuth = providerAuth.apiKey;
+    if (apiKeyAuth) {
+      const apiKeyResolve = apiKeyAuth.resolve;
+      apiKeyAuth.resolve = async (input) => {
+        // Resolving an api key means OAuth is no longer the active credential.
+        oauthRuntimeRoot = undefined;
+        return apiKeyResolve(input);
+      };
+    }
     const provider = createLiteLLMProvider({
       id: definition.name,
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: providerAuth,
+      // An explicit per-request base URL always wins; the remembered SSO root only
+      // fills the gap where OAuth supplies no request env, ahead of configured and
+      // environment defaults. Ordering the memo first made a stale root outrank the
+      // live credential and wedged the provider until restart.
       resolveCredentialRoot: ({ credential, requestBaseUrl, apiKey }) =>
         resolveSanitizedCredentialRoot(
           definition,
           credential,
-          (apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined) ?? requestBaseUrl,
+          requestBaseUrl ?? (apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined),
         ),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
