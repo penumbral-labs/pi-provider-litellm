@@ -1,5 +1,5 @@
-import { type Context, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { type Context, getSupportedThinkingLevels, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import { anthropicSseChunk, anthropicTextResponse, createCompatibilityHarness, user } from "./helpers.js";
 
 const anthropicRoute = {
@@ -16,7 +16,10 @@ const anthropicRoute = {
 
 describe("Anthropic Messages wire compatibility", () => {
   it("streams Anthropic SSE text from the exact Messages endpoint", async () => {
-    const { models, model, requestUrls, requests, respond } = await createCompatibilityHarness(anthropicRoute);
+    const { models, model, requestHeaders, requestUrls, requests, respond } = await createCompatibilityHarness(
+      anthropicRoute,
+      { customHeaders: { "x-tenant": "team-a" } },
+    );
     respond(...anthropicTextResponse("Hello from Messages"));
 
     const message = await models.streamSimple(model, { messages: [user("Hello")] }).result();
@@ -30,8 +33,16 @@ describe("Anthropic Messages wire compatibility", () => {
       model: "claude-opus-5",
       messages: [{ role: "user", content: expect.anything() }],
       stream: true,
+      max_tokens: expect.any(Number),
     });
+    expect(requests[0]?.max_tokens).toBeGreaterThan(0);
+    expect(requests[0]).not.toHaveProperty("max_completion_tokens");
     expect(requests[0]).not.toHaveProperty("litellm_session_id");
+    expect(requestHeaders[0]?.get("x-api-key")).toBe("sk-test");
+    expect(requestHeaders[0]?.get("authorization")).toBeNull();
+    expect(requestHeaders[0]?.get("anthropic-version")).toBe("2023-06-01");
+    expect(requestHeaders[0]?.get("anthropic-beta")).toContain("interleaved-thinking");
+    expect(requestHeaders[0]?.get("x-tenant")).toBe("team-a");
   });
 
   it("serializes images, tools, and cache controls with Anthropic-native fields", async () => {
@@ -87,6 +98,66 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
     expect(requests[0]).not.toHaveProperty("include");
     expect(requests[0]).not.toHaveProperty("litellm_session_id");
+  });
+
+  it("omits session grouping from Messages while real Chat serialization retains it", async () => {
+    const sessionFile = "/tmp/pi-compat-session.jsonl";
+    const messages = await createCompatibilityHarness(anthropicRoute, { sessionFile });
+    messages.respond(...anthropicTextResponse("messages"));
+    await messages.models.streamSimple(messages.model, { messages: [user("Hello")] }).result();
+    expect(messages.requests[0]).not.toHaveProperty("litellm_session_id");
+
+    vi.restoreAllMocks();
+    vi.resetModules();
+    const chat = await createCompatibilityHarness(undefined, { sessionFile });
+    chat.respond(...anthropicTextResponse("unused"));
+    chat.respondRaw(
+      'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
+        "data: [DONE]\n\n",
+    );
+    await chat.models.streamSimple(chat.model, { messages: [user("Hello")] }).result();
+    expect(chat.requests[0]?.litellm_session_id).toBeTruthy();
+  });
+
+  it("rehydrates the same Messages API, URL, and body from the offline model store", async () => {
+    const modelsStore = new InMemoryModelsStore();
+    const online = await createCompatibilityHarness(anthropicRoute, { modelsStore });
+    online.respond(...anthropicTextResponse("online"));
+    await online.models.streamSimple(online.model, { messages: [user("Hello")] }).result();
+
+    vi.restoreAllMocks();
+    vi.resetModules();
+    const offline = await createCompatibilityHarness(anthropicRoute, { modelsStore, allowNetwork: false });
+    offline.respond(...anthropicTextResponse("offline"));
+    await offline.models.streamSimple(offline.model, { messages: [user("Hello")] }).result();
+
+    expect(offline.model.api).toBe("anthropic-messages");
+    expect(offline.model).toEqual(online.model);
+    expect(offline.requestUrls).toEqual(["https://proxy.example.com/v1/messages"]);
+    expect(offline.requests[0]).toEqual(online.requests[0]);
+  });
+
+  it("reports a non-overflow Anthropic error envelope", async () => {
+    const { models, model } = await createCompatibilityHarness(anthropicRoute);
+    // Replace only the completion response after discovery with a realistic LiteLLM native envelope.
+    vi.mocked(globalThis.fetch).mockImplementationOnce(async () =>
+      Response.json(
+        { type: "error", error: { type: "overloaded_error", message: "upstream overloaded" } },
+        { status: 529 },
+      ),
+    );
+    const message = await models.streamSimple(model, { messages: [user("Hello")] }).result();
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toContain("upstream overloaded");
+  });
+
+  it("returns an error for malformed Anthropic SSE", async () => {
+    const { models, model, respondRaw } = await createCompatibilityHarness(anthropicRoute);
+    respondRaw('event: message_start\ndata: {"type":"message_start"\n\n');
+    const message = await models.streamSimple(model, { messages: [user("Hello")] }).result();
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toBeTruthy();
   });
 
   it("replays native thinking, tool use, and tool results on the next turn", async () => {

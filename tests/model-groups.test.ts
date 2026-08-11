@@ -20,6 +20,7 @@ const catalog = new Map<string, CatalogResolution>([
     {
       provider: "anthropic",
       semanticFamily: "claude",
+      backendIdentity: { semanticFamily: "claude", source: "qualified-model" },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -32,6 +33,7 @@ const catalog = new Map<string, CatalogResolution>([
     {
       provider: "amazon-bedrock",
       semanticFamily: "claude",
+      backendIdentity: { semanticFamily: "claude", source: "qualified-model" },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -150,6 +152,7 @@ describe("reduceModelGroup", () => {
       litellm_params: { model: "internal/private-model" },
     });
     const responses = row({ model_info: { id: "responses", mode: "responses" } });
+    const missingMode = row({ model_info: { id: "missing-mode", mode: undefined } });
 
     for (const order of permutations([anthropic, bedrock])) {
       expect(reduceModelGroup(order, resolveCatalog)?.api).toBe("anthropic-messages");
@@ -158,6 +161,7 @@ describe("reduceModelGroup", () => {
       expect(reduceModelGroup(order, resolveCatalog)?.api).toBe("openai-completions");
     }
     expect(reduceModelGroup([anthropic, unknown], resolveCatalog)?.api).toBe("openai-completions");
+    expect(reduceModelGroup([missingMode], resolveCatalog)?.api).toBe("openai-completions");
     expect(reduceModelGroup([responses, responses], resolveCatalog)?.api).toBe("openai-responses");
   });
 

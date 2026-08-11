@@ -39,6 +39,9 @@ describe("LiteLLM smoke workflow", () => {
       "LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock",
     );
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
+    expect(workflow).toContain("anthropic/vidaimock-claude=anthropic-messages");
+    expect(workflow).toContain("vidaimock-responses=openai-responses");
+    expect(workflow).toContain("LITELLM_SMOKE_EXPECT_RESPONSE_COST:");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
     expect(workflow).toContain(`- model_name: anthropic/vidaimock-claude
@@ -77,6 +80,10 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC"');
     expect(workflow).toContain('grep -F "Anthropic mock response"');
+    expect(workflow).toContain("Assert captured LiteLLM endpoint logs");
+    expect(workflow).toContain("POST +/v1/messages");
+    expect(workflow).toContain("POST +/v1/chat/completions");
+    expect(workflow).toContain("POST +/v1/responses");
 
     expect(workflow).not.toContain("models: read");
     expect(workflow).not.toContain("GH_MODELS_SMOKE_MODEL");
@@ -192,6 +199,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("No provider API keys or GitHub Models permission are required");
     expect(readme).toContain("route-distinct Chat, Responses, native Messages, and mixed-deployment models");
     expect(readme).toContain("x-litellm-response-cost");
+    expect(readme).toContain("asserts each model's expected API");
+    expect(readme).toContain("captures successful LiteLLM logs");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
     expect(readme).toContain("interactive Pi TUI smoke");

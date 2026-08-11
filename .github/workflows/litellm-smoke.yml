@@ -38,6 +38,8 @@ jobs:
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
+      LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=absent vidaimock-responses=present grouped-vidaimock=present
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
@@ -133,6 +135,8 @@ jobs:
           cat > .tmp/litellm_config.yaml <<YAML
           model_list:
             - model_name: vidaimock-openai
+              model_info:
+                mode: chat
               litellm_params:
                 model: openai/gpt-4o-mini
                 api_base: http://host.docker.internal:8100/v1
@@ -295,6 +299,15 @@ jobs:
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
+
+      - name: Assert captured LiteLLM endpoint logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logs litellm-smoke > .tmp/litellm.log 2>&1
+          grep -E 'POST +/v1/messages' .tmp/litellm.log
+          grep -E 'POST +/v1/chat/completions' .tmp/litellm.log
+          grep -E 'POST +/v1/responses' .tmp/litellm.log
 
       - name: Dump LiteLLM logs
         if: failure()

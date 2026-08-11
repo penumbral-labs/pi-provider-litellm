@@ -24,6 +24,8 @@ export type SmokeOptions = {
   modelIds: string[];
   timeoutMs?: number;
   expectedSource?: DiscoverySource;
+  expectedApis?: ReadonlyMap<string, LiteLLMApi>;
+  expectedResponseCost?: ReadonlyMap<string, boolean>;
 };
 
 const DISCOVERY_SOURCES: DiscoverySource[] = ["model_info", "models_list", "health"];
@@ -59,6 +61,39 @@ export function parseSmokeModels(raw: string | undefined): string[] {
     .split(/[,\s]+/)
     .map((model) => model.trim())
     .filter((model) => model.length > 0);
+}
+
+function parseExpectedMap<T extends string>(
+  name: string,
+  raw: string | undefined,
+  allowed: readonly T[],
+): Map<string, T> | undefined {
+  const entries = parseSmokeModels(raw);
+  if (entries.length === 0) return undefined;
+  const result = new Map<string, T>();
+  for (const entry of entries) {
+    const separator = entry.lastIndexOf("=");
+    const modelId = entry.slice(0, separator);
+    const value = entry.slice(separator + 1) as T;
+    if (separator <= 0 || !allowed.includes(value)) {
+      throw new Error(`${name} entries must use model=value with value one of ${allowed.join(", ")}; got ${entry}`);
+    }
+    result.set(modelId, value);
+  }
+  return result;
+}
+
+export function parseExpectedApis(raw: string | undefined): Map<string, LiteLLMApi> | undefined {
+  return parseExpectedMap("LITELLM_SMOKE_EXPECT_APIS", raw, [
+    "anthropic-messages",
+    "openai-completions",
+    "openai-responses",
+  ]);
+}
+
+export function parseExpectedResponseCost(raw: string | undefined): Map<string, boolean> | undefined {
+  const parsed = parseExpectedMap("LITELLM_SMOKE_EXPECT_RESPONSE_COST", raw, ["present", "absent"]);
+  return parsed && new Map([...parsed].map(([modelId, value]) => [modelId, value === "present"]));
 }
 
 async function readErrorBody(response: Response): Promise<string> {
@@ -152,11 +187,36 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
     throw new Error(`Requested smoke models were not discovered: ${missing.join(", ")}`);
   }
 
+  if (options.expectedApis) {
+    for (const modelId of options.modelIds) {
+      const expected = options.expectedApis.get(modelId);
+      if (!expected) throw new Error(`No expected API configured for smoke model ${modelId}`);
+      const actual = discovered.get(modelId)?.api;
+      if (actual !== expected) throw new Error(`API mismatch for ${modelId}: expected ${expected}, got ${actual}`);
+    }
+  }
+
   const completions: SmokeCompletion[] = [];
   for (const modelId of options.modelIds) {
     const model = discovered.get(modelId);
     if (!model) continue;
-    completions.push(await smokeCompletion(baseUrl, options.apiKey, modelId, model.api, timeoutMs));
+    const completion = await smokeCompletion(baseUrl, options.apiKey, modelId, model.api, timeoutMs);
+    const expectedCost = options.expectedResponseCost?.get(modelId);
+    if (options.expectedResponseCost && expectedCost === undefined) {
+      throw new Error(`No response-cost expectation configured for smoke model ${modelId}`);
+    }
+    if (expectedCost !== undefined && completion.hasResponseCost !== expectedCost) {
+      const expected = expectedCost ? "present" : "absent";
+      const actual = completion.hasResponseCost ? "present" : "absent";
+      throw new Error(`Response-cost header mismatch for ${modelId}: expected ${expected}, got ${actual}`);
+    }
+    completions.push(completion);
+  }
+  if (options.expectedApis) {
+    const endpoints = new Set(completions.map(({ endpoint }) => endpoint));
+    const required = ["/v1/messages", "/v1/chat/completions", "/v1/responses"];
+    const absent = required.filter((endpoint) => !endpoints.has(endpoint));
+    if (absent.length > 0) throw new Error(`Smoke endpoint coverage is missing: ${absent.join(", ")}`);
   }
 
   return {
@@ -182,6 +242,8 @@ export async function runSmokeFromEnv(env: NodeJS.ProcessEnv = process.env): Pro
     modelIds: parseSmokeModels(env.LITELLM_SMOKE_MODELS),
     timeoutMs: Number.isNaN(timeoutMs) || timeoutMs <= 0 ? DEFAULT_TIMEOUT_MS : timeoutMs,
     expectedSource: parseExpectedSource(env.LITELLM_SMOKE_EXPECT_SOURCE),
+    expectedApis: parseExpectedApis(env.LITELLM_SMOKE_EXPECT_APIS),
+    expectedResponseCost: parseExpectedResponseCost(env.LITELLM_SMOKE_EXPECT_RESPONSE_COST),
   });
 }
 

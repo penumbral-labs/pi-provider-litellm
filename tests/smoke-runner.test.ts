@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSmokeModels, runSmoke, runSmokeFromEnv, smokeChatCompletion } from "../scripts/smoke-runner.js";
+import {
+  parseExpectedApis,
+  parseExpectedResponseCost,
+  parseSmokeModels,
+  runSmoke,
+  runSmokeFromEnv,
+  smokeChatCompletion,
+} from "../scripts/smoke-runner.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -25,6 +32,23 @@ describe("parseSmokeModels", () => {
   it("returns an empty list for undefined or separator-only input", () => {
     expect(parseSmokeModels(undefined)).toEqual([]);
     expect(parseSmokeModels(" \n ,, \t ")).toEqual([]);
+  });
+});
+
+describe("smoke expectations", () => {
+  it("parses per-model API and response-cost expectations", () => {
+    expect(parseExpectedApis("claude=anthropic-messages chat=openai-completions")).toEqual(
+      new Map([
+        ["claude", "anthropic-messages"],
+        ["chat", "openai-completions"],
+      ]),
+    );
+    expect(parseExpectedResponseCost("claude=present chat=absent")).toEqual(
+      new Map([
+        ["claude", true],
+        ["chat", false],
+      ]),
+    );
   });
 });
 
@@ -78,6 +102,16 @@ describe("runSmoke", () => {
       apiKey: "sk-smoke",
       modelIds: ["claude-route", "chat-route", "responses-route"],
       timeoutMs: 1000,
+      expectedApis: new Map([
+        ["claude-route", "anthropic-messages"],
+        ["chat-route", "openai-completions"],
+        ["responses-route", "openai-responses"],
+      ]),
+      expectedResponseCost: new Map([
+        ["claude-route", true],
+        ["chat-route", false],
+        ["responses-route", false],
+      ]),
     });
 
     expect(result.completions).toEqual([
@@ -108,6 +142,29 @@ describe("runSmoke", () => {
       "http://127.0.0.1:4000/v1/chat/completions",
       "http://127.0.0.1:4000/v1/responses",
     ]);
+  });
+
+  it("rejects an expected API mismatch before calling completion endpoints", async () => {
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "claude-route", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["claude-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["claude-route", "anthropic-messages"]]),
+      }),
+    ).rejects.toThrow(/API mismatch for claude-route/);
+    expect(requests).toEqual(["http://127.0.0.1:4000/model/info"]);
   });
 
   it("discovers models and sends a chat completion request to each requested model", async () => {

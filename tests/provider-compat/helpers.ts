@@ -91,7 +91,12 @@ export function successfulResponse(text: string): Chunk[] {
 
 export async function createCompatibilityHarness(
   discovery?: readonly ModelInfoEntry[] | ModelInfoEntry,
-  options: { modelsStore?: InMemoryModelsStore; allowNetwork?: boolean } = {},
+  options: {
+    modelsStore?: InMemoryModelsStore;
+    allowNetwork?: boolean;
+    customHeaders?: Record<string, string>;
+    sessionFile?: string;
+  } = {},
 ): Promise<{
   provider: Provider;
   models: Models;
@@ -99,8 +104,10 @@ export async function createCompatibilityHarness(
   foreignModel: Model<Api>;
   requests: RequestBody[];
   requestUrls: string[];
+  requestHeaders: Headers[];
   foreignRequests: RequestBody[];
   respond: (...chunks: Chunk[]) => void;
+  respondRaw: (raw: string) => void;
 }> {
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
     defineTool: (tool: unknown) => tool,
@@ -108,14 +115,18 @@ export async function createCompatibilityHarness(
   }));
   vi.stubEnv("LITELLM_BASE_URL", "https://proxy.example.com");
   vi.stubEnv("LITELLM_API_KEY", "sk-test");
+  if (options.customHeaders) vi.stubEnv("LITELLM_HEADERS", JSON.stringify(options.customHeaders));
 
   const discoveryRows = Array.isArray(discovery) ? discovery : discovery ? [discovery] : undefined;
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const requests: RequestBody[] = [];
   const requestUrls: string[] = [];
+  const requestHeaders: Headers[] = [];
   const foreignRequests: RequestBody[] = [];
   const responses: Chunk[][] = [];
+  const rawResponses: string[] = [];
   const respond = (...chunks: Chunk[]) => responses.push(chunks);
+  const respondRaw = (raw: string) => rawResponses.push(raw);
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? String(input);
@@ -148,7 +159,10 @@ export async function createCompatibilityHarness(
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
-    if (!isForeignRequest) requestUrls.push(url);
+    if (!isForeignRequest) {
+      requestUrls.push(url);
+      requestHeaders.push(new Headers(request?.headers ?? init?.headers));
+    }
     const history = JSON.stringify(requestBody.messages ?? requestBody.input);
     if (history.includes("Overflow the context")) {
       return Response.json(
@@ -163,9 +177,9 @@ export async function createCompatibilityHarness(
         { status: 400 },
       );
     }
-    const chunks =
-      responses.shift() ??
-      (!isAnthropicRequest && isForeignRequest && history.includes("Continue elsewhere")
+    const rawResponse = rawResponses.shift();
+    const fallbackChunks =
+      !isAnthropicRequest && isForeignRequest && history.includes("Continue elsewhere")
         ? successfulResponse("foreign continued")
         : !isAnthropicRequest && history.includes("Continue in LiteLLM")
           ? successfulResponse("LiteLLM continued")
@@ -173,12 +187,18 @@ export async function createCompatibilityHarness(
             ? successfulResponse("diameter 2 px")
             : !isAnthropicRequest && history.includes("Inspect the image")
               ? successfulResponse("red circle")
-              : undefined);
+              : undefined;
+    const chunks = rawResponse !== undefined ? [] : (responses.shift() ?? fallbackChunks);
     if (!chunks) throw new Error("missing mock response");
     const signal = request?.signal ?? init?.signal;
     const body = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
+        if (rawResponse !== undefined) {
+          controller.enqueue(encoder.encode(rawResponse));
+          controller.close();
+          return;
+        }
         for (const chunk of chunks) {
           if (chunk.waitForAbort && signal && !signal.aborted) {
             await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -224,6 +244,9 @@ export async function createCompatibilityHarness(
     modelsStore: options.modelsStore ?? new InMemoryModelsStore(),
     authContext,
   });
+  for (const handler of handlers.get("session_start") ?? []) {
+    await handler({ type: "session_start" }, { sessionManager: { getSessionFile: () => options.sessionFile } });
+  }
   const beforeRequestHandlers = handlers.get("before_provider_request") ?? [];
   const composePayloadHook =
     (original: StreamOptions["onPayload"]): StreamOptions["onPayload"] =>
@@ -261,14 +284,25 @@ export async function createCompatibilityHarness(
     contextWindow: 4096,
     maxTokens: 1024,
   };
-  models.setProvider(
-    createProvider({
-      id: "foreign",
-      auth: { apiKey: { name: "Foreign", resolve: async () => ({ auth: { apiKey: "foreign-test" } }) } },
-      models: [foreignModel],
-      api: openAICompletionsApi(),
-    }),
-  );
+  const foreignProvider = createProvider({
+    id: "foreign",
+    auth: { apiKey: { name: "Foreign", resolve: async () => ({ auth: { apiKey: "foreign-test" } }) } },
+    models: [foreignModel],
+    api: openAICompletionsApi(),
+  });
+  models.setProvider({
+    ...foreignProvider,
+    stream: ((streamModel, context, streamOptions?: StreamOptions) =>
+      foreignProvider.stream(streamModel as typeof foreignModel, context, {
+        ...streamOptions,
+        onPayload: composePayloadHook(streamOptions?.onPayload),
+      } as never)) as Provider["stream"],
+    streamSimple: ((streamModel, context, streamOptions) =>
+      foreignProvider.streamSimple(streamModel as typeof foreignModel, context, {
+        ...streamOptions,
+        onPayload: composePayloadHook(streamOptions?.onPayload),
+      })) as Provider["streamSimple"],
+  });
   const refresh = await models.refresh({ allowNetwork: options.allowNetwork ?? true });
   const refreshError = refresh.errors.get(provider.id);
   if (refreshError) throw refreshError;
@@ -276,7 +310,18 @@ export async function createCompatibilityHarness(
   const model = models.getModel(provider.id, discoveredId);
   if (!model) throw new Error("LiteLLM model was not discovered");
 
-  return { provider, models, model, foreignModel, requests, requestUrls, foreignRequests, respond };
+  return {
+    provider,
+    models,
+    model,
+    foreignModel,
+    requests,
+    requestUrls,
+    requestHeaders,
+    foreignRequests,
+    respond,
+    respondRaw,
+  };
 }
 
 afterEach(() => {

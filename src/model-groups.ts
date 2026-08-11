@@ -6,9 +6,15 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 
+export interface BackendIdentityEvidence {
+  semanticFamily: SemanticFamily;
+  source: "adapter" | "qualified-model";
+}
+
 export interface CatalogResolution {
   provider?: string;
   semanticFamily?: SemanticFamily;
+  backendIdentity?: BackendIdentityEvidence;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -155,6 +161,7 @@ export function reduceModelGroup(
   const catalogs = deployments.map(resolveCatalog);
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
+  const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
@@ -195,7 +202,7 @@ export function reduceModelGroup(
 
   const api = candidateModes.every((mode) => mode === "responses")
     ? "openai-responses"
-    : candidateModes.every((mode) => mode === "chat") && semanticFamily === "claude"
+    : candidateModes.every((mode) => mode === "chat") && backendSemanticFamily === "claude"
       ? "anthropic-messages"
       : "openai-completions";
 
@@ -224,6 +231,7 @@ export function catalogResolution(
   return {
     provider,
     semanticFamily,
+    backendIdentity: semanticFamily ? { semanticFamily, source: "qualified-model" } : undefined,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),

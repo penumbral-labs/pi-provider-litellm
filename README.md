@@ -203,8 +203,10 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes
 route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock.
-The smoke runner discovers those models through LiteLLM, calls the selected endpoint for each model, and records whether
-LiteLLM returned `x-litellm-response-cost`.
+The smoke runner discovers those models through LiteLLM, asserts each model's expected API, requires the union of
+`/v1/messages`, `/v1/chat/completions`, and `/v1/responses`, and checks the configured `x-litellm-response-cost`
+expectation. The workflow also captures successful LiteLLM logs and asserts all three POST paths. When a deployment is
+configured to permit an absent cost header, the visible fallback remains the discovered static estimate.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
 

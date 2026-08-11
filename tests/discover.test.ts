@@ -242,6 +242,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("model_info");
+    expect(result.models[0]).toMatchObject({ api: "openai-completions", compat: { cacheControlFormat: "anthropic" } });
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
   });
 
@@ -601,6 +602,42 @@ describe("discoverModels native Messages selection", () => {
             model_info: { id: "responses", mode: "responses", litellm_provider: "anthropic" },
             litellm_params: { model: "anthropic/claude-sonnet-4-6" },
           },
+          { model_name: "claude-public-only", model_info: { id: "public", mode: "chat" } },
+          {
+            model_name: "contradicted-claude",
+            model_info: { id: "contradicted", mode: "chat", litellm_provider: "openai" },
+            litellm_params: { model: "openai/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "anthropic-claude",
+            model_info: { id: "anthropic", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-adapter-claude",
+            model_info: { id: "bedrock", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-converse-claude",
+            model_info: { id: "bedrock-converse", mode: "chat", litellm_provider: "bedrock_converse" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "vertex-claude",
+            model_info: { id: "vertex", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "custom-claude",
+            model_info: { id: "custom", mode: "chat", litellm_provider: "custom" },
+            litellm_params: { model: "custom/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "missing-mode-claude",
+            model_info: { id: "missing-mode", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
         ],
       }),
     );
@@ -612,6 +649,14 @@ describe("discoverModels native Messages selection", () => {
       ["mixed-route", "openai-completions"],
       ["unknown-route", "openai-completions"],
       ["claude-responses", "openai-responses"],
+      ["claude-public-only", "openai-completions"],
+      ["contradicted-claude", "openai-completions"],
+      ["anthropic-claude", "anthropic-messages"],
+      ["bedrock-adapter-claude", "anthropic-messages"],
+      ["bedrock-converse-claude", "anthropic-messages"],
+      ["vertex-claude", "anthropic-messages"],
+      ["custom-claude", "openai-completions"],
+      ["missing-mode-claude", "openai-completions"],
     ]);
     expect(result.models[0]?.compat).toBeUndefined();
   });
@@ -650,7 +695,7 @@ describe("discoverModels response-mode models", () => {
     });
   });
 
-  it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
+  it("keeps /health model_info fallbacks on Chat even when detail mode is Responses", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) return jsonResponse(404, {});
@@ -679,24 +724,41 @@ describe("discoverModels response-mode models", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.3-codex-openai",
-      api: "openai-responses",
+      api: "openai-completions",
     });
   });
 
-  it("does not infer Messages from health detail metadata", async () => {
+  it.each([
+    ["uuid-claude", "uuid-openai"],
+    ["uuid-openai", "uuid-claude"],
+  ])("does not infer Messages from health detail metadata in order %j", async (...endpointIds) => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(404, {});
       if (url.endsWith("/v1/models")) return jsonResponse(404, {});
       if (url.endsWith("/health")) {
-        return jsonResponse(200, { healthy_endpoints: [{ model: "public-claude", model_id: "uuid-claude" }] });
+        return jsonResponse(200, {
+          healthy_endpoints: endpointIds.map((model_id) => ({ model: "mixed-health-route", model_id })),
+        });
       }
       if (url.endsWith("/model/info?litellm_model_id=uuid-claude")) {
         return jsonResponse(200, {
           data: [
             {
+              model_name: "mixed-health-route",
               model_info: { mode: "chat", litellm_provider: "anthropic" },
               litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-openai")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "mixed-health-route",
+              model_info: { mode: "chat", litellm_provider: "openai" },
+              litellm_params: { model: "openai/gpt-4o" },
             },
           ],
         });
@@ -707,6 +769,7 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
     expect(result.models[0]?.api).toBe("openai-completions");
   });
 

@@ -204,6 +204,8 @@ function semanticFamily(id: string): SemanticFamily | undefined {
   return undefined;
 }
 
+const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
+
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
   azure: "azure-openai-responses",
@@ -225,18 +227,43 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
+function resolveClaudeBackendIdentity(
+  adapter: string | undefined,
+  candidates: readonly string[],
+): CatalogResolution["backendIdentity"] {
+  const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
+  if (families.some((family) => family !== "claude")) return undefined;
+  if (adapter) {
+    return CLAUDE_CAPABLE_ADAPTERS.has(adapter) ? { semanticFamily: "claude", source: "adapter" } : undefined;
+  }
+  const qualifiedClaude = candidates.some((candidate) => {
+    if (!candidate.includes("/")) return false;
+    const resolved = resolveCatalogModel(candidate);
+    return resolved !== undefined && semanticFamily(resolved.model.id) === "claude";
+  });
+  return qualifiedClaude ? { semanticFamily: "claude", source: "qualified-model" } : undefined;
+}
+
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
-  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const adapter = entry.model_info?.litellm_provider?.trim().toLowerCase();
+  const adapterProvider = adapterCatalogProvider(adapter);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  let family: SemanticFamily | undefined;
+  const family = candidates.map(semanticFamily).find((candidate) => candidate !== undefined);
+  const backendIdentity = resolveClaudeBackendIdentity(adapter, candidates);
+
   for (const candidate of candidates) {
-    family ??= semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, family, resolved.model);
+    if (resolved) {
+      return {
+        ...catalogResolution(resolved.provider, family, resolved.model),
+        backendIdentity,
+      };
+    }
   }
-  return family ? { semanticFamily: family } : undefined;
+  if (family) return { semanticFamily: family, backendIdentity };
+  return backendIdentity ? { semanticFamily: "claude", backendIdentity } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -456,7 +483,11 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     if (resolved || !singleton) return resolved;
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
-    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
+    if (!catalog) return undefined;
+    const metadata = catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model);
+    // Public route aliases can enrich catalog metadata, but are not backend identity evidence.
+    delete metadata.backendIdentity;
+    return metadata;
   });
   if (!reduced) return undefined;
   const incompleteMetadataName =
@@ -480,16 +511,12 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // `/health` route text and detail lookups are not group-level transport evidence.
-  if (model) {
-    delete model.thinkingLevelMap;
-    if (model.api === "anthropic-messages") {
-      return { ...model, api: "openai-completions", compat: buildCompat(model.id) };
-    }
-  }
-  return model;
+  const model = mapFromModelInfo(entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId });
+  // `/health` detail lookups are per deployment, not complete route groups, so they can never select Messages.
+  if (!model) return undefined;
+  if (!entry.model_name) delete model.thinkingLevelMap;
+  const semantic = model.api === "anthropic-messages" ? "claude" : undefined;
+  return { ...model, api: "openai-completions", compat: buildCompat(model.id, "openai-completions", semantic) };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
