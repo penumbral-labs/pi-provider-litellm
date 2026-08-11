@@ -7,14 +7,14 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 
 export interface CatalogResolution {
-  provider: string;
+  provider?: string;
   semanticFamily?: SemanticFamily;
-  reasoning: boolean;
+  reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
-  vision: boolean;
-  contextWindow: number;
-  maxTokens: number;
-  cost: DiscoveredModel["cost"];
+  vision?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+  cost?: DiscoveredModel["cost"];
 }
 
 export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | undefined;
@@ -66,7 +66,7 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
   deploymentCount: number;
 } {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
-  const anonymous = new Map<string, ModelInfoEntry>();
+  const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];
   for (const entry of entries) {
     const signature = stableEntry(entry);
     const id = entry.model_info?.id?.trim();
@@ -75,7 +75,7 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
       variants.set(signature, entry);
       identified.set(id, variants);
     } else {
-      anonymous.set(signature, entry);
+      anonymous.push({ signature, entry });
     }
   }
   // Conflicting rows for one deployment remain in the reduction so their
@@ -86,9 +86,13 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
       .flatMap(([, variants]) =>
         [...variants.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, entry]) => entry),
       ),
-    ...[...anonymous.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, entry]) => entry),
+    ...anonymous.sort((left, right) => left.signature.localeCompare(right.signature)).map(({ entry }) => entry),
   ];
-  return { deployments, deploymentCount: identified.size + anonymous.size };
+  return { deployments, deploymentCount: identified.size + anonymous.length };
+}
+
+export function effectiveDeploymentCount(entries: readonly ModelInfoEntry[]): number {
+  return uniqueDeployments(entries.filter((entry) => entry.model_name)).deploymentCount;
 }
 
 function normalizeParams(params: readonly string[] | undefined): Set<string> {
@@ -126,7 +130,7 @@ function resolvedCost(
   catalog: CatalogResolution | undefined,
   field: CostField,
 ): number | undefined {
-  return explicitCost(entry, field) ?? catalog?.cost[field];
+  return explicitCost(entry, field) ?? catalog?.cost?.[field];
 }
 
 function min(values: readonly number[]): number {
@@ -142,14 +146,12 @@ export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  const unique = uniqueDeployments(entries);
-  const candidates = unique.deployments.filter((entry) => entry.model_name);
+  const unique = uniqueDeployments(entries.filter((entry) => entry.model_name));
+  const candidates = unique.deployments;
   if (candidates.length === 0) return undefined;
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
-  const modes = deployments.map((entry) => normalizedMode(entry.model_info?.mode));
-
   const catalogs = deployments.map(resolveCatalog);
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
@@ -184,7 +186,7 @@ export function reduceModelGroup(
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
   if (hasCompleteCost && catalogProvider) {
-    const tiers = unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.cost.tiers)));
+    const tiers = unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.cost?.tiers)));
     if (tiers && tiers !== JSON.stringify(undefined)) cost.tiers = JSON.parse(tiers);
   }
   const thinkingLevelMap = catalogProvider
@@ -194,7 +196,7 @@ export function reduceModelGroup(
   return {
     id: deployments[0]?.model_name as string,
     deploymentCount: unique.deploymentCount,
-    api: modes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
+    api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
     vision,

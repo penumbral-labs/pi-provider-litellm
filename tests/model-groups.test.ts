@@ -121,7 +121,7 @@ describe("reduceModelGroup", () => {
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
     expect(expected).toMatchObject({ deploymentCount: 1, contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
-    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(1);
+    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
   });
 
   it("selects Responses only when every deployment explicitly reports it", () => {
@@ -133,6 +133,20 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([responses, response], resolveCatalog)?.api).toBe("openai-responses");
     expect(reduceModelGroup([responses, chat], resolveCatalog)?.api).toBe("openai-completions");
     expect(reduceModelGroup([responses, unknown], resolveCatalog)?.api).toBe("openai-completions");
+  });
+
+  it("lets unsupported transport evidence force Chat without affecting metadata", () => {
+    const responses = row({ model_info: { id: "responses", mode: "responses" } });
+    const unsupported = row({
+      model_info: { id: "embed", mode: "embedding", max_input_tokens: 1, max_output_tokens: 1 },
+      litellm_params: { model: "internal/embedding" },
+    });
+
+    expect(reduceModelGroup([responses, unsupported], resolveCatalog)).toMatchObject({
+      api: "openai-completions",
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+    });
   });
 
   it("falls back to Chat without reducing metadata from unsupported rows", () => {
@@ -254,6 +268,25 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: false,
       cost: { input: 4, output: 0, cacheRead: 0.3, cacheWrite: 3.75 },
     });
+  });
+
+  it("keeps semantic family evidence when no catalog identity resolves", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "public-route",
+          model_info: { id: "foundry", mode: "chat", litellm_provider: "azure_ai" },
+          litellm_params: { model: "azure_ai/DeepSeek-V4", allowed_openai_params: ["reasoning_effort"] },
+        }),
+      ],
+      () => ({ semanticFamily: "deepseek" }),
+    );
+
+    expect(result).toMatchObject({
+      semanticFamily: "deepseek",
+      acceptedOpenAIParams: ["reasoning_effort"],
+    });
+    expect(result).not.toHaveProperty("catalogProvider");
   });
 
   it("keeps semantic family separate from catalog provider identity", () => {

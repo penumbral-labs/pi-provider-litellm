@@ -4,9 +4,11 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
 import {
+  type CatalogResolution,
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  effectiveDeploymentCount,
   reduceModelGroup,
   type SemanticFamily,
 } from "./model-groups.js";
@@ -223,16 +225,18 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
-function resolveModelInfoCatalog(entry: ModelInfoEntry) {
+export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
+  let family: SemanticFamily | undefined;
   for (const candidate of candidates) {
+    family ??= semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model);
+    if (resolved) return catalogResolution(resolved.provider, family, resolved.model);
   }
-  return undefined;
+  return family ? { semanticFamily: family } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -443,9 +447,10 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
 }
 
 function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  // A public route is singleton evidence only when there is exactly one
-  // deployment; multi-deployment groups must resolve each backend independently.
-  const singleton = entries.length === 1;
+  // Exact repeats of an identified deployment are one effective deployment;
+  // anonymous rows remain distinct because LiteLLM provides no identity to dedupe.
+  const deploymentCount = effectiveDeploymentCount(entries);
+  const singleton = deploymentCount === 1;
   const reduced = reduceModelGroup(entries, (entry) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved || !singleton) return resolved;
@@ -455,7 +460,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
   });
   if (!reduced) return undefined;
   const incompleteMetadataName =
-    entries.length > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+    deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
   return {
     id: reduced.id,
     name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
