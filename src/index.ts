@@ -29,7 +29,7 @@ import {
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider } from "./provider.js";
+import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -96,6 +96,40 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
 function cleanConfig(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed && trimmed !== "undefined" ? trimmed : undefined;
+}
+
+function resolveSanitizedCredentialRoot(
+  definition: ProviderDefinition,
+  credential?: Credential,
+  requestBaseUrl?: string,
+): string | undefined {
+  const credentialBaseUrl =
+    credential?.type === "oauth"
+      ? cleanConfig(typeof credential.baseUrl === "string" ? credential.baseUrl : undefined)
+      : credential?.type === "api_key"
+        ? cleanConfig(credential.env?.[ENV_BASE_URL])
+        : undefined;
+  const baseUrl =
+    credentialBaseUrl ??
+    cleanConfig(requestBaseUrl) ??
+    cleanConfig(definition.baseUrl) ??
+    (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  if (!baseUrl) return undefined;
+  try {
+    const normalized = normalizeBaseUrl(baseUrl);
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+    return normalized;
+  } catch {
+    throw new Error("Invalid LiteLLM base URL; a network refresh with a valid URL is required");
+  }
+}
+
+function requireNonPlaceholderCredentialRoot(root: string): string {
+  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+    throw new Error("LiteLLM credentials use a placeholder host; a network refresh with a real base URL is required");
+  }
+  return root;
 }
 
 function stringSetting(value: unknown): string | undefined {
@@ -636,10 +670,15 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
             ...(await refreshLiteLLM(credential, signal)),
             type: "oauth" as const,
           }),
-          toAuth: async (credential) => ({
-            apiKey: credential.access,
-            headers: resolveHeaders(definition),
-          }),
+          toAuth: async (credential) => {
+            const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
+            if (!baseUrl) throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+            return {
+              apiKey: credential.access,
+              baseUrl,
+              headers: resolveHeaders(definition),
+            };
+          },
         }
       : undefined,
   };
@@ -885,28 +924,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function requestBaseUrl(definition: ProviderDefinition): string {
-    const baseUrl =
-      cleanConfig(definition.baseUrl) ??
-      (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined) ??
-      "https://litellm.example.com";
-    return `${normalizeBaseUrl(baseUrl)}/v1`;
+    return `${resolveSanitizedCredentialRoot(definition) ?? normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
   }
 
   async function authForCredential(definition: ProviderDefinition, credential: Credential) {
     if (credential.type === "oauth") {
-      const baseUrl =
-        typeof credential.baseUrl === "string"
-          ? normalizeBaseUrl(credential.baseUrl)
-          : normalizeBaseUrl(requestBaseUrl(definition));
-      return { baseUrl, apiKey: credential.access, headers: resolveHeaders(definition) };
+      const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
+      if (!baseUrl) throw new Error(`no LiteLLM base URL for ${definition.name}. Run /login litellm again.`);
+      return {
+        baseUrl: requireNonPlaceholderCredentialRoot(baseUrl),
+        apiKey: credential.access,
+        headers: resolveHeaders(definition),
+      };
     }
     const resolved = await resolveApiKeyAuth(definition, { env: async (name) => process.env[name] }, credential);
     if (!resolved?.auth.apiKey) {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
-    const credentialBaseUrl = credential.env?.[ENV_BASE_URL];
+    const baseUrl = resolveSanitizedCredentialRoot(definition, credential, resolved.env?.[ENV_BASE_URL]);
+    if (!baseUrl) throw new Error(`no LiteLLM base URL for ${definition.name}. Run /login litellm or set env vars.`);
     return {
-      baseUrl: normalizeBaseUrl(credentialBaseUrl ?? requestBaseUrl(definition)),
+      baseUrl: requireNonPlaceholderCredentialRoot(baseUrl),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
@@ -915,6 +953,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+  const oauthRuntimeRoots = new Map<string, string>();
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
@@ -928,9 +967,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.env?.[ENV_BASE_URL] ?? auth.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth.auth.apiKey;
+    const baseUrl = resolveSanitizedCredentialRoot(
+      definitions.find((definition) => definition.name === PROVIDER_NAME)!,
+      undefined,
+      auth.env?.[ENV_BASE_URL] ??
+        auth.auth.baseUrl ??
+        (apiKey ? oauthRuntimeRoots.get(apiKey) : undefined) ??
+        defaultRuntimeAuth?.baseUrl,
+    );
     if (!baseUrl || !apiKey) return undefined;
+    requireNonPlaceholderCredentialRoot(baseUrl);
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -1013,14 +1060,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: createProviderAuth(definition),
-      credentialBaseUrl: (credential) =>
-        credential.type === "oauth" && typeof credential.baseUrl === "string"
-          ? credential.baseUrl
-          : credential.type === "api_key"
-            ? (credential.env?.[ENV_BASE_URL] ??
-              definition.baseUrl ??
-              (definition.useDefaultEnv ? process.env[ENV_BASE_URL] : undefined))
-            : undefined,
+      resolveCredentialRoot: (credential, requestBaseUrl) =>
+        resolveSanitizedCredentialRoot(definition, credential, requestBaseUrl),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
@@ -1037,6 +1078,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
       },
     });
+    const oauthToAuth = provider.auth.oauth?.toAuth;
+    if (oauthToAuth) {
+      provider.auth.oauth!.toAuth = async (credential) => {
+        const auth = await oauthToAuth(credential);
+        const baseUrl = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
+        if (baseUrl && auth.apiKey) oauthRuntimeRoots.set(auth.apiKey, baseUrl);
+        return auth;
+      };
+    }
     Object.assign(provider, { headers: resolveHeaders(definition) });
     const refreshModels = provider.refreshModels!;
     provider.refreshModels = async (context) => {

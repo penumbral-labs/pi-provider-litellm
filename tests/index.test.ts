@@ -171,7 +171,7 @@ describe("extension startup", () => {
 
   it("disables models.dev enrichment with LITELLM_MODELS_DEV=0", async () => {
     const agentDir = await makeAgentDir();
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
     process.env.LITELLM_MODELS_DEV = "0";
     const urls: string[] = [];
@@ -192,7 +192,7 @@ describe("extension startup", () => {
     await refreshProvider(pi.providers[0]!, {
       allowNetwork: true,
       force: true,
-      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
+      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
     });
 
     expect(urls).not.toContain("https://models.dev/api.json");
@@ -200,7 +200,7 @@ describe("extension startup", () => {
   });
 
   it("keeps one provider registration across Pi-managed refresh", async () => {
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] }),
@@ -212,7 +212,7 @@ describe("extension startup", () => {
     await refreshProvider(pi.providers[0]!, {
       allowNetwork: true,
       force: true,
-      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
+      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
     });
 
     expect(pi.providers.map((provider) => provider.id)).toEqual(["litellm"]);
@@ -244,13 +244,13 @@ describe("extension startup", () => {
       store: createModelsStore([stored]),
     });
 
-    expect(() =>
+    expect(
       pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
         type: "api_key",
         key: "sk-test",
         env: { LITELLM_BASE_URL: "https://active.example.com" },
       }),
-    ).toThrow(/stale LiteLLM model host.*network refresh/i);
+    ).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(pi.providers).toHaveLength(1);
   });
@@ -279,13 +279,13 @@ describe("extension startup", () => {
       store: createModelsStore([stored]),
     });
 
-    expect(() =>
+    expect(
       pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
         type: "api_key",
         key: "sk-test",
         env: { LITELLM_BASE_URL: "https://litellm.example.com" },
       }),
-    ).toThrow(/credentials use a placeholder LiteLLM model host.*network refresh/i);
+    ).toEqual([]);
   });
 
   it("restores same-host Pi-managed models offline with protocol projection", async () => {
@@ -347,7 +347,7 @@ describe("extension startup", () => {
   });
 
   it("registers MCP tools after an online Pi-managed model restore", async () => {
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
     const requestedUrls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -375,7 +375,7 @@ describe("extension startup", () => {
       name: "Stored model",
       provider: "litellm",
       api: "openai-completions",
-      baseUrl: "https://litellm.example.com/v1",
+      baseUrl: "https://proxy.example.com/v1",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -389,15 +389,15 @@ describe("extension startup", () => {
         credential: {
           type: "api_key",
           key: "sk-test",
-          env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
         },
         store: createModelsStore([stored]),
       }),
     ).rejects.toThrow("unexpected URL");
 
     expect(requestedUrls).toEqual([
-      "https://litellm.example.com/model/info",
-      "https://litellm.example.com/mcp-rest/tools/list",
+      "https://proxy.example.com/model/info",
+      "https://proxy.example.com/mcp-rest/tools/list",
     ]);
     // MCP registration runs in the background so a hanging /mcp-rest endpoint
     // cannot block model refresh; wait for it to finish before asserting.
@@ -405,6 +405,50 @@ describe("extension startup", () => {
       expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
     });
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
+  });
+
+  it("isolates MCP registration failures so valid sibling tools still register", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            { name: "bad", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    const registered: string[] = [];
+    pi.registerTool = (tool) => {
+      if (tool.name === "mcp_server_bad") throw new Error("definition rejected");
+      registered.push(tool.name);
+      pi.tools.push(tool);
+    };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await extension(pi);
+
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(registered).toContain("mcp_server_good");
+    expect(registered).not.toContain("mcp_server_bad");
+    expect(stderr).toHaveBeenCalledWith("LiteLLM (litellm): An MCP tool could not be registered.\n");
+    expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
   });
 
   it("does not block model refresh on MCP discovery", async () => {
@@ -438,7 +482,7 @@ describe("extension startup", () => {
       credential: {
         type: "api_key",
         key: "sk-test",
-        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
       },
     }).then(() => {
       refreshed = true;
@@ -463,8 +507,49 @@ describe("extension startup", () => {
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
   });
 
+  it("propagates the production refresh signal through MCP discovery", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    const controller = new AbortController();
+    const reason = new Error("refresh cancelled");
+    let mcpStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      mcpStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        mcpStarted();
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const refresh = refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+      },
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort(reason);
+
+    await expect(refresh).rejects.toBe(reason);
+    expect(pi.providers[0]?.getModels().map((model) => model.id)).toEqual(["fresh-model"]);
+  });
+
   it("retains Pi-managed models when discovery fails", async () => {
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
@@ -475,7 +560,7 @@ describe("extension startup", () => {
         name: "Stored model",
         provider: "litellm",
         api: "openai-completions",
-        baseUrl: "https://litellm.example.com/v1",
+        baseUrl: "https://proxy.example.com/v1",
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -486,7 +571,7 @@ describe("extension startup", () => {
     const credential = {
       type: "api_key" as const,
       key: "sk-test",
-      env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      env: { LITELLM_BASE_URL: "https://proxy.example.com" },
     };
     await refreshProvider(pi.providers[0]!, { allowNetwork: false, credential, store });
 
@@ -520,7 +605,7 @@ describe("extension startup", () => {
   });
 
   it("leaves synthetic Messages payloads unchanged by Chat and Responses compatibility hooks", async () => {
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "test-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const extension = await loadExtension(await makeAgentDir());
@@ -561,7 +646,7 @@ describe("extension startup", () => {
       }),
       "utf8",
     );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "openai-key";
     process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
@@ -621,7 +706,7 @@ describe("extension startup", () => {
   it("checks command-backed auth without executing the helper", async () => {
     const agentDir = await makeAgentDir();
     const helperPath = await writeHelper(agentDir, ["helper-key"]);
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY_HELPER = helperPath;
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -833,7 +918,7 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
     const credential = await pi.providers[0]?.auth.apiKey?.login?.(
-      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+      interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce(`!${helperPath}`)),
     );
     const firstAuth = await resolveApiKey(pi.providers[0]!, credential);
     const secondAuth = await resolveApiKey(pi.providers[0]!, credential);
@@ -855,7 +940,7 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
     const credential = await pi.providers[0]?.auth.apiKey?.login?.(
-      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+      interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce(`!${helperPath}`)),
     );
 
     expect((await resolveApiKey(pi.providers[0]!, credential))?.auth.apiKey).toBe("opaque-first");
@@ -875,13 +960,14 @@ describe("extension startup", () => {
       access: "expired-token",
       refresh: `!${helperPath}`,
       expires: 0,
-      baseUrl: "https://litellm.example.com",
+      baseUrl: "https://proxy.example.com",
     };
 
     const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential);
     expect(await readHelperCount(agentDir)).toBe(1);
     await expect(pi.providers[0]?.auth.oauth?.toAuth(refreshed!)).resolves.toMatchObject({
       apiKey: "refreshed-token",
+      baseUrl: "https://proxy.example.com",
     });
     expect(await readHelperCount(agentDir)).toBe(1);
   });
@@ -942,7 +1028,7 @@ describe("extension startup", () => {
     const authInfos: Array<{ url: string; instructions?: string }> = [];
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return `Bearer ${jwt}`;
         return "y";
@@ -954,7 +1040,7 @@ describe("extension startup", () => {
     expect(authInfos).toEqual([
       {
         type: "auth_url",
-        url: "https://litellm.example.com/sso/key/generate",
+        url: "https://proxy.example.com/sso/key/generate",
         instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
       },
     ]);
@@ -962,14 +1048,15 @@ describe("extension startup", () => {
       access: "sk-virtual-abc",
       refresh: "",
       expires: Number.MAX_SAFE_INTEGER,
-      baseUrl: "https://litellm.example.com",
+      baseUrl: "https://proxy.example.com",
     });
     await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
       apiKey: "sk-virtual-abc",
+      baseUrl: "https://proxy.example.com",
     });
     expect(seenRequests).toContainEqual(
       expect.objectContaining({
-        url: "https://litellm.example.com/key/generate",
+        url: "https://proxy.example.com/key/generate",
         method: "POST",
         authorization: `Bearer ${jwt}`,
       }),
@@ -996,7 +1083,7 @@ describe("extension startup", () => {
 
     await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return `  Bearer  ${jwt}  `;
         return "y";
@@ -1026,7 +1113,7 @@ describe("extension startup", () => {
 
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1071,7 +1158,7 @@ describe("extension startup", () => {
     const controller = new AbortController();
     const loginPromise = loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1118,7 +1205,7 @@ describe("extension startup", () => {
     const reason = new Error("caller cancelled login");
     const loginPromise = loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1151,7 +1238,7 @@ describe("extension startup", () => {
 
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "no";
@@ -1183,7 +1270,7 @@ describe("extension startup", () => {
 
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1214,7 +1301,7 @@ describe("extension startup", () => {
 
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1238,7 +1325,7 @@ describe("extension startup", () => {
     await expect(
       loginOAuth(pi.providers[0]!, {
         onPrompt: async (options) => {
-          if (options.placeholder) return "https://litellm.example.com";
+          if (options.placeholder) return "https://proxy.example.com";
           if (options.message.includes("Select login method")) return "2";
           return "";
         },
@@ -1262,7 +1349,7 @@ describe("multi-provider hardening", () => {
       }),
       "utf8",
     );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "openai-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
@@ -1301,7 +1388,7 @@ describe("multi-provider hardening", () => {
 
     await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
-        if (options.placeholder) return "https://litellm.example.com";
+        if (options.placeholder) return "https://proxy.example.com";
         if (options.message.includes("Select login method")) return "2";
         if (options.message.includes("SSO token")) return jwt;
         return "y";
@@ -1309,7 +1396,7 @@ describe("multi-provider hardening", () => {
       signal: new AbortController().signal,
     });
 
-    expect(seenRequests).toContainEqual({ url: "https://litellm.example.com/key/generate", customer: "team-a" });
+    expect(seenRequests).toContainEqual({ url: "https://proxy.example.com/key/generate", customer: "team-a" });
   });
 
   it("drops non-primitive header values instead of stringifying them", async () => {
