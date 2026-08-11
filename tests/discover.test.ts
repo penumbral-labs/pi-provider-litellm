@@ -649,6 +649,47 @@ describe("discoverModels via /model/info", () => {
     expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
+  // SF-C: an unrecognized family is not agreement. A Claude route whose base_model names
+  // a non-Claude Bedrock model must adopt none of that model's identity, limits, or
+  // prices, and must not route natively.
+  it.each([["amazon.nova-pro-v1:0"], ["qwen.qwen3-32b-v1:0"], ["mistral.mistral-large-3-675b-instruct"]])(
+    "refuses catalog authority from an unrecognized-family base_model %s",
+    async (baseModel) => {
+      const resolved = resolveModelInfoCatalog({
+        model_name: "team-claude",
+        model_info: { mode: "chat", litellm_provider: "bedrock", base_model: baseModel },
+        litellm_params: { model: "bedrock/us.anthropic.claude-invented-9-9-v1:0" },
+      });
+
+      expect(resolved).toEqual({ semanticFamily: "claude", backendIdentity: { semanticFamily: "claude" } });
+      expect(resolved).not.toHaveProperty("provider");
+      expect(resolved).not.toHaveProperty("contextWindow");
+      expect(resolved).not.toHaveProperty("cost");
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        if (String(input).endsWith("/model/info")) {
+          return jsonResponse(200, {
+            data: [
+              {
+                model_name: "team-claude",
+                model_info: { id: "d1", mode: "chat", litellm_provider: "bedrock", base_model: baseModel },
+                litellm_params: { model: "bedrock/us.anthropic.claude-invented-9-9-v1:0" },
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected URL: ${String(input)}`);
+      });
+      const discovered = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      // Unknown backend compatibility also denies native Messages.
+      expect(discovered.models[0]).toMatchObject({ id: "team-claude", api: "openai-completions" });
+      expect(discovered.models[0]?.contextWindow).toBe(128_000);
+      expect(discovered.models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(discovered.models[0]?.name).toBe("team-claude (no metadata)");
+    },
+  );
+
   it("does not classify Messages compatibility from public model_name alone", () => {
     expect(
       resolveModelInfoCatalog({

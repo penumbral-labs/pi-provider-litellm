@@ -146,7 +146,12 @@ jobs:
                 mode: chat
                 litellm_provider: anthropic
               litellm_params:
-                model: anthropic/claude-3-5-sonnet
+                # Must be a backend the bundled Pi catalog knows: native Messages
+                # selection requires unanimous positive compatibility evidence, so an
+                # uncatalogued Claude (3.5, or anything newer than the catalog)
+                # correctly reduces to Chat Completions and would not exercise
+                # /v1/messages at all.
+                model: anthropic/claude-sonnet-4-6
                 api_base: http://host.docker.internal:8100
                 api_key: sk-vidaimock
             - model_name: vidaimock-responses

@@ -984,6 +984,20 @@ describe("extension startup", () => {
       "https://api-key.example.com/v1/chat/completions",
     ]);
     expect(provider.filterModels?.([apiKeyModel], { type: "api_key", key: "sk-api-key" })).toEqual([apiKeyModel]);
+
+    // A refresh that rotates the access token must re-remember the SSO host under the new
+    // token, since the remembered root is keyed by the token it was resolved for.
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-oauth-rotated",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://sso.example.com",
+    }));
+    const rotated = await models.complete({ ...baseModel, baseUrl: "https://sso.example.com/v1" }, { messages: [] });
+
+    expect(rotated.stopReason).toBe("stop");
+    expect(requestedUrls.at(-1)).toBe("https://sso.example.com/v1/chat/completions");
   });
 
   it.each([

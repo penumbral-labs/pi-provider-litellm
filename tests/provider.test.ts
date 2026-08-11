@@ -341,21 +341,32 @@ describe("createLiteLLMProvider", () => {
 
   // The documentation host is a real, third-party-operated domain, so any spelling of it
   // that slipped through would send a live credential off the machine.
-  it.each([
-    ["https://litellm.example.com"],
-    ["https://litellm.example.com."],
-    ["https://litellm.example.com:8000"],
-    ["https://LITELLM.EXAMPLE.COM"],
-    ["http://litellm.example.com/v1"],
-  ])("never dispatches a request to placeholder host spelling %s", (root) => {
-    const value = controller({ resolveCredentialRoot: () => root });
+  const placeholderRoots = [
+    "https://litellm.example.com",
+    "https://litellm.example.com.",
+    "https://litellm.example.com:8000",
+    "https://LITELLM.EXAMPLE.COM",
+    "http://litellm.example.com/v1",
+  ] as const;
+  const transports = [
+    ["openai-completions", "completions"],
+    ["openai-responses", "responses"],
+    ["anthropic-messages", "anthropic"],
+  ] as const;
 
-    expect(value.filterModels?.([native("stored")], credential)).toEqual([]);
-    expect(() => value.stream(native("stored"), { messages: [] })).toThrow(/placeholder LiteLLM model host/i);
-    expect(apiSpies.completions).not.toHaveBeenCalled();
-    expect(apiSpies.anthropic).not.toHaveBeenCalled();
-    expect(apiSpies.responses).not.toHaveBeenCalled();
-  });
+  // One case per transport, so each spy assertion is independently load-bearing: a
+  // protocol-specific bypass of the placeholder gate cannot hide behind a sibling.
+  it.each(transports.flatMap(([api, spy]) => placeholderRoots.map((root) => [api, spy, root] as const)))(
+    "never dispatches a %s request to placeholder host spelling %s %s",
+    (api, spy, root) => {
+      const value = controller({ resolveCredentialRoot: () => root });
+      const model = { ...native("stored"), api, compat: {} } as Model<LiteLLMApi>;
+
+      expect(value.filterModels?.([model], credential)).toEqual([]);
+      expect(() => value.stream(model, { messages: [] })).toThrow(/placeholder LiteLLM model host/i);
+      expect(apiSpies[spy]).not.toHaveBeenCalled();
+    },
+  );
 
   it("treats a trailing-dot host as the same host as its cached models", () => {
     const value = controller({ resolveCredentialRoot: () => "https://proxy.example." });
@@ -366,30 +377,6 @@ describe("createLiteLLMProvider", () => {
     expect(value.filterModels?.([native("stored")], credential)).toEqual([
       { ...native("stored"), baseUrl: "https://proxy.example./v1" },
     ]);
-  });
-
-  // The remembered OAuth root is keyed by access token, so a refresh that rotates the
-  // token is the one event that can break the match. Each of these drives the request
-  // path with the apiKey pi would supply after that resolution.
-  it("follows an access token across a refresh and refuses a token it never saw", () => {
-    let remembered: { apiKey: string; root: string } | undefined;
-    const value = controller({
-      resolveCredentialRoot: ({ requestBaseUrl, apiKey }) =>
-        (apiKey && remembered?.apiKey === apiKey ? remembered.root : undefined) ?? requestBaseUrl,
-    });
-    const model = native("stored");
-
-    remembered = { apiKey: "token-1", root: "https://proxy.example" };
-    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-1" })).not.toThrow();
-
-    // Refresh rotates the token; the new resolution re-remembers under the new token.
-    remembered = { apiKey: "token-2", root: "https://proxy.example" };
-    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-2" })).not.toThrow();
-
-    // The superseded token no longer matches and has no env root to fall back to.
-    expect(() => value.stream(model, { messages: [] }, { apiKey: "token-1" })).toThrow(
-      /do not identify a LiteLLM model host/i,
-    );
   });
 
   it("drops a model with an unsupported transport instead of failing the whole list", () => {

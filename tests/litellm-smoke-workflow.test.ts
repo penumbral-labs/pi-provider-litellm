@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { discoverModels } from "../src/discover.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -21,9 +22,85 @@ function readReadme(): string {
   return readFileSync(resolve(repoRoot, "README.md"), "utf8");
 }
 
+// Parse the `model_list:` entries out of the workflow's LiteLLM config heredoc, so the
+// deployments CI actually runs are the ones asserted here.
+function workflowDeployments(): Array<Record<string, unknown>> {
+  const workflow = readWorkflow();
+  const block = workflow.slice(workflow.indexOf("model_list:"), workflow.indexOf("general_settings:"));
+  return block
+    .split(/^\s*- model_name:/m)
+    .slice(1)
+    .map((entry, index) => {
+      const value = (key: string) => entry.match(new RegExp(`^\\s*${key}:\\s*(\\S.*?)\\s*$`, "m"))?.[1];
+      const list = (key: string) =>
+        entry
+          .match(new RegExp(`^\\s*${key}:\\s*\\[(.*?)\\]\\s*$`, "m"))?.[1]
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      return {
+        model_name: entry.split("\n")[0]?.trim(),
+        model_info: {
+          id: `deployment-${index}`,
+          ...(value("mode") ? { mode: value("mode") } : {}),
+          ...(value("litellm_provider") ? { litellm_provider: value("litellm_provider") } : {}),
+          ...(list("supported_openai_params") ? { supported_openai_params: list("supported_openai_params") } : {}),
+        },
+        litellm_params: {
+          model: value("model"),
+          ...(list("allowed_openai_params") ? { allowed_openai_params: list("allowed_openai_params") } : {}),
+        },
+      };
+    });
+}
+
+function workflowExpectedApis(): Map<string, string> {
+  const raw = readWorkflow().match(/^\s*LITELLM_SMOKE_EXPECT_APIS:\s*(.+)$/m)?.[1] ?? "";
+  return new Map(
+    raw
+      .trim()
+      .split(/\s+/)
+      .map((entry) => {
+        const separator = entry.lastIndexOf("=");
+        return [entry.slice(0, separator), entry.slice(separator + 1)] as const;
+      }),
+  );
+}
+
 function readTerminalSmoke(): string {
   return readFileSync(resolve(repoRoot, "tests/terminal-smoke.test.ts"), "utf8");
 }
+
+describe("LiteLLM smoke workflow config", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // The workflow declares the deployments AND the expected transports. Those two
+  // declarations drifted apart once selection required positive compatibility
+  // evidence: the Anthropic route pointed at an uncatalogued Claude, so it reduced to
+  // Chat while the workflow still expected Messages, and only CI could notice.
+  it("resolves each configured deployment to the transport the workflow expects", async () => {
+    const deployments = workflowDeployments();
+    const expected = workflowExpectedApis();
+    expect(deployments.length).toBeGreaterThan(0);
+    expect(expected.size).toBeGreaterThan(0);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Response.json({ data: deployments });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const resolved = new Map(result.models.map((model) => [model.id, model.api]));
+
+    for (const [modelId, expectedApi] of expected) {
+      expect(resolved.get(modelId), `workflow model ${modelId}`).toBe(expectedApi);
+    }
+    // The Messages route is the reason this workflow exists; prove one is present.
+    expect([...resolved.values()]).toContain("anthropic-messages");
+  });
+});
 
 describe("LiteLLM smoke workflow", () => {
   it("routes smoke completions through VidaiMock instead of real LLM APIs", () => {
@@ -53,7 +130,7 @@ describe("LiteLLM smoke workflow", () => {
                 litellm_provider: anthropic
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
-    expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    expect(workflow).toContain("model: anthropic/claude-sonnet-4-6");
     expect(workflow).toContain("model_name: vidaimock-responses");
     expect(workflow).toContain("mode: responses");
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);

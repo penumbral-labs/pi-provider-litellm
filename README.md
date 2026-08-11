@@ -174,9 +174,15 @@ requests still take actual cost from that header when LiteLLM returns it.
 
 ## Model catalog authority
 
-Metadata enrichment from Pi's bundled model catalog requires two things: unambiguous provider identity (a known adapter, a known provider prefix, or a recognized Anthropic alias) **and** an entry for that backend model in the bundled catalog. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog happens to list that name first, and a model newer than the bundled catalog stays unknown even when its provider is obvious. Those models appear with the id LiteLLM reported, a `(no metadata)` or `(incomplete metadata)` suffix when cost data is incomplete, default context and output limits, and no static pricing.
+Metadata resolves per field, from two sources with a fixed precedence.
 
-Qualifying the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) supplies the identity half. Router-reported limits and per-token costs in `/model/info` are always used when present, so a proxy that fills those in reports correct pricing and limits regardless of catalog coverage.
+**Explicit router values win.** Anything `/model/info` reports for a deployment — capabilities, context and output limits, per-token costs — is used as reported, whether or not the catalog knows the model. Non-finite or non-positive limits are ignored rather than clamping the group.
+
+**Catalog values fill the gaps, but only with bounded unambiguous identity.** Enrichment from Pi's bundled catalog requires a declared adapter, a known provider prefix, or a recognized bare Anthropic alias, **and** an entry for that backend model in the catalog of that provider. A declared adapter is authoritative: a Vertex-served Claude is not priced from the first-party Anthropic catalog. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog lists that name first, and a model newer than the bundled catalog stays unknown even when its provider is obvious.
+
+**Display cost is marked, not invented.** A model's name carries a `(no metadata)` or `(incomplete metadata)` suffix whenever any of the four display-cost fields (input, output, cache read, cache write) is unresolved, so an unknown price is never shown as free. Filling in only input and output costs therefore leaves the marker in place. For a multi-deployment route, limits reduce to the group minimum and resolved costs to the group maximum.
+
+Qualifying the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) supplies the identity half; reporting all four cost fields supplies the pricing half.
 
 ## When LiteLLM models disappear
 
