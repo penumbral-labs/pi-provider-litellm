@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -85,10 +85,13 @@ describe("pi package compatibility", () => {
     }
   }, 30_000);
 
-  // Installs the packed tarball by materialising it under `node_modules` and linking
-  // the repository's already-installed Pi peers. This keeps the real pack -> install ->
-  // load path under test while staying offline and deterministic; `npm install` here
-  // would resolve the peers' transitive dependencies from the registry on every run.
+  // Proves the packed tarball ships the right files and that its declared entrypoint
+  // loads through Pi's real loader from both the extracted package root and a
+  // node_modules-shaped path. Peer resolution is deliberately not asserted: the loader
+  // is imported from this repository, so it resolves the extension's bare specifiers
+  // through its own context rather than from the fixture. `npm install` here could not
+  // prove peer resolution either, and cost a registry download of the peers' transitive
+  // dependencies on every run.
   it("packs, installs, and loads the source package without TypeScript stripping in node_modules", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
     try {
@@ -109,7 +112,6 @@ describe("pi package compatibility", () => {
       const nodeModules = join(fixture, "node_modules");
       await mkdir(nodeModules, { recursive: true });
       await cp(packageRoot, join(nodeModules, "pi-provider-litellm"), { recursive: true });
-      await symlink(resolve(repoRoot, "node_modules/@earendil-works"), join(nodeModules, "@earendil-works"), "dir");
       const installedEntrypoint = resolve(fixture, "node_modules/pi-provider-litellm", manifest.pi.extensions[0]);
       const installedResult = await loadExtension(installedEntrypoint, fixture);
 
