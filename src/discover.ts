@@ -4,9 +4,11 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
 import {
+  type CatalogResolution,
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  effectiveDeploymentCount,
   reduceModelGroup,
   type SemanticFamily,
 } from "./model-groups.js";
@@ -84,7 +86,12 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+export function buildCompat(
+  modelId: string,
+  api: DiscoveredModel["api"] = "openai-completions",
+): DiscoveredModel["compat"] {
+  if (api === "anthropic-messages") return undefined;
+  if (api === "openai-responses") return {};
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -218,16 +225,18 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
-function resolveModelInfoCatalog(entry: ModelInfoEntry) {
+export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
+  let family: SemanticFamily | undefined;
   for (const candidate of candidates) {
+    family ??= semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model);
+    if (resolved) return catalogResolution(resolved.provider, family, resolved.model);
   }
-  return undefined;
+  return family ? { semanticFamily: family } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -438,9 +447,10 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
 }
 
 function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  // A public route is singleton evidence only when there is exactly one
-  // deployment; multi-deployment groups must resolve each backend independently.
-  const singleton = entries.length === 1;
+  // Exact repeats of an identified deployment are one effective deployment;
+  // anonymous rows remain distinct because LiteLLM provides no identity to dedupe.
+  const deploymentCount = effectiveDeploymentCount(entries);
+  const singleton = deploymentCount === 1;
   const reduced = reduceModelGroup(entries, (entry) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved || !singleton) return resolved;
@@ -450,7 +460,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
   });
   if (!reduced) return undefined;
   const incompleteMetadataName =
-    entries.length > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+    deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
   return {
     id: reduced.id,
     name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
@@ -460,8 +470,8 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
-    compat: buildCompat(reduced.id),
-    ...(reduced.api === "openai-responses" ? { api: "openai-responses" as const } : {}),
+    api: reduced.api,
+    compat: buildCompat(reduced.id, reduced.api),
   };
 }
 
@@ -490,6 +500,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    api: "openai-completions",
     compat: buildCompat(id),
   };
 }
@@ -511,6 +522,7 @@ function mapFromModelsList(
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    api: "openai-completions",
     compat: buildCompat(id),
   };
 }

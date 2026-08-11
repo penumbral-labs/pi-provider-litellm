@@ -2,7 +2,13 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildCompat, discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "../src/discover.js";
+import {
+  buildCompat,
+  discoverModels,
+  normalizeBaseUrl,
+  resolveModelInfoCatalog,
+  shouldSuppressReasoningContent,
+} from "../src/discover.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -62,6 +68,11 @@ describe("normalizeBaseUrl", () => {
 });
 
 describe("buildCompat", () => {
+  it("returns protocol-shaped compatibility metadata", () => {
+    expect(buildCompat("claude-opus", "anthropic-messages")).toBeUndefined();
+    expect(buildCompat("openai/gpt-4o", "openai-responses")).toEqual({});
+  });
+
   it("returns supportsStore: false for non-anthropic models", () => {
     expect(buildCompat("openai/gpt-4o")).toEqual({ supportsStore: false });
     expect(buildCompat("gemini/gemini-2.0-flash")).toEqual({ supportsStore: false });
@@ -342,7 +353,7 @@ describe("discoverModels via /model/info", () => {
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         }),
       ]);
-      expect(result.models[0]).not.toHaveProperty("api");
+      expect(result.models[0]).toHaveProperty("api", "openai-completions");
       expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
     }
   });
@@ -420,6 +431,56 @@ describe("discoverModels via /model/info", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("treats repeated identified deployment rows as one effective singleton", async () => {
+    const deployment = {
+      model_name: "openai/gpt-5.5",
+      model_info: { id: "deployment-a", mode: "chat" },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const data of [[deployment], [deployment, deployment]]) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { data }));
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      expect(result.models[0]).toMatchObject({
+        id: "openai/gpt-5.5",
+        name: "openai/gpt-5.5",
+        reasoning: true,
+        contextWindow: 272_000,
+        maxTokens: 128_000,
+      });
+    }
+  });
+
+  it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route-without-family-text",
+        litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+        model_info: { mode: "chat", litellm_provider: "azure_ai" },
+      }),
+    ).toEqual({ semanticFamily: "deepseek" });
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "foundry-route",
+            litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+            model_info: { mode: "chat", litellm_provider: "azure_ai" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "foundry-route",
+      name: "foundry-route (no metadata)",
+      reasoning: false,
+      contextWindow: 128_000,
+    });
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
@@ -593,6 +654,27 @@ describe("discoverModels response-mode models", () => {
 });
 
 describe("discoverModels fallback to /v1/models", () => {
+  it("keeps unqualified fallback ids bounded instead of scanning every provider catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-4o" }, { id: "kimi-k2.6" }, { id: "grok-4.5" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "gpt-4o", name: "gpt-4o (no metadata)" }),
+        expect.objectContaining({ id: "kimi-k2.6", name: "kimi-k2.6 (no metadata)" }),
+        expect.objectContaining({ id: "grok-4.5", name: "grok-4.5 (no metadata)" }),
+      ]),
+    );
+  });
+
   for (const status of [401, 403, 404]) {
     it(`falls back when /model/info returns ${status}`, async () => {
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
