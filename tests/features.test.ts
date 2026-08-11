@@ -310,6 +310,9 @@ describe("feature parity", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
+    // Configured so the resolved auth carries a custom header and the assertion
+    // below proves getRuntimeAuth forwards it to the tool call, not just the token.
+    process.env.LITELLM_HEADERS = '{"x-tenant":"fresh"}';
 
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -354,7 +357,7 @@ describe("feature parity", () => {
     expect(fetchMock).toHaveBeenLastCalledWith(
       "https://fresh.example.com/mcp-rest/tools/call",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fresh-token" }),
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
       }),
     );
   });
@@ -363,6 +366,7 @@ describe("feature parity", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
+    process.env.LITELLM_HEADERS = '{"x-tenant":"fresh"}';
 
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -395,7 +399,7 @@ describe("feature parity", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "https://fresh.example.com/claude-code/marketplace.json",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fresh-token" }),
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
       }),
     );
   });
