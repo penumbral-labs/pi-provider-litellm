@@ -295,18 +295,32 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
+function isClaudeWitness(candidate: string | undefined): candidate is string {
+  return candidate !== undefined && semanticFamily(candidate) === "claude" && CLAUDE_MODEL_PATTERN.test(candidate);
+}
+
 function resolveClaudeBackendIdentity(
   adapter: string | undefined,
   routingModel: string | undefined,
   baseModel: string | undefined,
+  adapterProvider: BuiltinProvider | undefined,
 ): CatalogResolution["backendIdentity"] {
   if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter)) return undefined;
-  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
-  if (routingModel && routingFamily !== "claude") return undefined;
-  const candidates = routingModel ? [routingModel] : baseModel ? [baseModel] : [];
-  if (candidates.length === 0 || candidates.some((candidate) => !CLAUDE_MODEL_PATTERN.test(candidate)))
-    return undefined;
-  return { semanticFamily: "claude" };
+  if (isClaudeWitness(routingModel)) return { semanticFamily: "claude" };
+  if (routingModel) {
+    // The routing target does not name Claude. Contrary family text fails closed.
+    if (semanticFamily(routingModel) !== undefined) return undefined;
+    // A routing target the adapter's own catalog recognizes is positive contrary
+    // evidence even when its text names no family, so a Nova route cannot borrow a
+    // Claude `base_model`.
+    if (resolveCatalogModel(routingModel, undefined, adapterProvider)) return undefined;
+    // Otherwise the target is an opaque handle — a provisioned-throughput or
+    // application-inference-profile ARN — and `base_model` is the only backend evidence
+    // the router offers. It may establish semantic family and Messages compatibility;
+    // catalog identity and pricing still come from the adapter's own provider, so this
+    // cannot relabel a Bedrock route as first-party Anthropic.
+  }
+  return isClaudeWitness(baseModel) ? { semanticFamily: "claude" } : undefined;
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
@@ -323,6 +337,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     adapter,
     routingModel,
     conflictingFamilies ? undefined : baseModel,
+    adapterProvider,
   );
   const resolvedFamily = family ?? (backendIdentity ? "claude" : undefined);
   // Catalog metadata and Anthropic compatibility policy may come only from a candidate

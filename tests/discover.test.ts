@@ -9,6 +9,7 @@ import {
   resolveModelInfoCatalog,
   shouldSuppressReasoningContent,
 } from "../src/discover.js";
+import type { ModelInfoEntry } from "../src/types.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -460,7 +461,7 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("enriches an opaque Bedrock ARN with Claude cache compatibility without changing transport", async () => {
+  it("routes an opaque Bedrock ARN with a Claude base_model through native Messages", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
@@ -481,14 +482,17 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
+    // Bedrock catalog identity, limits, and pricing are retained; the base_model only
+    // establishes semantic family and Messages compatibility.
     expect(result.models[0]).toMatchObject({
       id: "bedrock-production",
-      api: "openai-completions",
+      api: "anthropic-messages",
       input: ["text", "image"],
       contextWindow: 200_000,
       maxTokens: 64_000,
-      compat: { cacheControlFormat: "anthropic" },
+      compat: { supportsStrictTools: true },
     });
+    expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
   });
 
   it("does not use a qualified public route as evidence for a multi-deployment group", async () => {
@@ -689,6 +693,85 @@ describe("discoverModels via /model/info", () => {
       expect(discovered.models[0]?.name).toBe("team-claude (no metadata)");
     },
   );
+
+  // SF-G: a positively known Claude-capable adapter whose routing target is an opaque
+  // handle (provisioned-throughput or application-inference-profile ARN) may use a
+  // catalog-resolvable Claude `base_model` as backend evidence. Catalog identity and
+  // pricing still come from the adapter's own provider, so Bedrock is never relabeled
+  // as first-party Anthropic.
+  const PROVISIONED_ARN = "bedrock/arn:aws:bedrock:us-east-1:123456789012:provisioned-model/abc123xyz";
+  const INFERENCE_PROFILE_ARN = "bedrock/arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/xyz789";
+
+  function backendRow(adapter: string, model: string, baseModel?: string): ModelInfoEntry {
+    return {
+      model_name: "team-route",
+      model_info: {
+        id: "deployment-a",
+        mode: "chat",
+        litellm_provider: adapter,
+        supports_reasoning: true,
+        ...(baseModel ? { base_model: baseModel } : {}),
+      },
+      litellm_params: { model },
+    };
+  }
+
+  async function discoverRow(row: ModelInfoEntry) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) return jsonResponse(200, { data: [row] });
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+    return (await discoverModels("https://litellm.example.com", "sk-test", {})).models[0];
+  }
+
+  it.each([
+    ["provisioned throughput", "bedrock", PROVISIONED_ARN, "us.anthropic.claude-opus-4-7", 1_000_000],
+    [
+      "application inference profile",
+      "bedrock_converse",
+      INFERENCE_PROFILE_ARN,
+      "us.anthropic.claude-sonnet-4-6",
+      1_000_000,
+    ],
+  ])(
+    "accepts a Claude base_model as backend evidence for an opaque %s target",
+    async (_label, adapter, routingModel, baseModel, contextWindow) => {
+      const resolved = resolveModelInfoCatalog(backendRow(adapter, routingModel, baseModel));
+
+      // Bedrock identity and Bedrock pricing, not Anthropic first-party.
+      expect(resolved).toMatchObject({
+        provider: "amazon-bedrock",
+        semanticFamily: "claude",
+        backendIdentity: { semanticFamily: "claude" },
+      });
+      expect(resolved?.cost?.input).toBeGreaterThan(0);
+
+      const model = await discoverRow(backendRow(adapter, routingModel, baseModel));
+
+      expect(model).toMatchObject({ id: "team-route", api: "anthropic-messages", contextWindow });
+      expect(model?.compat).toMatchObject({ forceAdaptiveThinking: true });
+    },
+  );
+
+  it.each([
+    [
+      "Bedrock Nova routing with a Claude base",
+      "bedrock",
+      "bedrock/amazon.nova-pro-v1:0",
+      "us.anthropic.claude-opus-4-7",
+    ],
+    ["contrary routing family text", "bedrock", "bedrock/openai.gpt-4o", "us.anthropic.claude-opus-4-7"],
+    ["a non-Claude-capable Azure adapter", "azure", PROVISIONED_ARN, "us.anthropic.claude-opus-4-7"],
+    ["a non-Claude-capable Azure AI adapter", "azure_ai", PROVISIONED_ARN, "us.anthropic.claude-opus-4-7"],
+    ["an opaque target with a non-Claude base", "bedrock", PROVISIONED_ARN, "amazon.nova-pro-v1:0"],
+    ["an opaque target with no base at all", "bedrock", PROVISIONED_ARN, undefined],
+  ])("fails closed for %s", async (_label, adapter, routingModel, baseModel) => {
+    expect(resolveModelInfoCatalog(backendRow(adapter, routingModel, baseModel))?.backendIdentity).toBeUndefined();
+
+    expect(await discoverRow(backendRow(adapter, routingModel, baseModel))).toMatchObject({
+      api: "openai-completions",
+    });
+  });
 
   it("does not classify Messages compatibility from public model_name alone", () => {
     expect(
