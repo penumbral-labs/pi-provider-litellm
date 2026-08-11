@@ -310,9 +310,10 @@ describe("feature parity", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
-    // Configured so the resolved auth carries a custom header and the assertion
-    // below proves getRuntimeAuth forwards it to the tool call, not just the token.
-    process.env.LITELLM_HEADERS = '{"x-tenant":"fresh"}';
+    // Distinct from the auth-borne value below. getRuntimeAuth prefers the resolved
+    // auth's headers over provider.headers, so seeing "provider" on the wire would
+    // mean the pass-through was skipped and the fallback answered instead.
+    process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
 
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -349,7 +350,7 @@ describe("feature parity", () => {
 
     await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
       modelRegistry: {
-        getProviderAuth: async () => ({ auth: auth!, source: "OAuth" }),
+        getProviderAuth: async () => ({ auth: { ...auth!, headers: { "x-source": "auth" } }, source: "OAuth" }),
         getProvider: () => pi.providers[0],
       },
     });
@@ -357,16 +358,64 @@ describe("feature parity", () => {
     expect(fetchMock).toHaveBeenLastCalledWith(
       "https://fresh.example.com/mcp-rest/tools/call",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-source": "auth" }),
       }),
     );
+    expect(new Headers(fetchMock.mock.lastCall?.[1]?.headers).get("x-source")).toBe("auth");
+  });
+
+  it("falls back to provider headers when resolved auth carries none", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://cached.example.com";
+    process.env.LITELLM_API_KEY = "cached-token";
+    process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
+
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://cached.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        });
+      }
+      if (url === "https://fresh.example.com/mcp-rest/tools/call") return jsonResponse(200, { result: "fresh" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((candidate) => candidate.name)).toContain("mcp_brave_search"));
+    const tool = pi.tools.find((candidate) => candidate.name === "mcp_brave_search");
+
+    await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
+      modelRegistry: {
+        // Resolved auth deliberately supplies no headers, so only the provider
+        // fallback can put x-source on the wire.
+        getProviderAuth: async () => ({
+          auth: { apiKey: "fresh-token", baseUrl: "https://fresh.example.com" },
+          source: "OAuth",
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(new Headers(fetchMock.mock.lastCall?.[1]?.headers).get("x-source")).toBe("provider");
   });
 
   it("uses fresh Pi auth when a registered Skills tool executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
-    process.env.LITELLM_HEADERS = '{"x-tenant":"fresh"}';
+    process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
 
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -391,7 +440,7 @@ describe("feature parity", () => {
 
     await tool?.execute?.("call-1", {}, undefined, undefined, {
       modelRegistry: {
-        getProviderAuth: async () => ({ auth: auth!, source: "OAuth" }),
+        getProviderAuth: async () => ({ auth: { ...auth!, headers: { "x-source": "auth" } }, source: "OAuth" }),
         getProvider: () => pi.providers[0],
       },
     });
@@ -399,7 +448,7 @@ describe("feature parity", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "https://fresh.example.com/claude-code/marketplace.json",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-source": "auth" }),
       }),
     );
   });
