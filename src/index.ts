@@ -692,8 +692,8 @@ function normalizeStrictToolMessages(messages: any[]): any[] {
   return changed ? normalized : messages;
 }
 
-// Reasoning fields LiteLLM forwards to chat-completions providers. The Moonshot
-// path defaults them off; the gpt-5.5 tool path strips them entirely.
+// Reasoning fields stripped from gpt-5.5 tool requests until LiteLLM routes
+// that model through the Responses API.
 const REASONING_SUPPRESSION_DEFAULTS: Record<string, unknown> = {
   include_reasoning: false,
   reasoning_content: false,

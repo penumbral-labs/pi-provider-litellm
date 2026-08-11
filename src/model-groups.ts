@@ -178,7 +178,7 @@ function buildReasoningPolicy(
         compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
       };
     }
-    return { reasoning, compat: replay };
+    return { reasoning, compat: { ...replay, supportsReasoningEffort: false } };
   }
   if (semanticModel === "deepseek-v4") {
     const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
@@ -219,7 +219,7 @@ function buildReasoningPolicy(
         compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
       };
     }
-    return { reasoning, compat: replay };
+    return { reasoning, compat: { ...replay, supportsReasoningEffort: false } };
   }
   return { reasoning: semanticModel ? reasoning : false };
 }
@@ -273,7 +273,7 @@ export function reduceModelGroup(
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
   );
-  const explicitlyUnsupported = deployments.every((entry) => entry.model_info?.supports_reasoning === false);
+  const explicitlyUnsupported = deployments.some((entry) => entry.model_info?.supports_reasoning === false);
   const vision = deployments.every(
     (entry, index) => entry.model_info?.supports_vision ?? catalogAuthority[index]?.vision ?? false,
   );

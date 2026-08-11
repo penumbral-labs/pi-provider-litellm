@@ -128,6 +128,27 @@ describe("native provider stream compatibility", () => {
     for (const field of absent) expect(requests[0]).not.toHaveProperty(field);
   });
 
+  it.each([
+    { name: "Kimi K3", backend: "moonshot/kimi-k3" },
+    { name: "DeepSeek V4", backend: "deepseek/deepseek-v4-pro" },
+  ])("sends no speculative controls for evidence-absent $name", async ({ backend }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "evidence-absent-route",
+        litellm_params: { model: backend },
+        model_info: { id: "deployment", mode: "chat", supports_reasoning: true },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(model.reasoning).toBe(true);
+    expect(model).not.toHaveProperty("thinkingLevelMap");
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+  });
+
   it("serializes disabled Kimi K2.6 as binary thinking off", async () => {
     const { models, model, requests, respond } = await createCompatibilityHarness([
       {

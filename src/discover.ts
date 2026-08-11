@@ -239,11 +239,18 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => candidate?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
-  const family = candidates.map(semanticFamily).find((candidate) => candidate !== undefined);
-  const model = candidates.map(semanticModel).find((candidate) => candidate !== undefined);
+  const routingModel = entry.litellm_params?.model?.trim() || undefined;
+  const baseModel = entry.model_info?.base_model?.trim() || undefined;
+  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
+  const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
+  const compatibleBase = !routingModel || (routingFamily !== undefined && routingFamily === baseFamily);
+  const family = routingModel ? routingFamily : baseFamily;
+  const model =
+    (routingModel ? semanticModel(routingModel) : undefined) ??
+    (compatibleBase && baseModel ? semanticModel(baseModel) : undefined);
+  const candidates = [routingModel, ...(compatibleBase ? [baseModel] : [])].filter(
+    (candidate): candidate is string => candidate !== undefined,
+  );
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved)

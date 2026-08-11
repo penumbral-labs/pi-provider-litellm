@@ -461,6 +461,32 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "moonshotai", semanticFamily: "kimi", semanticModel: "kimi-k3" });
   });
 
+  it("keeps routing model semantic evidence ahead of a contradictory base_model", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route",
+        litellm_params: { model: "openai/gpt-proxy" },
+        model_info: { litellm_provider: "openai", base_model: "kimi-k3" },
+      }),
+    ).toMatchObject({ semanticFamily: "openai" });
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route",
+        litellm_params: { model: "openai/gpt-proxy" },
+        model_info: { litellm_provider: "openai", base_model: "kimi-k3" },
+      }),
+    ).not.toHaveProperty("semanticModel");
+  });
+
+  it("uses base_model semantic evidence when the routing model is absent", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route",
+        model_info: { litellm_provider: "moonshot", base_model: "kimi-k3" },
+      }),
+    ).toMatchObject({ provider: "moonshotai", semanticFamily: "kimi", semanticModel: "kimi-k3" });
+  });
+
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
     expect(
       resolveModelInfoCatalog({
@@ -620,11 +646,14 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       reasoning: true,
-      compat: { supportsStore: false, requiresReasoningContentOnAssistantMessages: true },
+      compat: {
+        supportsStore: false,
+        supportsReasoningEffort: false,
+        requiresReasoningContentOnAssistantMessages: true,
+      },
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
     expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
-    expect(result.models[0]?.compat).not.toHaveProperty("supportsReasoningEffort");
   });
 
   it("preserves explicit reasoning capability without speculative controls", async () => {

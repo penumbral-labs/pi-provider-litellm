@@ -490,8 +490,30 @@ describe("reduceModelGroup", () => {
 
     expect(result?.reasoningPolicy).toEqual({
       reasoning: true,
-      compat: { requiresReasoningContentOnAssistantMessages: true },
+      compat: {
+        requiresReasoningContentOnAssistantMessages: true,
+        supportsReasoningEffort: false,
+      },
     });
+  });
+
+  it("lets any explicit reasoning denial override accepted-control promotion", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "denied", supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+        row({
+          model_info: { id: "accepted", supports_reasoning: true, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi", semanticModel: "kimi-k2.5-k2.6", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false });
   });
 
   it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {
