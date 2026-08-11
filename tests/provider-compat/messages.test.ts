@@ -7,11 +7,22 @@ const anthropicRoute = {
   model_info: {
     mode: "chat",
     litellm_provider: "bedrock_converse",
-    base_model: "bedrock/anthropic.claude-opus-5",
+    base_model: "bedrock/us.anthropic.claude-opus-5",
     supports_reasoning: true,
     supports_vision: true,
+    supported_openai_params: ["thinking", "reasoning_effort"],
   },
-  litellm_params: { model: "bedrock/anthropic.claude-opus-5" },
+  litellm_params: { model: "bedrock/us.anthropic.claude-opus-5" },
+};
+
+const budgetThinkingRoute = {
+  model_name: "claude-sonnet-4-5",
+  model_info: {
+    mode: "chat",
+    litellm_provider: "anthropic",
+    supports_reasoning: true,
+  },
+  litellm_params: { model: "anthropic/claude-sonnet-4-5" },
 };
 
 describe("Anthropic Messages wire compatibility", () => {
@@ -41,7 +52,7 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requestHeaders[0]?.get("x-api-key")).toBe("sk-test");
     expect(requestHeaders[0]?.get("authorization")).toBeNull();
     expect(requestHeaders[0]?.get("anthropic-version")).toBe("2023-06-01");
-    expect(requestHeaders[0]?.get("anthropic-beta")).toContain("interleaved-thinking");
+    expect(requestHeaders[0]?.get("anthropic-beta")).toBeNull();
     expect(requestHeaders[0]?.get("x-tenant")).toBe("team-a");
   });
 
@@ -83,7 +94,8 @@ describe("Anthropic Messages wire compatibility", () => {
 
     expect(requests[0]).toMatchObject({
       system: [expect.objectContaining({ type: "text", cache_control: { type: "ephemeral" } })],
-      thinking: expect.objectContaining({ type: expect.stringMatching(/enabled|adaptive/) }),
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
       tools: [
         expect.objectContaining({
           name: "lookup",
@@ -98,6 +110,18 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
     expect(requests[0]).not.toHaveProperty("include");
     expect(requests[0]).not.toHaveProperty("litellm_session_id");
+  });
+
+  it("preserves budget-based thinking for older native Claude models", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness(budgetThinkingRoute);
+    respond(...anthropicTextResponse("ready"));
+
+    await models.streamSimple(model, { messages: [user("Think carefully")] }, { reasoning: "high" }).result();
+
+    expect(model).toMatchObject({ api: "anthropic-messages" });
+    expect(model.compat).toBeUndefined();
+    expect(requests[0]).toMatchObject({ thinking: { type: "enabled", budget_tokens: expect.any(Number) } });
+    expect(requests[0]).not.toHaveProperty("output_config");
   });
 
   it("omits session grouping from Messages while real Chat serialization retains it", async () => {
@@ -123,18 +147,22 @@ describe("Anthropic Messages wire compatibility", () => {
     const modelsStore = new InMemoryModelsStore();
     const online = await createCompatibilityHarness(anthropicRoute, { modelsStore });
     online.respond(...anthropicTextResponse("online"));
-    await online.models.streamSimple(online.model, { messages: [user("Hello")] }).result();
+    await online.models.streamSimple(online.model, { messages: [user("Hello")] }, { reasoning: "high" }).result();
 
     vi.restoreAllMocks();
     vi.resetModules();
     const offline = await createCompatibilityHarness(anthropicRoute, { modelsStore, allowNetwork: false });
     offline.respond(...anthropicTextResponse("offline"));
-    await offline.models.streamSimple(offline.model, { messages: [user("Hello")] }).result();
+    await offline.models.streamSimple(offline.model, { messages: [user("Hello")] }, { reasoning: "high" }).result();
 
     expect(offline.model.api).toBe("anthropic-messages");
     expect(offline.model).toEqual(online.model);
     expect(offline.requestUrls).toEqual(["https://proxy.example.com/v1/messages"]);
     expect(offline.requests[0]).toEqual(online.requests[0]);
+    expect(offline.requests[0]).toMatchObject({
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+    });
   });
 
   it("reports a non-overflow Anthropic error envelope", async () => {

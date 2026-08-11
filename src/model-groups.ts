@@ -14,6 +14,7 @@ export interface CatalogResolution {
   provider?: string;
   semanticFamily?: SemanticFamily;
   backendIdentity?: BackendIdentityEvidence;
+  adaptiveThinking?: boolean;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -37,6 +38,7 @@ export interface ReducedModelGroup {
   hasCompleteCost: boolean;
   catalogProvider?: string;
   semanticFamily?: SemanticFamily;
+  adaptiveThinking?: boolean;
   acceptedOpenAIParams: string[];
 }
 
@@ -161,6 +163,7 @@ export function reduceModelGroup(
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
+  const adaptiveThinking = unanimous(catalogs.map((catalog) => catalog?.adaptiveThinking));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
@@ -218,6 +221,7 @@ export function reduceModelGroup(
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
+    ...(adaptiveThinking !== undefined ? { adaptiveThinking } : {}),
     acceptedOpenAIParams: intersectParams(deployments),
   };
 }

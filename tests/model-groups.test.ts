@@ -21,6 +21,7 @@ const catalog = new Map<string, CatalogResolution>([
       provider: "anthropic",
       semanticFamily: "claude",
       backendIdentity: { semanticFamily: "claude" },
+      adaptiveThinking: true,
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -34,6 +35,21 @@ const catalog = new Map<string, CatalogResolution>([
       provider: "amazon-bedrock",
       semanticFamily: "claude",
       backendIdentity: { semanticFamily: "claude" },
+      adaptiveThinking: true,
+      reasoning: true,
+      vision: true,
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    },
+  ],
+  [
+    "anthropic/claude-sonnet-4-5",
+    {
+      provider: "anthropic",
+      semanticFamily: "claude",
+      backendIdentity: { semanticFamily: "claude" },
+      adaptiveThinking: false,
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -163,6 +179,31 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([anthropic, unknown], resolveCatalog)?.api).toBe("openai-completions");
     expect(reduceModelGroup([missingMode], resolveCatalog)?.api).toBe("openai-completions");
     expect(reduceModelGroup([responses, responses], resolveCatalog)?.api).toBe("openai-responses");
+  });
+
+  it("persists adaptive thinking only when every deployment has the same positive evidence", () => {
+    const anthropic = row({ model_info: { id: "anthropic" } });
+    const bedrock = row({
+      model_info: { id: "bedrock" },
+      litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+    });
+    const budgetThinking = row({
+      model_info: { id: "budget" },
+      litellm_params: { model: "anthropic/claude-sonnet-4-5" },
+    });
+    const unknown = row({
+      model_info: { id: "unknown" },
+      litellm_params: { model: "internal/private-claude" },
+    });
+
+    for (const order of permutations([anthropic, bedrock])) {
+      expect(reduceModelGroup(order, resolveCatalog)).toMatchObject({
+        api: "anthropic-messages",
+        adaptiveThinking: true,
+      });
+    }
+    expect(reduceModelGroup([anthropic, budgetThinking], resolveCatalog)).not.toHaveProperty("adaptiveThinking");
+    expect(reduceModelGroup([anthropic, unknown], resolveCatalog)).not.toHaveProperty("adaptiveThinking");
   });
 
   it("lets unsupported transport evidence force Chat without affecting metadata", () => {

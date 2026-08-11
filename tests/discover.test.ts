@@ -541,6 +541,32 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it.each([
+    ["anthropic/claude-opus-4-6", true],
+    ["anthropic/claude-sonnet-4-6", true],
+    ["anthropic/claude-fable-5", true],
+    ["anthropic/claude-opus-4-5", false],
+    ["anthropic/claude-sonnet-4-5", false],
+    ["anthropic/claude-haiku-4-5", false],
+  ])("derives adaptive-thinking evidence from catalog backend %s", (backend, adaptiveThinking) => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-name-does-not-convey-generation",
+        litellm_params: { model: backend },
+        model_info: { litellm_provider: "anthropic" },
+      }),
+    ).toMatchObject({ adaptiveThinking });
+  });
+
+  it("does not classify adaptive thinking from public model_name alone", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "claude-opus-5",
+        model_info: { litellm_provider: "anthropic" },
+      }),
+    ).toBeUndefined();
+  });
+
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
     expect(
       resolveModelInfoCatalog({
@@ -656,6 +682,36 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
 });
 
 describe("discoverModels native Messages selection", () => {
+  it("persists adaptive-thinking compatibility from a real-shaped Opus 5 backend", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "claude-opus-5",
+            model_info: {
+              id: "deployment-opus-5",
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              base_model: "bedrock/us.anthropic.claude-opus-5",
+              supports_reasoning: true,
+              supported_openai_params: ["thinking", "reasoning_effort"],
+            },
+            litellm_params: { model: "bedrock/us.anthropic.claude-opus-5" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "claude-opus-5",
+      api: "anthropic-messages",
+      compat: { forceAdaptiveThinking: true },
+    });
+  });
+
   it("selects Messages only for homogeneous strongly evidenced Claude groups", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -882,7 +938,7 @@ describe("discoverModels native Messages selection", () => {
       ["mixed-claude-nova-forward", "openai-completions"],
       ["mixed-claude-nova-reverse", "openai-completions"],
     ]);
-    expect(result.models[0]?.compat).toBeUndefined();
+    expect(result.models[0]?.compat).toEqual({ forceAdaptiveThinking: true });
   });
 });
 

@@ -195,6 +195,21 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
+function usesAdaptiveThinking(model: Model<Api>): boolean {
+  if (model.api !== "anthropic-messages") return false;
+  return (model as Model<"anthropic-messages">).compat?.forceAdaptiveThinking === true;
+}
+
+function adaptiveThinkingFromBackend(id: string): boolean | undefined {
+  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+  const canonicalId = unprefixed
+    .toLowerCase()
+    .replace(/^(?:(?:[a-z]{2}|global)\.)?anthropic[./]/, "")
+    .replace(/-v\d+(?::\d+)?$/, "");
+  const model = findCatalogModelInProvider("anthropic", [canonicalId]);
+  return model ? usesAdaptiveThinking(model) : undefined;
+}
+
 function semanticFamily(id: string): SemanticFamily | undefined {
   const value = id.toLowerCase();
   if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
@@ -266,6 +281,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
       return {
         ...catalogResolution(resolved.provider, resolvedFamily, resolved.model),
         backendIdentity,
+        adaptiveThinking: adaptiveThinkingFromBackend(candidate) ?? usesAdaptiveThinking(resolved.model),
       };
     }
   }
@@ -506,7 +522,10 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat: buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
+    compat:
+      reduced.api === "anthropic-messages" && reduced.adaptiveThinking
+        ? { forceAdaptiveThinking: true }
+        : buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
   };
 }
 
