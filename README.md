@@ -232,7 +232,20 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 
 `/model/info` returns one row per deployment, so several rows can share a `model_name`. Those rows are reduced to a single model using the least capable value from each deployment: the smallest context window and max tokens, the highest price, vision and reasoning only when every deployment reports them, and Pi catalog metadata only when the deployments agree on which backend serves the route.
 
-Reasoning controls come from deployment evidence rather than the route name. A level is offered only when `model_info.supported_openai_params` or `litellm_params.allowed_openai_params` shows a parameter that can carry it (`thinking` or `reasoning_effort`), so a route whose deployments declare no reasoning parameters is reported as reasoning-capable with no selectable levels instead of levels that would be silently dropped. Declaring the parameter your backend accepts is the config-side fix.
+Reasoning controls come from deployment evidence rather than the route name, and no thinking level is ever offered that the model's compatibility settings cannot actually put on the wire.
+
+For backends whose reasoning contract is recognized — the Kimi K2.5/K2.6, K2.7 Code and K3 generations, and DeepSeek V4 — a level is offered only when a deployment parameter can carry it. The carrying parameter is generation-specific, and **every** deployment in the group must declare it, because the group reduces to the parameters they all accept:
+
+| Recognized backend | Carrying parameter |
+|---|---|
+| Kimi K2.5 / K2.6 | `thinking` |
+| Kimi K2.7 Code | `thinking` (thinking cannot be switched off) |
+| Kimi K3 | `reasoning_effort` |
+| DeepSeek V4 | `thinking`, `reasoning_effort`, or both |
+
+Without that evidence the route is reported as reasoning-capable with no selectable level, rather than offering levels that would be silently dropped. Other Kimi generations have no recognized contract, so they fail closed the same way; a carrier is never guessed from the route name or from vendor documentation. Backends outside these families keep whatever the Pi catalog describes and use the standard `reasoning_effort` field.
+
+Declaring the parameter your backend accepts, on every deployment of the route, is the config-side fix.
 
 Two suffixes can appear in a displayed model name:
 
@@ -241,9 +254,11 @@ Two suffixes can appear in a displayed model name:
 | `(no metadata)` | Single deployment with incomplete pricing and no catalog match. Enriched from the Pi catalog later if the id becomes resolvable. |
 | `(incomplete metadata)` | Several deployments with incomplete pricing. Kept as the conservative floor and never enriched, because one deployment's metadata cannot speak for the group. |
 
-Catalog enrichment needs a provider it can trust: the `owned_by` field, a provider-qualified id such as `openai/gpt-5.5`, or the deployment's `litellm_params.model`. An unqualified route name is not treated as proof of its backend, so a route named only `mistral-large-latest` stays on conservative defaults.
+Catalog enrichment needs a provider it can trust: the `owned_by` field, a provider-qualified id such as `openai/gpt-5.5`, or the deployment's `litellm_params.model`. Recognized Anthropic aliases (`sonnet-4-6`, `opus-5`, dated snapshots) are also resolved, because they canonicalize onto a single Anthropic catalog id.
 
-Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capability shrinks along that path because the available evidence does. Only `/model/info` exposes complete deployment groups; `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered that way reflects whichever deployment answered first. Prefer a key that can read `/model/info` when reasoning controls matter.
+A route name is used only as a last-resort fallback, never to override deployment evidence: it applies when a route reduces to exactly one deployment and nothing else identified the backend. A route named only `mistral-large-latest` matches no catalog id and stays on conservative defaults. When deployments disagree about which backend serves a route — or when only some of them identify one — catalog limits, pricing, and reasoning metadata are withheld for the whole group and the downgrade is reported on stderr.
+
+Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capability shrinks along that path because the available evidence does. Only `/model/info` exposes complete deployment groups; `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered that way reflects whichever deployment `/health` listed first. Prefer a key that can read `/model/info` when reasoning controls matter.
 
 ## Troubleshooting
 
@@ -253,7 +268,7 @@ Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capabi
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
-| Model shows as reasoning-capable but no thinking level can be selected | No deployment declared a reasoning parameter — add `thinking` or `reasoning_effort` to that deployment's `supported_openai_params` or `allowed_openai_params` |
+| Model shows as reasoning-capable but no thinking level can be selected | The route has no usable reasoning-control evidence. For a recognized backend, add its carrying parameter (see [the table above](#deployment-groups-and-metadata-evidence)) to `supported_openai_params` or `allowed_openai_params` on **every** deployment of the route. Other backends have no recognized contract and stay closed by design |
 | Model name ends in `(no metadata)` or `(incomplete metadata)` | Deployment pricing is incomplete and no catalog entry matched — see [Deployment groups and metadata evidence](#deployment-groups-and-metadata-evidence) |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
