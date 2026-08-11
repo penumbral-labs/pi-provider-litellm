@@ -345,7 +345,7 @@ describe("executeMcpTool", () => {
 });
 
 describe("createMcpToolDefinitions", () => {
-  it("emits each safety diagnostic once without leaking credentials or schema content", async () => {
+  it("reports each drop class separately with counts and sanitized names, and no credential or schema content", async () => {
     vi.resetModules();
     const {
       createMcpToolDefinitions: createDefinitions,
@@ -403,15 +403,77 @@ describe("createMcpToolDefinitions", () => {
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
     expect(diagnostics.filter((message) => message.includes("MCP discovery response exceeded"))).toHaveLength(1);
     expect(diagnostics.filter((message) => message.includes("MCP tool call response exceeded"))).toHaveLength(1);
-    expect(diagnostics.filter((message) => message.includes("duplicate MCP tool identity"))).toHaveLength(1);
-    expect(diagnostics.filter((message) => message.includes("invalid or oversized input schema"))).toHaveLength(1);
-    expect(diagnostics.filter((message) => message.includes("512-tool limit"))).toHaveLength(1);
+
+    // Each class is reported on its own line, with a count and the sanitized generated names.
+    const duplicateLine = diagnostics.find((message) => message.includes("duplicate identities"));
+    expect(duplicateLine).toBe("LiteLLM MCP: dropped 1 MCP tool with duplicate identities: mcp_server_duplicate.\n");
+    const schemaLine = diagnostics.find((message) => message.includes("invalid or oversized input schema"));
+    expect(schemaLine).toBe(
+      "LiteLLM MCP: dropped 2 MCP tools with an invalid or oversized input schema: mcp_server_bad_one, mcp_server_bad_two.\n",
+    );
+    // 513 valid + the surviving duplicate = 514 accepted, so exactly 2 exceed the cap.
+    expect(diagnostics.filter((message) => message.includes("512-tool limit"))).toEqual([
+      "LiteLLM MCP: ignoring 2 MCP tools beyond the 512-tool limit.\n",
+    ]);
+
     expect(diagnostics.join("\n")).not.toContain("sk-secret-must-not-leak");
     expect(diagnostics.join("\n")).not.toContain(privateSchemaText);
     expect(diagnostics.join("\n")).not.toContain("also-private");
   });
 
-  it("keeps final names stable when a collision partner falls beyond the tool cap", async () => {
+  it("suppresses an unchanged drop report across refreshes but reports a changed one", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const invalid = (name: string) => ({ name, server_name: "server", input_schema: { type: "array" } });
+    const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const schemaLines = () =>
+      stderr.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("invalid or oversized input schema"));
+
+    fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one")]));
+    await createDefinitions(auth);
+    expect(schemaLines()).toHaveLength(1);
+
+    // Identical incident on the next refresh: stays quiet.
+    await createDefinitions(auth);
+    expect(schemaLines()).toHaveLength(1);
+
+    // Count changed: reported again, because the operator's picture changed.
+    fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one"), invalid("bad-two")]));
+    await createDefinitions(auth);
+    expect(schemaLines()).toHaveLength(2);
+    expect(schemaLines()[1]).toContain("dropped 2 MCP tools");
+
+    // A clean refresh clears the class, so its recurrence is reported rather than suppressed as unchanged.
+    fetchMock.mockImplementation(async () => jsonResponse(200, []));
+    await createDefinitions(auth);
+    expect(schemaLines()).toHaveLength(2);
+    fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one"), invalid("bad-two")]));
+    await createDefinitions(auth);
+    expect(schemaLines()).toHaveLength(3);
+  });
+
+  it("exposes prepared and dropped counts through verbose discovery progress", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "good", server_name: "server", input_schema: { type: "object", properties: {} } },
+        { name: "bad", server_name: "server", input_schema: { type: "array" } },
+      ]),
+    );
+    const progress: string[] = [];
+    await createMcpToolDefinitions(
+      async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" }),
+      (message) => progress.push(message),
+    );
+
+    expect(progress).toContain("Prepared 1 of 2 discovered MCP tools; dropped 1 (invalid-schema=1)");
+  });
+
+  it("derives names from the post-cap set so a dropped sibling does not rename a survivor", async () => {
     const collidingTool = {
       name: "search",
       server_name: "shared",
@@ -434,7 +496,33 @@ describe("createMcpToolDefinitions", () => {
       apiKey: "sk-test",
     }));
 
-    expect(definitions[0]?.name).toMatch(/^mcp_shared_search_[a-f0-9]{10}$/);
+    // The second `shared/search` falls beyond the 512 cap and is never registered, so the survivor
+    // keeps the plain readable name instead of being renamed by a tool that does not exist.
+    expect(definitions).toHaveLength(512);
+    expect(definitions[0]?.name).toBe("mcp_shared_search");
+  });
+
+  it("still disambiguates with a hash when both colliding tools survive the cap", async () => {
+    const collidingTool = {
+      name: "search",
+      server_name: "shared",
+      input_schema: { type: "object", properties: {} },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { ...collidingTool, server_id: "server-one" },
+        { ...collidingTool, server_id: "server-two" },
+      ]),
+    );
+
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) expect(definition.name).toMatch(/^mcp_shared_search_[a-f0-9]{10}$/);
+    expect(new Set(definitions.map((definition) => definition.name)).size).toBe(2);
   });
 
   it("caps registered tools after invalid entries are isolated", async () => {

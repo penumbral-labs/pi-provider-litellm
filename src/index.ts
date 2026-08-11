@@ -28,7 +28,7 @@ import {
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions, reportMcpRegistrationFailure } from "./mcp-tools.js";
+import { createMcpToolDefinitions, reportMcpRegistrationFailures } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -985,13 +985,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
         );
         signal?.throwIfAborted();
+        const failures: Array<{ tool: string; cause: unknown }> = [];
         for (const tool of tools) {
           try {
             pi.registerTool(tool);
-          } catch {
-            reportMcpRegistrationFailure();
+          } catch (error) {
+            // `tool.name` is the generated, sanitized Pi name and `error` is Pi-authored, so neither
+            // the proxy's schema nor its response body can reach the diagnostic.
+            failures.push({ tool: tool.name, cause: error });
           }
         }
+        reportMcpRegistrationFailures(failures, tools.length);
         registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;

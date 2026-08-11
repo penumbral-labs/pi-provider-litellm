@@ -352,7 +352,7 @@ describe("extension startup", () => {
     const registered: string[] = [];
     pi.registerTool = (tool) => {
       if (tool.name.startsWith("mcp_server_bad")) throw new Error("definition rejected");
-      registered.push(tool.name);
+      if (tool.name.startsWith("mcp_")) registered.push(tool.name);
       pi.tools.push(tool);
     };
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -368,14 +368,17 @@ describe("extension startup", () => {
       signal: new AbortController().signal,
     });
 
-    expect(registered).toContain("mcp_server_good");
-    expect(registered).not.toContain("mcp_server_bad_one");
-    expect(registered).not.toContain("mcp_server_bad_two");
-    expect(stderr.mock.calls.filter(([message]) => String(message).includes("could not be registered"))).toHaveLength(
-      1,
+    // Successful siblings register, and nothing else sneaks in.
+    expect(registered).toEqual(["mcp_server_good"]);
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    // One bounded, actionable line: how many of how many, which tools, and Pi's own cause.
+    expect(diagnostics).toContain(
+      "LiteLLM MCP: 2 of 3 MCP tools could not be registered: mcp_server_bad_one, mcp_server_bad_two " +
+        "(first cause: definition rejected).\n",
     );
-    expect(stderr).toHaveBeenCalledWith("LiteLLM MCP: An MCP tool could not be registered.\n");
-    expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
+    // The failure must not be misreported as a discovery failure.
+    expect(diagnostics.filter((message) => message.includes("MCP tool discovery failed"))).toEqual([]);
   });
 
   it("does not block model refresh on MCP discovery", async () => {
