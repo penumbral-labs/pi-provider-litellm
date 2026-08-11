@@ -986,9 +986,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         );
         signal?.throwIfAborted();
         const failures: Array<{ tool: string; cause: unknown }> = [];
+        let registered = 0;
         for (const tool of tools) {
           try {
             pi.registerTool(tool);
+            registered += 1;
           } catch (error) {
             // `tool.name` is the generated, sanitized Pi name and `error` is Pi-authored, so neither
             // the proxy's schema nor its response body can reach the diagnostic.
@@ -996,7 +998,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           }
         }
         reportMcpRegistrationFailures(failures, tools.length);
-        registeredMcpIdentity = identity;
+        if (isVerboseDiscovery()) {
+          process.stderr.write(
+            `LiteLLM MCP: registered ${registered} of ${tools.length} prepared MCP tools (${failures.length} failed).\n`,
+          );
+        }
+        // Only a fully successful pass marks the identity as registered. Successful registrations are
+        // kept either way, and leaving the identity unset lets a later refresh with a fresh extension
+        // ctx retry the failures instead of skipping them for the rest of the session.
+        if (failures.length === 0) registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(
