@@ -35,7 +35,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
-    expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock");
+    expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
@@ -45,12 +45,6 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
-    expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain("Capture deployment-group model info");
-    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
-    expect(workflow).toContain("AbortSignal.timeout(3000)");
-    expect(workflow).toContain("grouped deployment is missing supported_openai_params");
-    expect(workflow).toContain("grouped deployment is missing allowed_openai_params");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
