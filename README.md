@@ -154,7 +154,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default |
-| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata and defaults |
+| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata for provider-qualified ids and conservative defaults otherwise |
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
@@ -193,7 +193,7 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
 
-This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
+This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh. One route is configured as two deployments sharing a `model_name`, so the workflow proves LiteLLM really returns a row per deployment carrying `model_info.id`, `mode`, `supported_openai_params`, and `allowed_openai_params` — the upstream contract deployment-group reduction depends on.
 
 ## Development
 
@@ -228,6 +228,23 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
+### Deployment groups and metadata evidence
+
+`/model/info` returns one row per deployment, so several rows can share a `model_name`. Those rows are reduced to a single model using the least capable value from each deployment: the smallest context window and max tokens, the highest price, vision and reasoning only when every deployment reports them, and Pi catalog metadata only when the deployments agree on which backend serves the route.
+
+Reasoning controls come from deployment evidence rather than the route name. A level is offered only when `model_info.supported_openai_params` or `litellm_params.allowed_openai_params` shows a parameter that can carry it (`thinking` or `reasoning_effort`), so a route whose deployments declare no reasoning parameters is reported as reasoning-capable with no selectable levels instead of levels that would be silently dropped. Declaring the parameter your backend accepts is the config-side fix.
+
+Two suffixes can appear in a displayed model name:
+
+| Suffix | Meaning |
+|---|---|
+| `(no metadata)` | Single deployment with incomplete pricing and no catalog match. Enriched from the Pi catalog later if the id becomes resolvable. |
+| `(incomplete metadata)` | Several deployments with incomplete pricing. Kept as the conservative floor and never enriched, because one deployment's metadata cannot speak for the group. |
+
+Catalog enrichment needs a provider it can trust: the `owned_by` field, a provider-qualified id such as `openai/gpt-5.5`, or the deployment's `litellm_params.model`. An unqualified route name is not treated as proof of its backend, so a route named only `mistral-large-latest` stays on conservative defaults.
+
+Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capability shrinks along that path because the available evidence does. Only `/model/info` exposes complete deployment groups; `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered that way reflects whichever deployment answered first. Prefer a key that can read `/model/info` when reasoning controls matter.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -236,6 +253,8 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| Model shows as reasoning-capable but no thinking level can be selected | No deployment declared a reasoning parameter — add `thinking` or `reasoning_effort` to that deployment's `supported_openai_params` or `allowed_openai_params` |
+| Model name ends in `(no metadata)` or `(incomplete metadata)` | Deployment pricing is incomplete and no catalog entry matched — see [Deployment groups and metadata evidence](#deployment-groups-and-metadata-evidence) |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |

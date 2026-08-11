@@ -19,7 +19,12 @@
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; deployment-group reduction lives in `src/model-groups.ts` and is the authority for reasoning capability.
+- `/model/info` returns one row per deployment. Rows sharing a `model_name` are reduced conservatively (min limits, max price, unanimous capability); a route name is never evidence of its backend.
+- Reasoning controls must come from `supported_openai_params` / `allowed_openai_params`, not from the route name.
+- Never advertise a `thinkingLevelMap` level the model's `compat` cannot transmit. A level needs either `supportsReasoningEffort: true` or an explicit `thinkingFormat`. Omitting the map is not fail-closed: pi-ai reads an absent map as every standard level supported, so deny each level explicitly instead.
+- `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered there reflects whichever deployment answered first. Fixing that needs group aggregation across the per-deployment detail fetches in `discoverFromHealth`; it is deliberately not folded into unrelated changes.
+- Contradictory family evidence is reported as `"conflicting"` rather than absent so it cannot decay into route-name inference.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
 - The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
@@ -30,6 +35,7 @@
 
 - `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
+- Model-scoped request behavior travels on the discovered model as `litellmPolicy` (see `src/types.ts`), not as an id regex in the hook. `enrichCachedModel` re-derives it on cache read because stored models carry no provenance.
 - `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 

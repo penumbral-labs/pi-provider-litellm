@@ -603,6 +603,14 @@ async function discoverFromHealth(
 ): Promise<DiscoveredModel[]> {
   const progress = options.silent ? undefined : options.onProgress;
   progress?.("Querying /health endpoint...");
+  // KNOWN LIMITATION: `/health` lists deployments, not routes, and each one is
+  // mapped on its own, so deployments sharing a `model_name` are not reduced
+  // against each other the way `/model/info` groups are — `deduplicateModels`
+  // keeps whichever finished first. Reducing here means aggregating the
+  // per-deployment detail fetches by `model_name` and feeding whole groups to
+  // `mapFromModelInfoGroup`, which also changes naming and the singleton
+  // catalog fallback on this path. That belongs in its own change; see the
+  // `/health` note in AGENTS.md and README.md.
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
