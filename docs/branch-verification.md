@@ -22,8 +22,11 @@ column is `npx tsgo -p tsconfig.build.json` followed by `npx tsx scripts/supply-
 | 11 | `cf7670f` | test: assert custom headers reach MCP and Skills tool requests | pass | pass | 265 passed | pass |
 | 12 | `6e5b5f0` | test: assert the offline LiteLLM restore performs no network calls | pass | pass | 265 passed | pass |
 | 13 | `80180d7` | docs: document model host enforcement… | pass | pass | 265 passed | pass |
+| 14 | `6aa8ab7` | docs: record per-commit verification for this branch | pass | pass | 265 passed | pass |
+| 15 | `164e586` | style: use line comments in src to match the surrounding modules | pass | pass | 265 passed | pass |
 
-One test is skipped in every runnable row; that is pre-existing and unrelated.
+One test is skipped in every runnable row; that is pre-existing and unrelated. Rows 14 and 15 were verified after this
+file was first written, so they are recorded by hash rather than by the table that produced them.
 
 ## Red commits
 
@@ -70,6 +73,27 @@ belonged in `5e57aeb`.
 
 `git diff 54365fd..HEAD -- src/index.ts | rg gcloud` confirms the gcloud round trip: nothing survives to the tip beyond
 import formatting.
+
+## Host-enforcement smoke
+
+Run against the built `dist/index.js` with `PI_CODING_AGENT_DIR` pointed at an empty directory and the real `LITELLM_*`
+variables unset, so no developer configuration leaks in. Each case reports what the user is actually told and which
+models remain selectable.
+
+| Case | Configuration | Diagnostic | Models offered |
+|---|---|---|---|
+| 1 | nothing configured, no catalog | none, by design | none |
+| 2 | nothing configured, catalog present | `2 model(s) hidden because no LiteLLM base URL is configured; set LITELLM_BASE_URL or run /login litellm` | none |
+| 3 | `LITELLM_BASE_URL=localhost:4000` | `Invalid LiteLLM base URL; a network refresh with a valid URL is required` | none |
+| 4 | base URL is the placeholder | `Active credentials use a placeholder LiteLLM model host…` | none |
+| 5 | switched proxies, catalog from the old host | `Cached model has stale LiteLLM model host p.example.com; active credentials use new.example.com…` | none |
+| 6 | `models.json` model with `api: google-generative-ai` | `LiteLLM model gemini-custom declares unsupported protocol "google-generative-ai"; set "api" to one of …` | `good-one` |
+
+Case 1 confirms an unconfigured install stays quiet. Case 2 covers the path that was previously silent. Case 6 confirms
+an unusable model no longer takes its valid siblings — or any other provider — down with it.
+
+Cases 3 and 4 still phrase the remedy as "a network refresh", which the user cannot perform; the actual fix is editing
+`LITELLM_BASE_URL`. That wording is unchanged on this branch and is tracked separately.
 
 ## Recommendation
 
