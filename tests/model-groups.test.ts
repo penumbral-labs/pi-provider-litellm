@@ -76,28 +76,52 @@ function permutations<T>(values: readonly T[]): T[][] {
 }
 
 describe("reduceModelGroup", () => {
-  it("is permutation invariant for up to four deployments", () => {
+  it("is permutation invariant for heterogeneous deployment evidence", () => {
     const deployments = [
-      row(),
-      row({ model_info: { id: "deployment-b", mode: "chat", max_input_tokens: 150_000 } }),
-      row({ model_info: { id: "deployment-c", mode: "chat", max_output_tokens: 16_000 } }),
-      row({ model_info: { id: "deployment-d", mode: "chat", output_cost_per_token: 0.00002 } }),
+      row({ model_info: { id: "deployment-a", mode: "responses", max_input_tokens: 150_000 } }),
+      row({
+        model_info: { id: "deployment-b", mode: "chat", max_output_tokens: 16_000 },
+        litellm_params: { model: "openai/gpt-4o" },
+      }),
+      row({
+        model_info: { id: "deployment-c", mode: null, supported_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: "internal/unknown" },
+      }),
+      row({
+        model_info: { id: undefined, mode: "chat", output_cost_per_token: 0.00002 },
+        litellm_params: { model: "internal/unknown", allowed_openai_params: ["reasoning_effort"] },
+      }),
     ];
-    const expected = reduceModelGroup(deployments, resolveCatalog);
+    const expected = {
+      id: "route",
+      deploymentCount: 4,
+      api: "openai-completions",
+      reasoning: true,
+      vision: true,
+      contextWindow: 150_000,
+      maxTokens: 16_000,
+      cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
+      hasCompleteCost: true,
+      acceptedOpenAIParams: [],
+    };
 
     for (const order of permutations(deployments)) {
       expect(reduceModelGroup(order, resolveCatalog)).toEqual(expected);
     }
   });
 
-  it("deduplicates repeated deployment ids but preserves rows without ids", () => {
+  it("deduplicates exact rows and reduces conflicting duplicate ids conservatively", () => {
     const repeated = row();
+    const conflicting = row({ model_info: { id: "deployment-a", mode: "chat", max_input_tokens: 8_000 } });
     const anonymous = row({ model_info: { id: undefined, mode: "chat" } });
 
     expect(reduceModelGroup([repeated, repeated], resolveCatalog)).toEqual(
       reduceModelGroup([repeated], resolveCatalog),
     );
-    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
+    const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
+    expect(expected).toMatchObject({ deploymentCount: 1, contextWindow: 8_000 });
+    expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
+    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(1);
   });
 
   it("selects Responses only when every deployment explicitly reports it", () => {
@@ -111,10 +135,30 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([responses, unknown], resolveCatalog)?.api).toBe("openai-completions");
   });
 
-  it("falls back to Chat for a mixed Chat and non-chat group", () => {
-    expect(
-      reduceModelGroup([row(), row({ model_info: { id: "embed", mode: "embedding" } })], resolveCatalog)?.api,
-    ).toBe("openai-completions");
+  it("falls back to Chat without reducing metadata from unsupported rows", () => {
+    const result = reduceModelGroup(
+      [
+        row(),
+        row({
+          model_info: {
+            id: "embed",
+            mode: "embedding",
+            max_input_tokens: 8_000,
+            max_output_tokens: 1,
+            input_cost_per_token: undefined,
+          },
+          litellm_params: { model: "internal/embedding" },
+        }),
+      ],
+      resolveCatalog,
+    );
+    expect(result).toMatchObject({
+      api: "openai-completions",
+      deploymentCount: 2,
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    });
   });
 
   it("drops a group when every deployment is non-chat", () => {
@@ -224,6 +268,21 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result).toMatchObject({ catalogProvider: "amazon-bedrock", semanticFamily: "claude" });
+  });
+
+  it("uses catalog thinking maps for unambiguous identities without a known semantic family", () => {
+    const thinkingLevelMap = { low: "low", high: "high" } as const;
+    const result = reduceModelGroup([row()], () => ({
+      provider: "xai",
+      reasoning: true,
+      thinkingLevelMap,
+      vision: false,
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    }));
+
+    expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
   });
 
   it("disables catalog authority for conflicting provider identities", () => {

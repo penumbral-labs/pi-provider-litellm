@@ -352,6 +352,81 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it.each([
+    ["moonshot", "moonshot/kimi-k2.6"],
+    ["gemini", "gemini/gemini-3-pro-preview"],
+    ["xai", "xai/grok-4.5"],
+  ])("maps the %s adapter conservatively to its catalog", async (adapter, backend) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: `${adapter}-route`,
+            litellm_params: { model: backend },
+            model_info: { mode: "chat", litellm_provider: adapter },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.name).toBe(`${adapter}-route`);
+    expect(result.models[0]?.name).not.toContain("no metadata");
+    expect(result.models[0]?.contextWindow).toBeGreaterThan(128_000);
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+    expect(result.models[0]?.id).toBe(`${adapter}-route`);
+  });
+
+  it("trims backend candidates before catalog resolution", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "spacey",
+            model_info: { mode: "chat", base_model: " openai/gpt-4o " },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ name: "spacey", input: ["text", "image"], contextWindow: 128_000 });
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("does not use a qualified public route as evidence for a multi-deployment group", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "openai/gpt-5.5",
+            litellm_params: { model: "openai/gpt-5.5" },
+            model_info: { id: "known", mode: "chat" },
+          },
+          {
+            model_name: "openai/gpt-5.5",
+            litellm_params: { model: "internal/mystery" },
+            model_info: { id: "unknown", mode: "chat" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      name: "openai/gpt-5.5 (no metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
@@ -499,6 +574,26 @@ describe("discoverModels response-mode models", () => {
       id: "openai/gpt-5.3-codex-openai",
       api: "openai-responses",
     });
+  });
+
+  it("does not derive thinking controls from a health-only route name", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, { healthy_endpoints: [{ model: "openai/gpt-5.5", model_id: "uuid-1" }] });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, { data: [{ model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 });
 
