@@ -603,6 +603,30 @@ describe("discoverModels via /model/info", () => {
     expect(misleadingAlias.models[0]).not.toHaveProperty("litellmPolicy");
   });
 
+  it("preserves qualified catalog capability without speculative controls", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "deepseek-route",
+            litellm_params: { model: "deepseek/deepseek-v4-pro" },
+            model_info: { mode: "chat", litellm_provider: "deepseek" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      reasoning: true,
+      compat: { supportsStore: false, requiresReasoningContentOnAssistantMessages: true },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsReasoningEffort");
+  });
+
   it("preserves explicit reasoning capability without speculative controls", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {

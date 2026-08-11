@@ -482,8 +482,10 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
     id: reduced.id,
     name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
     reasoning: reasoningPolicy?.reasoning ?? reduced.reasoning,
-    ...(reasoningPolicy?.thinkingLevelMap
-      ? { thinkingLevelMap: reasoningPolicy.thinkingLevelMap }
+    ...(reasoningPolicy
+      ? reasoningPolicy.thinkingLevelMap
+        ? { thinkingLevelMap: reasoningPolicy.thinkingLevelMap }
+        : {}
       : reduced.thinkingLevelMap
         ? { thinkingLevelMap: reduced.thinkingLevelMap }
         : {}),
