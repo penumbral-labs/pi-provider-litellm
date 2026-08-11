@@ -347,8 +347,25 @@ describe("executeMcpTool", () => {
 describe("createMcpToolDefinitions", () => {
   it("emits each safety diagnostic once without leaking credentials or schema content", async () => {
     vi.resetModules();
-    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const {
+      createMcpToolDefinitions: createDefinitions,
+      discoverMcpTools: discoverTools,
+      executeMcpTool: executeTool,
+    } = await import("../src/mcp-tools.js");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const oversizedBody = "x".repeat(5 * 1024 * 1024 + 1);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(oversizedBody, { status: 200 }));
+    await expect(discoverTools("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
+    await expect(discoverTools("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
+    await expect(
+      executeTool("https://litellm.example.com", "sk-secret-must-not-leak", "server", "tool", {}),
+    ).rejects.toThrow();
+    await expect(
+      executeTool("https://litellm.example.com", "sk-secret-must-not-leak", "server", "tool", {}),
+    ).rejects.toThrow();
+
     const privateSchemaText = "private-schema-value";
     const duplicate = {
       name: "duplicate",
@@ -356,7 +373,7 @@ describe("createMcpToolDefinitions", () => {
       server_id: "server-id",
       input_schema: { type: "object", properties: {} },
     };
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    fetchMock.mockImplementation(async () =>
       jsonResponse(200, [
         duplicate,
         duplicate,
@@ -384,6 +401,8 @@ describe("createMcpToolDefinitions", () => {
     }));
 
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics.filter((message) => message.includes("MCP discovery response exceeded"))).toHaveLength(1);
+    expect(diagnostics.filter((message) => message.includes("MCP tool call response exceeded"))).toHaveLength(1);
     expect(diagnostics.filter((message) => message.includes("duplicate MCP tool identity"))).toHaveLength(1);
     expect(diagnostics.filter((message) => message.includes("invalid or oversized input schema"))).toHaveLength(1);
     expect(diagnostics.filter((message) => message.includes("512-tool limit"))).toHaveLength(1);
