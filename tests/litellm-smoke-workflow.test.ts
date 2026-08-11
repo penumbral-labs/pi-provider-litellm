@@ -84,7 +84,10 @@ describe("LiteLLM smoke workflow", () => {
     };
     expect(readCiWorkflow()).toContain("run: npm run prepublishOnly");
     expect(manifest.scripts.check).toContain("npm run supply-chain:guard");
-    expect(manifest.scripts.prepublishOnly).not.toContain("npm run supply-chain:guard");
+    // The guard must also run after `build`, where `dist/` exists, so it can prove
+    // build output is excluded from the package rather than passing vacuously on a
+    // fresh CI checkout that has no `dist/` yet.
+    expect(manifest.scripts.prepublishOnly).toMatch(/npm run build && npm run supply-chain:guard\s*$/);
     expect(readCiWorkflow()).not.toContain("run: npm pack --dry-run");
     expect(readReleaseWorkflow()).not.toContain("run: npm run check");
     expect(readReleaseWorkflow()).not.toContain("run: npm pack --dry-run");
