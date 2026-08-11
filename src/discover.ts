@@ -219,11 +219,9 @@ function anthropicBackendLookupIds(id: string): string[] {
   return [...new Set([base, undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean))];
 }
 
-/**
- * Anthropic compatibility for a LiteLLM backend routing id, derived only from the
- * backend identity LiteLLM reports. `undefined` means the backend model is unknown
- * to the catalog; `{}` means it is known and carries no special requirements.
- */
+// Anthropic compatibility for a LiteLLM backend routing id, derived only from the
+// backend identity LiteLLM reports. `undefined` means the backend model is unknown
+// to the catalog; `{}` means it is known and carries no special requirements.
 function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefined {
   const model = findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(id));
   return model ? messagesCompatOf(model) : undefined;
@@ -567,7 +565,7 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
   };
 }
 
-/** An empty carried compat is indistinguishable from "no requirements", so omit it. */
+// An empty carried compat is indistinguishable from "no requirements", so omit it.
 function carriedMessagesCompat(compat: MessagesBackendCompat | undefined): MessagesBackendCompat | undefined {
   return compat && Object.keys(compat).length > 0 ? compat : undefined;
 }

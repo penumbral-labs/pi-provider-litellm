@@ -67,7 +67,7 @@ function requestModel(
 
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
   const reportedAvailabilityDiagnostics = new Set<string>();
-  /** Availability is re-evaluated constantly; report each distinct reason once. */
+  // Availability is re-evaluated constantly; report each distinct reason once.
   const reportUnavailable = (message: string): void => {
     if (reportedAvailabilityDiagnostics.has(message)) return;
     reportedAvailabilityDiagnostics.add(message);

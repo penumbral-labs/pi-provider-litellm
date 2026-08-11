@@ -960,13 +960,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
-  /**
-   * Resolve runtime auth for LiteLLM-owned side channels (skills, MCP).
-   *
-   * `undefined` means LiteLLM is simply not configured. `{ unavailable }` means it is
-   * configured but unusable, which is actionable for a LiteLLM-scoped caller and must
-   * not be raised as an error on a turn that has nothing to do with this provider.
-   */
+  // Resolve runtime auth for LiteLLM-owned side channels (skills, MCP).
+  //
+  // `undefined` means LiteLLM is simply not configured. `{ unavailable }` means it is
+  // configured but unusable, which is actionable for a LiteLLM-scoped caller and must
+  // not be raised as an error on a turn that has nothing to do with this provider.
   async function resolveRuntimeAuth(
     ctx: ExtensionContext,
   ): Promise<{ auth: LiteLLMRuntimeAuth } | { unavailable: string } | undefined> {

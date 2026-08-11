@@ -10,12 +10,10 @@ export interface BackendIdentityEvidence {
   semanticFamily: "claude";
 }
 
-/**
- * The Anthropic compatibility fields this extension is willing to carry from the
- * bundled catalog onto a LiteLLM-routed native Messages model. Discovered `compat`
- * is the only channel through which per-model Anthropic behavior reaches pi-ai's
- * serializer, so these travel as a unit rather than field by field.
- */
+// The Anthropic compatibility fields this extension is willing to carry from the
+// bundled catalog onto a LiteLLM-routed native Messages model. Discovered `compat`
+// is the only channel through which per-model Anthropic behavior reaches pi-ai's
+// serializer, so these travel as a unit rather than field by field.
 export type MessagesBackendCompat = Pick<
   NonNullable<Model<"anthropic-messages">["compat"]>,
   "forceAdaptiveThinking" | "supportsTemperature" | "supportsStrictTools"
@@ -25,7 +23,7 @@ export interface CatalogResolution {
   provider?: string;
   semanticFamily?: SemanticFamily;
   backendIdentity?: BackendIdentityEvidence;
-  /** Absent means the backend model is unknown to the catalog, not that it has no requirements. */
+  // Absent means the backend model is unknown to the catalog, not that it has no requirements.
   messagesCompat?: MessagesBackendCompat;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
