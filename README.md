@@ -247,16 +247,18 @@ Without that evidence the route is reported as reasoning-capable with no selecta
 
 Declaring the parameter your backend accepts, on every deployment of the route, is the config-side fix.
 
-Two suffixes can appear in a displayed model name:
+Two suffixes can appear in a displayed model name. Which one you see depends on the discovery source, not on how many deployments a route has:
 
 | Suffix | Meaning |
 |---|---|
-| `(no metadata)` | Single deployment with incomplete pricing and no catalog match. Enriched from the Pi catalog later if the id becomes resolvable. |
-| `(incomplete metadata)` | Several deployments with incomplete pricing. Kept as the conservative floor and never enriched, because one deployment's metadata cannot speak for the group. |
+| `(incomplete metadata)` | A reduced `/model/info` group without complete price evidence, at any deployment count. Kept as the conservative floor and never enriched, because a deployment's metadata cannot be re-derived from the route name. LiteLLM omits the cache-price fields for backends that have no cache pricing, so this appears on ordinary routes that are otherwise fully described. |
+| `(no metadata)` | An evidence-free `/v1/models` model, where deployments are not exposed at all. Enriched from the Pi catalog on a later read if the id becomes resolvable — and only while its cached compatibility settings can actually carry what the catalog offers. |
 
-Catalog enrichment needs a provider it can trust: the `owned_by` field, a provider-qualified id such as `openai/gpt-5.5`, or the deployment's `litellm_params.model`. Recognized Anthropic aliases (`sonnet-4-6`, `opus-5`, dated snapshots) are also resolved, because they canonicalize onto a single Anthropic catalog id.
+Catalog enrichment needs a provider it can trust. On `/model/info` those signals are the deployment's `litellm_params.model` and `model_info.base_model`, resolved through `model_info.litellm_provider`; on the `/v1/models` fallback it is `owned_by` or a provider-qualified id such as `openai/gpt-5.5`. Recognized Anthropic aliases (`sonnet-4-6`, `opus-5`, dated snapshots) are also resolved, because they canonicalize onto a single Anthropic catalog id.
 
-A route name is used only as a last-resort fallback, never to override deployment evidence: it applies when a route reduces to exactly one deployment and nothing else identified the backend. A route named only `mistral-large-latest` matches no catalog id and stays on conservative defaults. When deployments disagree about which backend serves a route — or when only some of them identify one — catalog limits, pricing, and reasoning metadata are withheld for the whole group and the downgrade is reported on stderr.
+A route name never overrides deployment evidence. It is used as a fallback in two bounded cases: when a route reduces to exactly one deployment and nothing else identified the backend, and when no deployment identifies a backend family at all — in which case a Kimi- or Claude-shaped route name still selects that vendor's request compatibility. A route named only `mistral-large-latest` matches no catalog id and stays on conservative defaults.
+
+When deployments disagree about which backend serves a route, or when only some of them identify one, catalog limits, pricing, and reasoning metadata are withheld for the whole group. Disagreements where at least one deployment resolved a provider are additionally reported on stderr with a bounded list of affected route names.
 
 Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capability shrinks along that path because the available evidence does. Only `/model/info` exposes complete deployment groups; `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered that way reflects whichever deployment `/health` listed first. Prefer a key that can read `/model/info` when reasoning controls matter.
 

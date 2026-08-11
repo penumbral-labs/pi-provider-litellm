@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
+  enrichCachedModel,
   moonshotPolicy,
   normalizeBaseUrl,
   resolveModelInfoCatalog,
@@ -83,10 +84,6 @@ describe("normalizeBaseUrl", () => {
 });
 
 describe("buildCompat", () => {
-  it("returns protocol-shaped compatibility metadata", () => {
-    expect(buildCompat("openai/gpt-4o", "openai-responses")).toEqual({});
-  });
-
   it("returns supportsStore: false for non-anthropic models", () => {
     expect(buildCompat("openai/gpt-4o")).toEqual({ supportsStore: false });
     expect(buildCompat("gemini/gemini-2.0-flash")).toEqual({ supportsStore: false });
@@ -2067,5 +2064,127 @@ describe("family evidence authority", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]?.compat).toMatchObject({ cacheControlFormat: "anthropic" });
+  });
+});
+
+describe("cache-read and Responses paths honour the transmissibility gate", () => {
+  const cachedModel = (id: string, compat: DiscoveredModel["compat"]): Model<Api> =>
+    ({
+      id,
+      name: `${id} (no metadata)`,
+      api: "openai-completions",
+      provider: "litellm",
+      baseUrl: "https://litellm.example.com/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      compat,
+    }) as Model<Api>;
+
+  it("does not let catalog enrichment advertise levels the cached compat cannot carry", () => {
+    // The cached compat stays as stored, so a catalog upgrade that starts
+    // resolving this id must not hand it levels that reach the wire as nothing.
+    const enriched = enrichCachedModel(
+      cachedModel("moonshotai/kimi-k2-thinking", buildCompat("moonshotai/kimi-k2-thinking")),
+    );
+
+    expect(enriched.reasoning).toBe(true);
+    expect(getSupportedThinkingLevels(enriched)).toEqual([]);
+  });
+
+  it("still enriches levels when the cached compat can carry them", () => {
+    const enriched = enrichCachedModel(cachedModel("opus-5", buildCompat("opus-5")));
+
+    expect(enriched.name).toBe("Claude Opus 5");
+    expect(getSupportedThinkingLevels(enriched)).not.toEqual([]);
+  });
+
+  it.each(["chat", "responses"])("keeps vendor compat and fails closed for a %s-mode Kimi group", async (mode) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "route",
+            litellm_params: { model: "moonshot/kimi-k2.6" },
+            model_info: { id: "d1", mode, litellm_provider: "moonshot", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // Responses mode must not drop the Moonshot block: pi-ai reads
+    // supportsDeveloperRole on that path, and an empty compat also looks like
+    // one that can carry effort, which fail-opens the level map.
+    expect(result.models[0]?.compat).toMatchObject({ supportsDeveloperRole: false });
+    expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
+  });
+
+  it("reaches the same display conclusion for one route on every discovery source", async () => {
+    const id = "kimi-k2.6-thinking";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: id,
+            litellm_params: { model: "moonshot/kimi-k2.6" },
+            model_info: { id: "d1", mode: "chat", litellm_provider: "moonshot" },
+          },
+        ],
+      }),
+    );
+    const grouped = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const listed = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    // A forced-thinking route streams reasoning as its own field, so no path may
+    // decide to unwrap `<think>` while another decides not to.
+    expect(grouped.models[0]?.litellmPolicy).toEqual(moonshotPolicy(id));
+    expect(listed.models[0]?.litellmPolicy).toEqual(moonshotPolicy(id));
+    expect(moonshotPolicy(id).normalizeThinkTags).toBe(false);
+  });
+
+  it("reports withheld catalog authority once with bounded route ids", async () => {
+    const writes: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: ["r1", "r2", "r3", "r4"].flatMap((route) => [
+          {
+            model_name: route,
+            litellm_params: { model: "openai/gpt-4o" },
+            model_info: { id: `${route}-a`, mode: "chat", litellm_provider: "openai" },
+          },
+          {
+            model_name: route,
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            model_info: { id: `${route}-b`, mode: "chat", litellm_provider: "anthropic" },
+          },
+        ]),
+      }),
+    );
+
+    await discoverModels("https://litellm.example.com", "sk-test", {});
+    stderr.mockRestore();
+
+    const reports = writes.filter((line) => line.includes("conflicting deployment provider identity"));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain("4 route group(s)");
+    expect(reports[0]).toContain("(+1 more)");
+    // Only public route ids, never credentials or litellm_params.
+    expect(reports[0]).not.toMatch(/sk-|api_key/);
   });
 });

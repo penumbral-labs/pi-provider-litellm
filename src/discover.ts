@@ -100,12 +100,12 @@ export function moonshotPolicy(modelId: string): LiteLLMModelPolicy {
   };
 }
 
-export function buildCompat(
-  modelId: string,
-  api: DiscoveredModel["api"] = "openai-completions",
-  semantic?: FamilyEvidence,
-): DiscoveredModel["compat"] {
-  if (api === "openai-responses") return {};
+// Ported from pr/route-group-authority (7d6e39b): api-aware compat belongs to
+// the multi-protocol core, which owns the per-API compat union. Returning an
+// empty object for Responses dropped `supportsDeveloperRole: false` for
+// Moonshot-backed routes (pi-ai reads it in openai-responses-shared.js) and left
+// the level map with a compat that appears to carry effort, i.e. fail-open.
+export function buildCompat(modelId: string, semantic?: FamilyEvidence): DiscoveredModel["compat"] {
   // Contradictory deployment evidence is not an invitation to guess from the
   // route name; such a group only gets vendor-neutral compatibility.
   if (semantic === "conflicting") return { supportsStore: false };
@@ -203,7 +203,10 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
     ...model,
     name: catalogModel.name,
     reasoning: catalogModel.reasoning,
-    thinkingLevelMap: catalogModel.thinkingLevelMap,
+    // The cached compat stays as stored, so catalog levels must pass the same
+    // transmissibility gate as every discovery path rather than being trusted
+    // because the catalog offered them.
+    thinkingLevelMap: advertisableLevels(catalogModel.thinkingLevelMap, model.compat, catalogModel.reasoning),
     input: catalogModel.input,
     cost: catalogModel.cost,
     contextWindow: catalogModel.contextWindow,
@@ -556,8 +559,8 @@ function mapFromModelInfoGroup(
   // Responses wire emits as bare `reasoning.effort` values.
   const compat =
     reduced.api === "openai-completions"
-      ? { ...buildCompat(reduced.id, reduced.api, reduced.semanticFamily), ...reasoningPolicy?.compat }
-      : buildCompat(reduced.id, reduced.api, reduced.semanticFamily);
+      ? { ...buildCompat(reduced.id, reduced.semanticFamily), ...reasoningPolicy?.compat }
+      : buildCompat(reduced.id, reduced.semanticFamily);
   // The policy's level values are Chat-shaped (they pair with its Chat compat),
   // so a Responses group keeps catalog levels instead: emitting `off` or `max`
   // as a bare `reasoning.effort` value is not a Responses effort. Dropping the
@@ -580,8 +583,12 @@ function mapFromModelInfoGroup(
     maxTokens: reduced.maxTokens,
     api: reduced.api,
     compat,
+    // The route id, not the semantic label: `moonshotPolicy`'s forced-thinking
+    // check is a route-id pattern, and no semantic label can ever match it, so
+    // passing a label made the exemption unreachable and split the display
+    // conclusion by discovery source for one route.
     ...(reduced.semanticFamily === "kimi" || (reduced.semanticFamily === undefined && isMoonshotModel(reduced.id))
-      ? { litellmPolicy: moonshotPolicy(reduced.semanticModel ?? reduced.id) }
+      ? { litellmPolicy: moonshotPolicy(reduced.id) }
       : {}),
   };
 }
@@ -620,9 +627,10 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     id,
     name: catalogModel?.name ?? id,
     reasoning,
-    // `/health` route text is not deployment evidence for request controls, so no
-    // thinking selector is derived from it; a reasoning route fails closed.
-    thinkingLevelMap: advertisableLevels(undefined, compat, reasoning),
+    // This path has only a `/health` route name — no deployment evidence at all
+    // — so no thinking selector is derived from it. An absent map would mean
+    // every standard level to pi-ai, so a reasoning route denies them outright.
+    thinkingLevelMap: reasoning ? NO_TRANSMISSIBLE_LEVELS : undefined,
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
