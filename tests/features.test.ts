@@ -308,6 +308,10 @@ describe("feature parity", () => {
 
   it("uses fresh Pi auth when a discovered MCP tool executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    // Hermetic against a developer environment that exports these; the file has no
+    // beforeEach clear and the wider cleanup is tracked as follow-up.
+    delete process.env.LITELLM_OFFLINE;
+    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     // Distinct from the auth-borne value below. getRuntimeAuth prefers the resolved
@@ -366,6 +370,10 @@ describe("feature parity", () => {
 
   it("falls back to provider headers when resolved auth carries none", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    // Hermetic against a developer environment that exports these; the file has no
+    // beforeEach clear and the wider cleanup is tracked as follow-up.
+    delete process.env.LITELLM_OFFLINE;
+    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
@@ -413,6 +421,10 @@ describe("feature parity", () => {
 
   it("uses fresh Pi auth when a registered Skills tool executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    // Hermetic against a developer environment that exports these; the file has no
+    // beforeEach clear and the wider cleanup is tracked as follow-up.
+    delete process.env.LITELLM_OFFLINE;
+    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
