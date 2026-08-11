@@ -511,7 +511,11 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
   if (model.api === "anthropic-messages") {
-    return { ...model, api: "openai-completions", compat: buildCompat(model.id, "openai-completions", "claude") };
+    return {
+      ...model,
+      api: "openai-completions",
+      compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+    };
   }
   return { ...model, api: "openai-completions" };
 }
