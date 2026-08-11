@@ -532,6 +532,42 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("keeps proven display prices while marking any unresolved cost field incomplete", async () => {
+    // Display cost reduces per field. Proven input/output survive, only unresolved
+    // fields fall to zero, and the model is still marked incomplete so unknown
+    // cache pricing is never presented as complete or free. A model must not lose
+    // the marker just because input and output happen to be known.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "priced-without-cache-rates",
+              litellm_params: { model: "internal/unknown" },
+              model_info: {
+                id: "only",
+                mode: "chat",
+                max_input_tokens: 32_000,
+                max_output_tokens: 4_000,
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({
+      id: "priced-without-cache-rates",
+      name: "priced-without-cache-rates (incomplete metadata)",
+      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 32_000,
+      maxTokens: 4_000,
+    });
+  });
+
   it("never emits the fallback-only sentinel for a reduced deployment group", async () => {
     // The ` (no metadata)` suffix authorizes catalog re-derivation from the model
     // id during offline cache reads, so no `/model/info` group may carry it.

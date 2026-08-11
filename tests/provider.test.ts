@@ -386,6 +386,65 @@ describe("discovery, store, and offline read parity", () => {
     expect(offline.getModels()).toEqual(discoveredModels);
   });
 
+  // Conflicting variants of one deployment id are the case that makes the marker
+  // fix necessary: counting distinct ids would call this group a singleton, which
+  // re-admits the public route name as catalog evidence and lets the model escape
+  // marking entirely. `openai/gpt-5.5` resolves in the Pi catalog (272k context,
+  // reasoning, tiered pricing), so every catalog value below proves it was refused.
+  it("refuses route-name authority for conflicting variants of one deployment id", async () => {
+    mockModelInfo([
+      { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+      { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+    ]);
+    const modelsStore = store();
+
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    const model = discoveredModels[0];
+    // 1. No singleton route-name fallback, and 2. conservative metadata.
+    expect(model).toMatchObject({
+      id: "openai/gpt-5.5",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 64_000,
+      maxTokens: 16_384,
+    });
+    expect(model).not.toHaveProperty("thinkingLevelMap");
+    expect(model?.cost.tiers).toBeUndefined();
+    // 3. Marked, using the reduced-group marker rather than the fallback sentinel.
+    expect(model?.name).toBe("openai/gpt-5.5 (incomplete metadata)");
+
+    // 4. Discovery, store, and offline read parity.
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
+  });
+
+  it("treats exact repeats of one deployment as a single enriched deployment", async () => {
+    // The conflicting-variant rule must not cost us exact-repeat idempotency: one
+    // row and the same row twice are one deployment, and a lone deployment may
+    // still use its route name as a catalog hint.
+    const deployment = { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } };
+    const discoverOnce = async (data: unknown[]) => {
+      mockModelInfo(data);
+      const value = liveDiscovery();
+      await value.refreshModels?.(context(store(), true));
+      return value.getModels();
+    };
+
+    const single = await discoverOnce([deployment]);
+    const repeated = await discoverOnce([deployment, deployment]);
+
+    expect(repeated).toEqual(single);
+    expect(single[0]?.name).toBe("openai/gpt-5.5");
+    expect(single[0]).toMatchObject({ reasoning: true, contextWindow: 272_000 });
+  });
+
   it("still enriches an evidence-free /v1/models fallback model from the cache", async () => {
     // The distinction has to cut both ways: the fallback sentinel keeps working.
     const value = controller();
