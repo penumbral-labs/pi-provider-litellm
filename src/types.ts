@@ -31,8 +31,16 @@ export interface DiscoveryOptions {
 
 export interface ModelInfoEntry {
   model_name?: string;
+  litellm_params?: {
+    model?: string;
+    allowed_openai_params?: string[];
+  };
   model_info?: {
+    id?: string;
     mode?: string | null;
+    litellm_provider?: string;
+    base_model?: string;
+    supported_openai_params?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;

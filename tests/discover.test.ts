@@ -217,7 +217,7 @@ describe("discoverModels via /model/info", () => {
     const openai = result.models.find((m) => m.id === "openai/gpt-4o");
     expect(openai).toMatchObject({
       id: "openai/gpt-4o",
-      input: ["text"],
+      input: ["text", "image"],
       compat: { supportsStore: false },
     });
   });
@@ -265,7 +265,7 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: "xhigh", max: "max" });
   });
 
-  it("preserves richer metadata from later duplicate model ids", async () => {
+  it("reduces duplicate model ids conservatively instead of merging richer fields", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) {
@@ -294,9 +294,79 @@ describe("discoverModels via /model/info", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "custom-model",
-      contextWindow: 200000,
+      name: "custom-model (no metadata)",
+      contextWindow: 128000,
       maxTokens: 8192,
-      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("falls back to Chat and group guarantees for mixed deployments regardless of row order", async () => {
+    const deployments = [
+      {
+        model_name: "shared-route",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: {
+          id: "deployment-a",
+          mode: "responses",
+          supports_reasoning: true,
+          supports_vision: true,
+          max_input_tokens: 128000,
+          max_output_tokens: 16384,
+          input_cost_per_token: 0.000005,
+          output_cost_per_token: 0.000015,
+          cache_read_input_token_cost: 0.0000025,
+          cache_creation_input_token_cost: 0,
+        },
+      },
+      {
+        model_name: "shared-route",
+        litellm_params: { model: "internal/unknown" },
+        model_info: {
+          id: "deployment-b",
+          mode: "chat",
+          supports_reasoning: false,
+          supports_vision: false,
+          max_input_tokens: 64000,
+          max_output_tokens: 8192,
+        },
+      },
+    ];
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const rows of [deployments, [...deployments].reverse()]) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: rows }));
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      expect(result.models).toEqual([
+        expect.objectContaining({
+          id: "shared-route",
+          name: "shared-route (no metadata)",
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 64000,
+          maxTokens: 8192,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }),
+      ]);
+      expect(result.models[0]).not.toHaveProperty("api");
+      expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    }
+  });
+
+  it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-4o",
+      name: "gpt-4o (no metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16384,
     });
   });
 });

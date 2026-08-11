@@ -1,0 +1,263 @@
+import { describe, expect, it } from "vitest";
+import { type CatalogResolution, reduceModelGroup } from "../src/model-groups.js";
+import type { ModelInfoEntry } from "../src/types.js";
+
+const catalog = new Map<string, CatalogResolution>([
+  [
+    "openai/gpt-4o",
+    {
+      provider: "openai",
+      semanticFamily: "openai",
+      reasoning: false,
+      vision: true,
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 5, output: 15, cacheRead: 2.5, cacheWrite: 0 },
+    },
+  ],
+  [
+    "anthropic/claude-sonnet-4-6",
+    {
+      provider: "anthropic",
+      semanticFamily: "claude",
+      reasoning: true,
+      vision: true,
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    },
+  ],
+  [
+    "bedrock/anthropic.claude-sonnet-4-6",
+    {
+      provider: "amazon-bedrock",
+      semanticFamily: "claude",
+      reasoning: true,
+      vision: true,
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    },
+  ],
+]);
+
+const resolveCatalog = (entry: ModelInfoEntry) => {
+  const backend = entry.litellm_params?.model ?? entry.model_info?.base_model;
+  return backend ? catalog.get(backend) : undefined;
+};
+
+function row(overrides: Partial<ModelInfoEntry> = {}): ModelInfoEntry {
+  const { model_info, litellm_params, ...entry } = overrides;
+  return {
+    model_name: "route",
+    ...entry,
+    model_info: {
+      id: "deployment-a",
+      mode: "chat",
+      supports_reasoning: true,
+      supports_vision: true,
+      max_input_tokens: 200_000,
+      max_output_tokens: 32_000,
+      input_cost_per_token: 0.000003,
+      output_cost_per_token: 0.000015,
+      cache_read_input_token_cost: 0.0000003,
+      cache_creation_input_token_cost: 0.00000375,
+      ...model_info,
+    },
+    litellm_params: { model: "anthropic/claude-sonnet-4-6", ...litellm_params },
+  };
+}
+
+function permutations<T>(values: readonly T[]): T[][] {
+  if (values.length < 2) return [[...values]];
+  return values.flatMap((value, index) =>
+    permutations([...values.slice(0, index), ...values.slice(index + 1)]).map((rest) => [value, ...rest]),
+  );
+}
+
+describe("reduceModelGroup", () => {
+  it("is permutation invariant for up to four deployments", () => {
+    const deployments = [
+      row(),
+      row({ model_info: { id: "deployment-b", mode: "chat", max_input_tokens: 150_000 } }),
+      row({ model_info: { id: "deployment-c", mode: "chat", max_output_tokens: 16_000 } }),
+      row({ model_info: { id: "deployment-d", mode: "chat", output_cost_per_token: 0.00002 } }),
+    ];
+    const expected = reduceModelGroup(deployments, resolveCatalog);
+
+    for (const order of permutations(deployments)) {
+      expect(reduceModelGroup(order, resolveCatalog)).toEqual(expected);
+    }
+  });
+
+  it("deduplicates repeated deployment ids but preserves rows without ids", () => {
+    const repeated = row();
+    const anonymous = row({ model_info: { id: undefined, mode: "chat" } });
+
+    expect(reduceModelGroup([repeated, repeated], resolveCatalog)).toEqual(
+      reduceModelGroup([repeated], resolveCatalog),
+    );
+    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
+  });
+
+  it("selects Responses only when every deployment explicitly reports it", () => {
+    const responses = row({ model_info: { id: "responses", mode: "responses" } });
+    const response = row({ model_info: { id: "response", mode: "response" } });
+    const chat = row({ model_info: { id: "chat", mode: "chat" } });
+    const unknown = row({ model_info: { id: "unknown", mode: null } });
+
+    expect(reduceModelGroup([responses, response], resolveCatalog)?.api).toBe("openai-responses");
+    expect(reduceModelGroup([responses, chat], resolveCatalog)?.api).toBe("openai-completions");
+    expect(reduceModelGroup([responses, unknown], resolveCatalog)?.api).toBe("openai-completions");
+  });
+
+  it("falls back to Chat for a mixed Chat and non-chat group", () => {
+    expect(
+      reduceModelGroup([row(), row({ model_info: { id: "embed", mode: "embedding" } })], resolveCatalog)?.api,
+    ).toBe("openai-completions");
+  });
+
+  it("drops a group when every deployment is non-chat", () => {
+    expect(
+      reduceModelGroup(
+        [
+          row({ model_info: { id: "embed-a", mode: "embedding" } }),
+          row({ model_info: { id: "embed-b", mode: "embedding" } }),
+        ],
+        resolveCatalog,
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [[true, true], true],
+    [[true, false], false],
+    [[true, undefined], false],
+  ] as const)("reduces capability guarantees %j to %s", (values, expected) => {
+    const deployments = values.map((value, index) =>
+      row({
+        model_info: { id: `deployment-${index}`, mode: "chat", supports_vision: value },
+        ...(value === undefined ? { litellm_params: { model: "internal/unknown" } } : {}),
+      }),
+    );
+    expect(reduceModelGroup(deployments, resolveCatalog)?.vision).toBe(expected);
+  });
+
+  it("resolves deployment limits before taking the safe group minimum", () => {
+    const explicit = row({
+      model_info: { id: "explicit", mode: "chat", max_input_tokens: 100_000, max_output_tokens: 8_000 },
+    });
+    const fromCatalog = row({
+      model_info: { id: "catalog", mode: "chat", max_input_tokens: undefined, max_output_tokens: undefined },
+    });
+    const unknown = row({
+      model_info: { id: "unknown", mode: "chat", max_input_tokens: undefined, max_output_tokens: undefined },
+      litellm_params: { model: "internal/unknown" },
+    });
+
+    expect(reduceModelGroup([explicit, fromCatalog], resolveCatalog)).toMatchObject({
+      contextWindow: 100_000,
+      maxTokens: 8_000,
+    });
+    expect(reduceModelGroup([explicit, unknown], resolveCatalog)).toMatchObject({
+      contextWindow: 100_000,
+      maxTokens: 8_000,
+    });
+    expect(reduceModelGroup([unknown], resolveCatalog)).toMatchObject({
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+  });
+
+  it("uses the maximum complete display price and marks incomplete price evidence unknown", () => {
+    const cheaper = row({
+      model_info: {
+        id: "cheap",
+        mode: "chat",
+        input_cost_per_token: 0,
+        output_cost_per_token: 0.00001,
+        cache_read_input_token_cost: 0.0000002,
+        cache_creation_input_token_cost: 0.000003,
+      },
+    });
+    const pricier = row({
+      model_info: {
+        id: "pricey",
+        mode: "chat",
+        input_cost_per_token: 0.000004,
+        output_cost_per_token: 0.00002,
+        cache_read_input_token_cost: 0.0000004,
+        cache_creation_input_token_cost: 0.000004,
+      },
+    });
+    const complete = reduceModelGroup([cheaper, pricier], resolveCatalog);
+    expect(complete).toMatchObject({
+      hasCompleteCost: true,
+      cost: { input: 4, output: 20, cacheWrite: 4 },
+    });
+    expect(complete?.cost.cacheRead).toBeCloseTo(0.4);
+
+    const incomplete = row({
+      model_info: {
+        id: "incomplete",
+        mode: "chat",
+        input_cost_per_token: 0.000004,
+        output_cost_per_token: undefined,
+      },
+      litellm_params: { model: "internal/unknown" },
+    });
+    expect(reduceModelGroup([cheaper, incomplete], resolveCatalog)).toMatchObject({
+      hasCompleteCost: false,
+      cost: { input: 4, output: 0, cacheRead: 0.3, cacheWrite: 3.75 },
+    });
+  });
+
+  it("keeps semantic family separate from catalog provider identity", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "bedrock", mode: "chat", litellm_provider: "bedrock" },
+          litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result).toMatchObject({ catalogProvider: "amazon-bedrock", semanticFamily: "claude" });
+  });
+
+  it("disables catalog authority for conflicting provider identities", () => {
+    const result = reduceModelGroup(
+      [
+        row({ model_info: { id: "anthropic", mode: "chat" } }),
+        row({
+          model_info: { id: "openai", mode: "chat" },
+          litellm_params: { model: "openai/gpt-4o" },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result).not.toHaveProperty("catalogProvider");
+    expect(result).not.toHaveProperty("semanticFamily");
+    expect(result?.thinkingLevelMap).toBeUndefined();
+  });
+
+  it("intersects accepted parameters across deployments", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "a", mode: "chat", supported_openai_params: ["temperature", "reasoning_effort"] },
+          litellm_params: { model: "internal/a" },
+        }),
+        row({
+          model_info: { id: "b", mode: "chat", supported_openai_params: ["reasoning_effort", "thinking"] },
+          litellm_params: { model: "internal/b", allowed_openai_params: ["reasoning_effort"] },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result?.acceptedOpenAIParams).toEqual(["reasoning_effort"]);
+  });
+});
