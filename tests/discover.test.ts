@@ -562,20 +562,53 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ messagesCompat });
   });
 
-  // A deployment can be identifiable enough to require adaptive thinking while its
-  // decorated routing id is absent from the catalog. Compat must survive; provider
-  // identity, pricing, and limits must not be inferred from it.
+  // REQ-006: decorated Bedrock Claude keeps Amazon Bedrock identity, prices, limits,
+  // and thinking levels. The routing id is canonicalized within the adapter's own
+  // catalog, so no cross-provider scan is involved.
   it.each([
-    ["anthropic", "anthropic/claude-opus-4-7-20260415"],
     ["bedrock", "bedrock/us.anthropic.claude-opus-4-7-v1:0"],
     ["bedrock_converse", "bedrock/converse/us.anthropic.claude-opus-4-7-v1:0"],
-    ["vertex_ai", "vertex_ai/claude-opus-4-7@20260101"],
     ["bedrock", "bedrock/eu.anthropic.claude-opus-4-7-v1:0"],
-  ])("carries Messages compatibility for catalog-unresolvable backend %s %s", (adapter, backend) => {
+  ])("retains Bedrock catalog identity and prices for decorated backend %s %s", (adapter, backend) => {
     const resolved = resolveModelInfoCatalog({
       model_name: "public-name-does-not-convey-generation",
       litellm_params: { model: backend },
       model_info: { litellm_provider: adapter },
+    });
+
+    expect(resolved).toMatchObject({
+      provider: "amazon-bedrock",
+      semanticFamily: "claude",
+      backendIdentity: { semanticFamily: "claude" },
+      messagesCompat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
+    });
+    expect(resolved?.contextWindow).toBe(1_000_000);
+    expect(resolved?.cost?.input).toBeGreaterThan(0);
+    expect(resolved?.cost?.output).toBeGreaterThan(0);
+    expect(resolved?.thinkingLevelMap).toBeDefined();
+  });
+
+  it("retains Anthropic catalog identity for a dated release backend", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-name-does-not-convey-generation",
+        litellm_params: { model: "anthropic/claude-opus-4-7-20260415" },
+        model_info: { litellm_provider: "anthropic" },
+      }),
+    ).toMatchObject({
+      provider: "anthropic",
+      contextWindow: 1_000_000,
+      messagesCompat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
+    });
+  });
+
+  // Vertex Claude has no bundled catalog entry, so compatibility survives while
+  // provider identity, pricing, and limits stay withheld rather than inferred.
+  it("carries Messages compatibility without inventing identity for Vertex Claude", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "public-name-does-not-convey-generation",
+      litellm_params: { model: "vertex_ai/claude-opus-4-7@20260101" },
+      model_info: { litellm_provider: "vertex_ai" },
     });
 
     expect(resolved).toEqual({
@@ -992,8 +1025,10 @@ describe("discoverModels native Messages selection", () => {
       ["vertex-claude", "anthropic-messages"],
       ["custom-claude", "openai-completions"],
       ["known-nonclaude-prefix", "openai-completions"],
-      ["anthropic-unprefixed-claude", "anthropic-messages"],
-      ["bedrock-unprefixed-claude", "anthropic-messages"],
+      // Claude 3.5 predates the bundled catalog, so its Messages requirements are
+      // unknown and the group reduces to Chat rather than guessing a thinking shape.
+      ["anthropic-unprefixed-claude", "openai-completions"],
+      ["bedrock-unprefixed-claude", "openai-completions"],
       ["adapter-only-anthropic", "openai-completions"],
       ["adapter-absent-claude", "openai-completions"],
       ["anthropic-nonclaude", "openai-completions"],

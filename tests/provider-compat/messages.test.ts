@@ -35,10 +35,18 @@ const decoratedAdaptiveRoutes = [
   ["vertex serving suffix", "vertex_ai", "vertex_ai/claude-opus-4-7@20260101"],
 ] as const;
 
-function claudeRoute(adapter: string, backend: string) {
+// One public alias load-balanced across two Claude generations, as happens mid-migration.
+// Opus 4.7 requires adaptive thinking and rejects temperature; Opus 4.5 requires budget
+// thinking and accepts it. No single Messages request satisfies both.
+const mixedGenerationRoutes = [
+  claudeRoute("anthropic", "anthropic/claude-opus-4-7", "a"),
+  claudeRoute("anthropic", "anthropic/claude-opus-4-5", "b"),
+];
+
+function claudeRoute(adapter: string, backend: string, id?: string) {
   return {
     model_name: "team-claude",
-    model_info: { mode: "chat", litellm_provider: adapter, supports_reasoning: true },
+    model_info: { mode: "chat", litellm_provider: adapter, supports_reasoning: true, ...(id ? { id } : {}) },
     litellm_params: { model: backend },
   };
 }
@@ -49,7 +57,7 @@ describe("Anthropic Messages wire compatibility", () => {
   it("streams Anthropic SSE text from the exact Messages endpoint", async () => {
     const { models, model, requestHeaders, requestUrls, requests, respond } = await createCompatibilityHarness(
       anthropicRoute,
-      { customHeaders: { "x-tenant": "team-a" } },
+      { customHeaders: { "x-tenant": "team-a" }, sessionFile: "/tmp/pi-compat-session-wire.jsonl" },
     );
     respond(...anthropicTextResponse("Hello from Messages"));
 
@@ -77,7 +85,9 @@ describe("Anthropic Messages wire compatibility", () => {
   });
 
   it("serializes images, tools, and cache controls with Anthropic-native fields", async () => {
-    const { models, model, requests, respond } = await createCompatibilityHarness(anthropicRoute);
+    const { models, model, requests, respond } = await createCompatibilityHarness(anthropicRoute, {
+      sessionFile: "/tmp/pi-compat-session-serialize.jsonl",
+    });
     expect(getSupportedThinkingLevels(model)).toContain("high");
     respond(...anthropicTextResponse("ready"));
 
@@ -158,12 +168,41 @@ describe("Anthropic Messages wire compatibility", () => {
         supportsTemperature: false,
         supportsStrictTools: true,
       });
-      // Bounded authority: an unlisted routing id must not inherit catalog pricing or limits.
-      expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
-      expect(requests[0]).not.toHaveProperty("budget_tokens");
+      expect(requests[0]?.thinking).not.toHaveProperty("budget_tokens");
     },
   );
+
+  it("reduces a mixed-generation Claude alias to Chat instead of a wrong Messages shape", async () => {
+    const { models, model, requestUrls, requests, respondRaw } = await createCompatibilityHarness(mixedGenerationRoutes);
+    respondRaw(
+      'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
+        "data: [DONE]\n\n",
+    );
+
+    await models.streamSimple(model, { messages: [user("Hello")] }, { reasoning: "high", temperature: 0.7 }).result();
+
+    expect(model.api).toBe("openai-completions");
+    // Prompt caching still reaches Claude through LiteLLM's translation on this path.
+    expect(model.compat).toMatchObject({ cacheControlFormat: "anthropic" });
+    expect(requestUrls).toEqual(["https://proxy.example.com/v1/chat/completions"]);
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("output_config");
+  });
+
+  it("keeps a same-generation Claude alias on native Messages", async () => {
+    const { model } = await createCompatibilityHarness([
+      claudeRoute("anthropic", "anthropic/claude-opus-4-7", "a"),
+      claudeRoute("anthropic", "anthropic/claude-opus-4-8", "b"),
+    ]);
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsStrictTools: true,
+    });
+  });
 
   it("omits temperature for a decorated Opus backend that rejects it", async () => {
     const [, adapter, backend] = decoratedAdaptiveRoutes[1];
@@ -184,16 +223,17 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).toMatchObject({ temperature: 0.7 });
   });
 
-  it("falls back to budget thinking for an unrecognized Claude backend", async () => {
-    const { models, model, requests, respond } = await createCompatibilityHarness(unknownBackendRoute);
-    respond(...anthropicTextResponse("ready"));
+  it("routes an unrecognized Claude backend through Chat rather than guessing", async () => {
+    const { models, model, requestUrls, respondRaw } = await createCompatibilityHarness(unknownBackendRoute);
+    respondRaw(
+      'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
+        "data: [DONE]\n\n",
+    );
 
     await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
 
-    expect(model.api).toBe("anthropic-messages");
-    expect(model.compat).toBeUndefined();
-    expect(requests[0]).toMatchObject({ thinking: { type: "enabled", budget_tokens: expect.any(Number) } });
-    expect(requests[0]).not.toHaveProperty("output_config");
+    expect(model.api).toBe("openai-completions");
+    expect(requestUrls).toEqual(["https://proxy.example.com/v1/chat/completions"]);
   });
 
   it("omits session grouping from Messages while real Chat serialization retains it", async () => {

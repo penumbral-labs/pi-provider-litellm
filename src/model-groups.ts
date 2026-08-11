@@ -65,17 +65,23 @@ function normalizedMode(mode: string | null | undefined): "chat" | "responses" |
   return "unsupported";
 }
 
-function stableEntry(entry: ModelInfoEntry): string {
-  const sortValue = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(sortValue);
-    if (typeof value !== "object" || value === null) return value;
+// Key-order-independent serialization, so logically equal metadata is never read as
+// disagreement just because two resolutions built the same object in a different order.
+function stableJson(value: unknown): string {
+  const sortValue = (inner: unknown): unknown => {
+    if (Array.isArray(inner)) return inner.map(sortValue);
+    if (typeof inner !== "object" || inner === null) return inner;
     return Object.fromEntries(
-      Object.entries(value)
+      Object.entries(inner)
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([key, child]) => [key, sortValue(child)]),
     );
   };
-  return JSON.stringify(sortValue(entry));
+  return JSON.stringify(sortValue(value));
+}
+
+function stableEntry(entry: ModelInfoEntry): string {
+  return stableJson(entry);
 }
 
 function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
@@ -175,8 +181,9 @@ export function reduceModelGroup(
   const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
   // Backend compatibility is not gated on `catalogProvider`: a deployment can be
   // identifiable enough to require adaptive thinking while remaining too opaque to
-  // borrow pricing or context metadata from.
-  const messagesCompat = unanimous(catalogs.map((catalog) => JSON.stringify(catalog?.messagesCompat)));
+  // borrow pricing or context metadata from. Compared by stable key order so an
+  // equal policy expressed in a different order still counts as agreement.
+  const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
@@ -215,9 +222,16 @@ export function reduceModelGroup(
     ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
     : undefined;
 
+  // Native Messages needs positive, unanimous compatibility evidence, not just a
+  // unanimous Claude family. `messagesCompat` is undefined when any deployment's
+  // backend is unknown to the catalog or when deployments disagree (for example a
+  // mixed-generation group where one member requires adaptive thinking and another
+  // requires budget thinking). Routing such a group natively would send one member a
+  // request shape its upstream rejects, so it reduces to Chat Completions, where
+  // LiteLLM adapts the payload per deployment.
   const api = candidateModes.every((mode) => mode === "responses")
     ? "openai-responses"
-    : candidateModes.every((mode) => mode === "chat") && backendSemanticFamily === "claude"
+    : candidateModes.every((mode) => mode === "chat") && backendSemanticFamily === "claude" && messagesCompat
       ? "anthropic-messages"
       : "openai-completions";
 

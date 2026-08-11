@@ -173,10 +173,34 @@ export function enrichCachedModel(model: Model<Api>): Model<Api> {
   };
 }
 
+// Trailing deployment decoration a router adds to a backend id: a Bedrock model
+// version (`-v1:0`, sometimes catalogued as `-v1`), a Vertex serving suffix
+// (`@20260101`), or a dated release snapshot. Region and adapter prefixes are
+// deliberately NOT stripped — provider catalogs key Bedrock models by inference
+// profile (`us.anthropic.…`), so removing the region would lose the identity this
+// exists to find. Most specific first, so an exactly-catalogued id always wins.
+function undecoratedBackendIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const undecorated = routed.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
+  return [
+    ...new Set(
+      [
+        routed,
+        routed.replace(/:\d+$/, ""),
+        undecorated,
+        undecorated.replace(/-\d{8}$/, ""),
+      ].filter(Boolean),
+    ),
+  ];
+}
+
 function catalogLookupIds(id: string): string[] {
   const lookupIds = new Set([id]);
   const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
   lookupIds.add(unprefixed);
+  // Adapter-scoped only: this widens the id spellings tried inside a provider the
+  // caller already authorized, never the set of providers searched.
+  for (const candidate of undecoratedBackendIds(id)) lookupIds.add(candidate);
 
   const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
   const match = /^(?:claude-)?(opus|sonnet|haiku)-(\d+)-(\d+)$/.exec(anthropicAlias);
@@ -206,17 +230,14 @@ function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined 
   return carried;
 }
 
-// Backend routing ids carry deployment decoration the Anthropic catalog does not:
-// an adapter path (`bedrock/converse/...`), a Bedrock cross-region or cross-partition
-// inference profile (`us.`, `eu.`, `apac.`, `us-gov.`, `global.`), a Bedrock model
-// version (`-v1:0`), a Vertex serving suffix (`@20260101`), or a dated release
-// snapshot. Try the most specific form first so an id the catalog knows exactly
-// wins over its undecorated family.
+// The first-party Anthropic catalog keys models bare (`claude-opus-4-7`), so a
+// compatibility lookup additionally strips the adapter path and any cross-region or
+// cross-partition inference profile (`us.`, `eu.`, `apac.`, `us-gov.`, `global.`)
+// before the shared decoration stripping.
 function anthropicBackendLookupIds(id: string): string[] {
   const routed = (id.split("/").pop() ?? id).toLowerCase();
   const base = routed.replace(/^(?:[a-z0-9-]+\.)*anthropic[./]/, "");
-  const undecorated = base.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
-  return [...new Set([base, undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean))];
+  return undecoratedBackendIds(base);
 }
 
 // Anthropic compatibility for a LiteLLM backend routing id, derived only from the
@@ -229,7 +250,7 @@ function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefine
 
 function semanticFamily(id: string): SemanticFamily | undefined {
   const value = id.toLowerCase();
-  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/.test(value)) return "claude";
   if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
   if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
   if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
@@ -238,7 +259,10 @@ function semanticFamily(id: string): SemanticFamily | undefined {
 }
 
 const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
-const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku)(?:$|[./_:-])/i;
+// `fable` is included on the same bounded evidence as the other bare aliases: the
+// catalog carries `claude-fable-5` and `*.anthropic.claude-fable-5`, and both the
+// provider-candidate and lookup-id tables already recognize the bare `fable-5` alias.
+const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
@@ -291,12 +315,13 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     conflictingFamilies ? undefined : baseModel,
   );
   const resolvedFamily = family ?? (backendIdentity ? "claude" : undefined);
-  // A candidate that disagrees with the group's resolved family must not supply either
-  // catalog metadata or Anthropic compatibility policy for it.
-  const agreeing = candidates.filter((candidate) => {
-    const candidateFamily = semanticFamily(candidate);
-    return candidateFamily === undefined || resolvedFamily === undefined || candidateFamily === resolvedFamily;
-  });
+  // Catalog metadata and Anthropic compatibility policy may come only from a candidate
+  // whose own semantic family POSITIVELY matches the resolved family. An unrecognized
+  // family is not agreement: admitting it let a `base_model` the family regex does not
+  // name (Qwen, Mistral, Nova, Llama) hand its pricing and limits to a Claude route.
+  const agreeing = candidates.filter(
+    (candidate) => resolvedFamily === undefined || semanticFamily(candidate) === resolvedFamily,
+  );
   const messagesCompat = agreeing.reduce<MessagesBackendCompat | undefined>(
     (carried, candidate) => carried ?? messagesCompatFromBackend(candidate),
     undefined,
