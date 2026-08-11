@@ -23,10 +23,10 @@ pi -e npm:pi-provider-litellm
 
 ```bash
 git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extensions/pi-provider-litellm
-cd ~/.pi/agent/extensions/pi-provider-litellm
-npm ci
-npm run clean && npm run build
 ```
+
+Pi loads the TypeScript source entrypoint declared in `package.json` `pi.extensions`, so a source install needs no
+build step and no `node_modules`. Install dependencies only to run the test suite or the local checks.
 
 </details>
 
@@ -147,7 +147,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 
 | Variable | Default | Effect |
 |---|---|---|
-| `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. Registered as a `!command` provider key; Pi re-runs it on every request (the per-request auth path is uncached), so rotating/short-lived tokens stay fresh. |
+| `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. The extension runs it while resolving request auth, and Pi's per-request auth path is uncached, so rotating/short-lived tokens stay fresh. |
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
@@ -179,11 +179,7 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool with a deterministic, accepted-character name of at most 64 characters. The name includes the MCP server identity when truncation or collision handling is needed, so tools from different servers do not silently overwrite each other. Exact duplicate identities are registered once.
-
-MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. Discovery accepts at most a 5 MiB response and registers at most 512 tools. Each tool is isolated during normalization: schemas must have an object root, plain-object `properties`, at most 16 levels of JSON nesting (about eight nested schema objects when each level uses `properties`), and a serialized size of at most 64 KiB. Invalid tools are skipped without hiding valid siblings. Missing schemas use a synthetic `args` envelope and require object-valued `args` at execution; real schema properties named `args`, `properties`, or `required` remain intact. Descriptions are limited to 4 KiB with a truncation marker.
-
-MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once—timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text is limited to 64 KiB with a truncation marker. Because Pi does not expose tool unregistration, changing MCP tool identities requires restarting Pi to remove stale registrations.
+Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
 
 ## LiteLLM Skill Hub
 
