@@ -20,6 +20,7 @@ import type {
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
+  LiteLLMModelPolicy,
   ModelInfoEntry,
   ModelInfoResponse,
   ModelsListEntry,
@@ -144,7 +145,20 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
   return resolveCatalogModel(id, ownedBy)?.model;
 }
 
-export function enrichCachedModel(model: Model<Api>): Model<Api> {
+// Cache entries carry no provenance, so a stored model written before request
+// policies existed cannot be told apart from a current one. Re-deriving the
+// Moonshot policy from the route name keeps strict tool-message repair working
+// for those entries; it matches what the `/health` and `/v1/models` paths do
+// with the same evidence, and it is a no-op against non-Moonshot backends.
+function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
+  const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
+  if (cached.litellmPolicy || !isMoonshotModel(model.id)) return model;
+  const restored: typeof cached = { ...cached, litellmPolicy: { normalizeStrictToolMessages: true } };
+  return restored;
+}
+
+export function enrichCachedModel(input: Model<Api>): Model<Api> {
+  const model = restoreCachedModelPolicy(input);
   // Reduced deployment groups use a distinct marker; this sentinel remains
   // exclusive to evidence-free fallback models that may be enriched safely.
   if (

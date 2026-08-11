@@ -349,6 +349,77 @@ describe("native provider stream compatibility", () => {
     for (const field of absent) expect(offline.requests[0]).not.toHaveProperty(field);
   });
 
+  it("repairs strict tool messages for a cached Moonshot model stored without a request policy", async () => {
+    // Shape written by releases that gated strict repair on the model id, before
+    // discovery attached a request policy. Cache entries carry no provenance, so
+    // the policy has to be re-derived on read or the repair silently stops.
+    const modelsStore = new InMemoryModelsStore();
+    await modelsStore.write("litellm", {
+      models: [
+        {
+          id: "kimi-k2.6",
+          name: "kimi-k2.6",
+          api: "openai-completions",
+          provider: "litellm",
+          baseUrl: "https://litellm.example.com/v1",
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+          contextWindow: 262_144,
+          maxTokens: 32_768,
+          compat: { supportsStore: false, maxTokensField: "max_tokens" },
+        },
+      ],
+      checkedAt: Date.now(),
+    });
+
+    // Offline, so these rows are never fetched; they only name the model to load.
+    const { models, model, requests, respond } = await createCompatibilityHarness(
+      [{ model_name: "kimi-k2.6", model_info: { mode: "chat" } }],
+      { modelsStore, allowNetwork: false },
+    );
+    respond(...successfulResponse("ok"));
+
+    await models
+      .streamSimple(model, {
+        messages: [
+          user("Call a tool"),
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "call_1", name: "lookup", arguments: {} }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "result" }],
+            isError: false,
+            timestamp: 3,
+          },
+        ],
+      })
+      .result();
+
+    expect(model.id).toBe("kimi-k2.6");
+    expect(requests[0]?.messages).toContainEqual(
+      expect.objectContaining({ role: "assistant", content: "", tool_calls: expect.any(Array) }),
+    );
+    expect(requests[0]?.messages).toContainEqual({ role: "tool", tool_call_id: "call_1", content: "result" });
+  });
+
   it("handles thinking and a tool result across turns", async () => {
     const { models, model, requests, respond } = await createCompatibilityHarness();
     const context: Context = { messages: [user("Calculate")], tools: [] };
