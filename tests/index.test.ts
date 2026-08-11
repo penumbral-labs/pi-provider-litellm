@@ -866,6 +866,7 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "localhost:4000";
     process.env.LITELLM_API_KEY = "sk-test";
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const extension = await loadExtension(agentDir);
     const pi = createPi();
 
@@ -873,7 +874,23 @@ describe("extension startup", () => {
 
     expect(pi.providers).toHaveLength(1);
     await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-test" } });
-    expect(pi.providers[0]?.filterModels?.([], { type: "api_key", key: "sk-test" })).toEqual([]);
+    // A non-empty list is required: filterModels([]) returns [] even when fully fail-open.
+    const stored = {
+      id: "stored-model",
+      name: "Stored model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://localhost:4000/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4096,
+    };
+    expect(pi.providers[0]?.filterModels?.([stored], { type: "api_key", key: "sk-test" })).toEqual([]);
+    expect(stderr).toHaveBeenCalledWith(
+      "LiteLLM (litellm): Invalid LiteLLM base URL; a network refresh with a valid URL is required\n",
+    );
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {

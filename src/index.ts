@@ -29,7 +29,7 @@ import {
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL } from "./provider.js";
+import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -126,7 +126,7 @@ function resolveSanitizedCredentialRoot(
 }
 
 function requireNonPlaceholderCredentialRoot(root: string): string {
-  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+  if (isPlaceholderHost(new URL(root).host)) {
     throw new Error("LiteLLM credentials use a placeholder host; a network refresh with a real base URL is required");
   }
   return root;

@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveredModel, DiscoveryResult } from "../src/types.js";
+import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ anthropic: vi.fn(), completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -59,6 +59,8 @@ const discovered = (id: string): DiscoveryResult => ({
 });
 
 {
+  // The @ts-expect-error is the assertion: typecheck fails if the discriminated
+  // union ever stops rejecting OpenAI compat fields on a Messages model.
   const invalidMessagesModel: DiscoveredModel = {
     ...discovered("messages").models[0],
     api: "anthropic-messages",
@@ -67,11 +69,20 @@ const discovered = (id: string): DiscoveryResult => ({
       supportsStore: false,
     },
   };
-  expectTypeOf(invalidMessagesModel).toMatchTypeOf<DiscoveredModel>();
+  void invalidMessagesModel;
 }
+
+// `api` must stay required and span exactly the protocols the registry implements.
+expectTypeOf<DiscoveredModel["api"]>().toEqualTypeOf<LiteLLMApi>();
 
 function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
+}
+
+// Mirrors a model pi assembles from ~/.pi/agent/models.json, where `api` is
+// copied verbatim from user config and is not constrained to our protocols.
+function foreignApiModel(id: string, api = "google-generative-ai"): Model<LiteLLMApi> {
+  return { ...native(id), api } as unknown as Model<LiteLLMApi>;
 }
 
 function store(initial?: readonly Model<Api>[]) {
@@ -319,6 +330,59 @@ describe("createLiteLLMProvider", () => {
     expect(activePlaceholder.filterModels?.([native("stored")], credential)).toEqual([]);
   });
 
+  it("drops models declaring an unsupported protocol without throwing out of filterModels", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+
+    expect(value.filterModels?.([foreignApiModel("gemini"), native("valid")], credential)).toEqual([native("valid")]);
+    expect(stderr).toHaveBeenCalledWith(
+      'LiteLLM (litellm): LiteLLM model gemini declares unsupported protocol "google-generative-ai"; ' +
+        'set "api" to one of anthropic-messages, openai-completions, openai-responses in models.json\n',
+    );
+  });
+
+  it("keeps other providers available when a LiteLLM model declares an unsupported protocol", async () => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const models = createModels({
+      credentials: credentialStore({
+        litellm: { type: "api_key", key: "secret", env: { LITELLM_BASE_URL: "https://proxy.example" } },
+        other: { type: "api_key", key: "other" },
+      }),
+    });
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    await value.refreshModels?.(context(store([foreignApiModel("gemini")]), false));
+    models.setProvider(value);
+    models.setProvider(
+      createProvider({
+        id: "other",
+        auth: { apiKey: { name: "Other", resolve: async () => ({ auth: { apiKey: "other" } }) } },
+        models: [{ ...native("other"), provider: "other" }],
+        api: { stream: apiSpies.completions, streamSimple: apiSpies.completions },
+      }),
+    );
+
+    await expect(models.getAvailable()).resolves.toEqual([expect.objectContaining({ provider: "other", id: "other" })]);
+  });
+
+  it("reports the configured env var when no base URL resolves and models are hidden", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => undefined });
+
+    expect(value.filterModels?.([native("hidden"), native("also-hidden")], credential)).toEqual([]);
+    expect(stderr).toHaveBeenCalledWith(
+      "LiteLLM (litellm): 2 model(s) hidden because no LiteLLM base URL is configured; " +
+        "set LITELLM_BASE_URL or run /login litellm\n",
+    );
+  });
+
+  it("stays silent when an unconfigured provider has no models to hide", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => undefined });
+
+    expect(value.filterModels?.([], credential)).toEqual([]);
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
   it("retains previous models when discovery rejects", async () => {
     const modelsStore = store([native("old")]);
     const discover = vi.fn(async () => {
@@ -420,6 +484,20 @@ describe("createLiteLLMProvider", () => {
     const malformed = { ...native("malformed"), baseUrl: "undefined" };
 
     expect(value.filterModels?.([native("valid"), stale, malformed], credential)).toEqual([native("valid")]);
+  });
+
+  it("blocks unsupported protocols on stream before the registry lookup", () => {
+    const value = controller();
+
+    expect(() => value.stream(foreignApiModel("gemini"), { messages: [] })).toThrow(
+      /declares unsupported protocol "google-generative-ai"/,
+    );
+    expect(() => value.streamSimple(foreignApiModel("gemini"), { messages: [] })).toThrow(
+      /set "api" to one of anthropic-messages, openai-completions, openai-responses/,
+    );
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(apiSpies.responses).not.toHaveBeenCalled();
+    expect(apiSpies.anthropic).not.toHaveBeenCalled();
   });
 
   it("routes Messages models through the Anthropic API", () => {
