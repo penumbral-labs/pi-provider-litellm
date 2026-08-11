@@ -23,7 +23,7 @@ import {
 } from "./discover.js";
 import { getGcloudToken, getGcloudTokenCacheKey, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions, reportMcpRegistrationFailure } from "./mcp-tools.js";
+import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -1032,7 +1032,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
         );
         signal?.throwIfAborted();
-for (const tool of tools) pi.registerTool(tool);
+        for (const tool of tools) pi.registerTool(tool);
         registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
