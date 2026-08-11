@@ -942,6 +942,92 @@ describe("body cap diagnostics under a failing cancel", () => {
   });
 });
 
+describe("proxy-supplied regex constraints", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+  const CATASTROPHIC = "^(a+)+$";
+
+  function collectKeys(value: unknown, found: string[] = []): string[] {
+    if (Array.isArray(value)) {
+      for (const child of value) collectKeys(child, found);
+      return found;
+    }
+    if (value && typeof value === "object") {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        found.push(key);
+        collectKeys(child, found);
+      }
+    }
+    return found;
+  }
+
+  const patternPositions: Array<[string, unknown]> = [
+    ["root property", { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } }],
+    [
+      "deeply nested property",
+      {
+        type: "object",
+        properties: { outer: { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } } },
+      },
+    ],
+    ["allOf branch", { type: "object", properties: { s: { allOf: [{ type: "string", pattern: CATASTROPHIC }] } } }],
+    ["items schema", { type: "object", properties: { a: { type: "array", items: { pattern: CATASTROPHIC } } } }],
+    ["$defs entry", { type: "object", $defs: { s: { type: "string", pattern: CATASTROPHIC } }, properties: {} }],
+    ["patternProperties keys", { type: "object", patternProperties: { [CATASTROPHIC]: { type: "string" } } }],
+    ["schema root", { type: "object", pattern: CATASTROPHIC, properties: {} }],
+  ];
+
+  it.each(patternPositions)(
+    "drops a tool whose schema carries a regex constraint at the %s",
+    async (_position, inputSchema) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, [
+          { name: "evil", server_name: "srv", input_schema: inputSchema },
+          { name: "benign", server_name: "srv", input_schema: { type: "object", properties: {} } },
+        ]),
+      );
+      const definitions = await createMcpToolDefinitions(auth);
+
+      // The valid sibling is preserved; only the regex-bearing tool is refused.
+      expect(definitions.map((definition) => definition.name)).toEqual(["mcp_srv_benign"]);
+      // The invariant that matters: the validator only ever sees `definition.parameters`, so if no
+      // registered schema contains a regex keyword, no regex can be compiled or executed.
+      for (const definition of definitions) {
+        expect(collectKeys(definition.parameters)).not.toContain("pattern");
+        expect(collectKeys(definition.parameters)).not.toContain("patternProperties");
+      }
+    },
+  );
+
+  it("reports regex-bearing drops under their own diagnostic class", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "lookup",
+          server_name: "srv",
+          input_schema: { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } },
+        },
+        { name: "broken", server_name: "srv", input_schema: { type: "array" } },
+      ]),
+    );
+
+    await createDefinitions(auth);
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toContain(
+      "LiteLLM MCP: dropped 1 MCP tool with unsupported pattern constraints: mcp_srv_lookup.\n",
+    );
+    // Kept distinct from the generic invalid-schema class so the two are separately actionable.
+    expect(diagnostics).toContain(
+      "LiteLLM MCP: dropped 1 MCP tool with an invalid or oversized input schema: mcp_srv_broken.\n",
+    );
+    // The regex itself is proxy-supplied and never echoed.
+    expect(diagnostics.join("\n")).not.toContain(CATASTROPHIC);
+  });
+});
+
 describe("bounded untrusted display strings", () => {
   it("truncates oversized label and details values with a marker", async () => {
     const hugeServer = "s".repeat(4096);

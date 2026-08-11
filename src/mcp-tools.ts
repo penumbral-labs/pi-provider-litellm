@@ -46,11 +46,12 @@ interface PreparedTool {
 }
 
 /** Why a discovered MCP tool was not registered. Each reason is reported as its own diagnostic class. */
-export type McpDropReason = "duplicate-identity" | "invalid-schema" | "name-collision";
+export type McpDropReason = "duplicate-identity" | "invalid-schema" | "unsupported-pattern" | "name-collision";
 
 const DROP_REASON_TEXT: Readonly<Record<McpDropReason, string>> = {
   "duplicate-identity": "duplicate identities",
   "invalid-schema": "an invalid or oversized input schema",
+  "unsupported-pattern": "unsupported pattern constraints",
   "name-collision": "a colliding generated Pi name",
 };
 
@@ -344,37 +345,73 @@ const DIRECT_SCHEMA_KEYWORDS = [
 const SCHEMA_ARRAY_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems"] as const;
 const SCHEMA_MAP_KEYWORDS = ["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"] as const;
 
-function isValidSchema(value: unknown): boolean {
-  if (typeof value === "boolean") return true;
+// `pattern` and the keys of `patternProperties` are compiled into a backtracking RegExp by TypeBox
+// (schema/engine/pattern.mjs) and executed with no timeout, so a proxy-supplied regex is an unbounded
+// CPU sink. Detection recurses over exactly the schema positions the validator walks.
+const PATTERN_KEYWORDS = ["pattern", "patternProperties"] as const;
+
+type SchemaVerdict = "ok" | "invalid-schema" | "unsupported-pattern";
+type SchemaRejection = Extract<SchemaVerdict, "invalid-schema" | "unsupported-pattern">;
+
+function worseVerdict(left: SchemaVerdict, right: SchemaVerdict): SchemaVerdict {
+  if (left === "invalid-schema" || right === "invalid-schema") return "invalid-schema";
+  if (left === "unsupported-pattern" || right === "unsupported-pattern") return "unsupported-pattern";
+  return "ok";
+}
+
+function schemaVerdict(value: unknown, depth: number): SchemaVerdict {
+  if (typeof value === "boolean") return "ok";
   const schema = asRecord(value);
-  return schema !== undefined && hasValidSchemaShape(schema);
+  return schema === undefined ? "invalid-schema" : recordVerdict(schema, depth);
 }
 
-function isValidSchemaMap(value: unknown): boolean {
+function schemaMapVerdict(value: unknown, depth: number): SchemaVerdict {
   const schemas = asRecord(value);
-  return schemas !== undefined && Object.values(schemas).every(isValidSchema);
+  if (schemas === undefined) return "invalid-schema";
+  return Object.values(schemas).reduce<SchemaVerdict>(
+    (verdict, child) => worseVerdict(verdict, schemaVerdict(child, depth)),
+    "ok",
+  );
 }
 
-function isValidSchemaArray(value: unknown): boolean {
-  return Array.isArray(value) && value.every(isValidSchema);
+function schemaArrayVerdict(value: unknown, depth: number): SchemaVerdict {
+  if (!Array.isArray(value)) return "invalid-schema";
+  return value.reduce<SchemaVerdict>((verdict, child) => worseVerdict(verdict, schemaVerdict(child, depth)), "ok");
 }
 
 function isValidRequired(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function hasValidSchemaShape(record: Record<string, unknown>): boolean {
-  if ("required" in record && !isValidRequired(record.required)) return false;
-  if (SCHEMA_MAP_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaMap(record[keyword]))) return false;
-  if (SCHEMA_ARRAY_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaArray(record[keyword]))) return false;
-  if (DIRECT_SCHEMA_KEYWORDS.some((keyword) => keyword in record && !isValidSchema(record[keyword]))) return false;
-  const items = record.items;
-  return !("items" in record) || isValidSchema(items) || isValidSchemaArray(items);
+function recordVerdict(record: Record<string, unknown>, depth: number): SchemaVerdict {
+  // Bounded here rather than relying on the caller's size/depth gates being evaluated first.
+  if (depth > MAX_SCHEMA_DEPTH) return "invalid-schema";
+  if ("required" in record && !isValidRequired(record.required)) return "invalid-schema";
+  if (PATTERN_KEYWORDS.some((keyword) => keyword in record)) return "unsupported-pattern";
+  const next = depth + 1;
+  let verdict: SchemaVerdict = "ok";
+  for (const keyword of SCHEMA_MAP_KEYWORDS) {
+    if (keyword in record) verdict = worseVerdict(verdict, schemaMapVerdict(record[keyword], next));
+  }
+  for (const keyword of SCHEMA_ARRAY_KEYWORDS) {
+    if (keyword in record) verdict = worseVerdict(verdict, schemaArrayVerdict(record[keyword], next));
+  }
+  for (const keyword of DIRECT_SCHEMA_KEYWORDS) {
+    if (keyword in record) verdict = worseVerdict(verdict, schemaVerdict(record[keyword], next));
+  }
+  if ("items" in record) {
+    const items = record.items;
+    verdict = worseVerdict(
+      verdict,
+      Array.isArray(items) ? schemaArrayVerdict(items, next) : schemaVerdict(items, next),
+    );
+  }
+  return verdict;
 }
 
 function buildParameters(
   inputSchema: Record<string, unknown>,
-): { parameters: TSchema; syntheticArgsEnvelope: boolean } | "invalid-schema" {
+): { parameters: TSchema; syntheticArgsEnvelope: boolean } | SchemaRejection {
   if (Object.keys(inputSchema).length === 0) {
     return {
       parameters: Type.Object({
@@ -390,13 +427,11 @@ function buildParameters(
   } catch {
     return "invalid-schema";
   }
-  if (
-    byteLength(serialized) > MAX_SCHEMA_BYTES ||
-    schemaDepth(inputSchema) > MAX_SCHEMA_DEPTH ||
-    !hasValidSchemaShape(inputSchema)
-  ) {
+  if (byteLength(serialized) > MAX_SCHEMA_BYTES || schemaDepth(inputSchema) > MAX_SCHEMA_DEPTH) {
     return "invalid-schema";
   }
+  const verdict = recordVerdict(inputSchema, 0);
+  if (verdict !== "ok") return verdict;
   return { parameters: Type.Unsafe(inputSchema), syntheticArgsEnvelope: false };
 }
 
