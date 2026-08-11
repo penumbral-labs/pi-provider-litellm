@@ -1,6 +1,22 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMcpToolDefinitions, discoverMcpTools, executeMcpTool, findSchemaHazard } from "../src/mcp-tools.js";
+import {
+  createMcpToolDefinitions as createMcpToolDefinitionsRaw,
+  discoverMcpTools as discoverMcpToolsRaw,
+  executeMcpTool,
+  findSchemaHazard,
+} from "../src/mcp-tools.js";
+
+// Thin wrappers so the bulk of the suite keeps asserting on the shapes it cares about.
+// Tests that need the reconciliation report import the raw functions directly.
+const createMcpToolDefinitions = async (
+  ...args: Parameters<typeof createMcpToolDefinitionsRaw>
+): Promise<Awaited<ReturnType<typeof createMcpToolDefinitionsRaw>>["definitions"]> =>
+  (await createMcpToolDefinitionsRaw(...args)).definitions;
+const discoverMcpTools = async (
+  ...args: Parameters<typeof discoverMcpToolsRaw>
+): Promise<Awaited<ReturnType<typeof discoverMcpToolsRaw>>["tools"]> => (await discoverMcpToolsRaw(...args)).tools;
+
 import type { LiteLLMMcpTool } from "../src/types.js";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -13,6 +29,10 @@ function jsonResponse(status: number, body: unknown): Response {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+// Tool names are `mcp_<server>_<tool>` plus a 10-hex identity hash. Assert that contract rather
+// than a literal digest, so the tests do not re-implement the naming function they are checking.
+const named = (base: string) => expect.stringMatching(new RegExp(`^${base}_[a-f0-9]{10}$`));
 
 describe("discoverMcpTools", () => {
   it("returns tools from LiteLLM MCP REST discovery", async () => {
@@ -348,8 +368,8 @@ describe("createMcpToolDefinitions", () => {
   it("reports each drop class separately with counts and sanitized names, and no credential or schema content", async () => {
     vi.resetModules();
     const {
-      createMcpToolDefinitions: createDefinitions,
-      discoverMcpTools: discoverTools,
+      createMcpToolDefinitions: createDefinitionsRaw,
+      discoverMcpTools: discoverToolsRaw,
       executeMcpTool: executeTool,
     } = await import("../src/mcp-tools.js");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -357,8 +377,8 @@ describe("createMcpToolDefinitions", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async () => new Response(oversizedBody, { status: 200 }));
-    await expect(discoverTools("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
-    await expect(discoverTools("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
+    await expect(discoverToolsRaw("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
+    await expect(discoverToolsRaw("https://litellm.example.com", "sk-secret-must-not-leak")).rejects.toThrow();
     await expect(
       executeTool("https://litellm.example.com", "sk-secret-must-not-leak", "server", "tool", {}),
     ).rejects.toThrow();
@@ -395,7 +415,7 @@ describe("createMcpToolDefinitions", () => {
       ]),
     );
 
-    await createDefinitions(async () => ({
+    await createDefinitionsRaw(async () => ({
       baseUrl: "https://litellm.example.com",
       apiKey: "sk-secret-must-not-leak",
     }));
@@ -406,10 +426,12 @@ describe("createMcpToolDefinitions", () => {
 
     // Each class is reported on its own line, with a count and the sanitized generated names.
     const duplicateLine = diagnostics.find((message) => message.includes("duplicate identities"));
-    expect(duplicateLine).toBe("LiteLLM MCP: dropped 1 MCP tool with duplicate identities: mcp_server_duplicate.\n");
+    expect(duplicateLine).toMatch(
+      /^LiteLLM MCP: dropped 1 MCP tool with duplicate identities: mcp_server_duplicate_[a-f0-9]{10}\.\n$/,
+    );
     const schemaLine = diagnostics.find((message) => message.includes("invalid or oversized input schema"));
-    expect(schemaLine).toBe(
-      "LiteLLM MCP: dropped 2 MCP tools with an invalid or oversized input schema: mcp_server_bad_one, mcp_server_bad_two.\n",
+    expect(schemaLine).toMatch(
+      /^LiteLLM MCP: dropped 2 MCP tools with an invalid or oversized input schema: mcp_server_bad_one_[a-f0-9]{10}, mcp_server_bad_two_[a-f0-9]{10}\.\n$/,
     );
     // 513 valid + the surviving duplicate = 514 accepted, so exactly 2 exceed the cap.
     expect(diagnostics.filter((message) => message.includes("512-tool limit"))).toEqual([
@@ -423,7 +445,7 @@ describe("createMcpToolDefinitions", () => {
 
   it("suppresses an unchanged drop report across refreshes but reports a changed one", async () => {
     vi.resetModules();
-    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const invalid = (name: string) => ({ name, server_name: "server", input_schema: { type: "array" } });
     const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
@@ -435,25 +457,25 @@ describe("createMcpToolDefinitions", () => {
         .filter((message) => message.includes("invalid or oversized input schema"));
 
     fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one")]));
-    await createDefinitions(auth);
+    await createDefinitionsRaw(auth);
     expect(schemaLines()).toHaveLength(1);
 
     // Identical incident on the next refresh: stays quiet.
-    await createDefinitions(auth);
+    await createDefinitionsRaw(auth);
     expect(schemaLines()).toHaveLength(1);
 
     // Count changed: reported again, because the operator's picture changed.
     fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one"), invalid("bad-two")]));
-    await createDefinitions(auth);
+    await createDefinitionsRaw(auth);
     expect(schemaLines()).toHaveLength(2);
     expect(schemaLines()[1]).toContain("dropped 2 MCP tools");
 
     // A clean refresh clears the class, so its recurrence is reported rather than suppressed as unchanged.
     fetchMock.mockImplementation(async () => jsonResponse(200, []));
-    await createDefinitions(auth);
+    await createDefinitionsRaw(auth);
     expect(schemaLines()).toHaveLength(2);
     fetchMock.mockImplementation(async () => jsonResponse(200, [invalid("bad-one"), invalid("bad-two")]));
-    await createDefinitions(auth);
+    await createDefinitionsRaw(auth);
     expect(schemaLines()).toHaveLength(3);
   });
 
@@ -470,7 +492,9 @@ describe("createMcpToolDefinitions", () => {
       (message) => progress.push(message),
     );
 
-    expect(progress).toContain("Prepared 1 of 2 discovered MCP tools; dropped 1 (invalid-schema=1)");
+    expect(progress).toContain(
+      "Prepared 1 of 2 raw MCP tools (0 kept with a safe args envelope); lost 1 (invalid-schema=1)",
+    );
   });
 
   it("derives names from the post-cap set so a dropped sibling does not rename a survivor", async () => {
@@ -499,7 +523,7 @@ describe("createMcpToolDefinitions", () => {
     // The second `shared/search` falls beyond the 512 cap and is never registered, so the survivor
     // keeps the plain readable name instead of being renamed by a tool that does not exist.
     expect(definitions).toHaveLength(512);
-    expect(definitions[0]?.name).toBe("mcp_shared_search");
+    expect(definitions[0]?.name).toEqual(named("mcp_shared_search"));
   });
 
   it("still disambiguates with a hash when both colliding tools survive the cap", async () => {
@@ -543,7 +567,7 @@ describe("createMcpToolDefinitions", () => {
     }));
 
     expect(definitions).toHaveLength(512);
-    expect(definitions.at(-1)?.name).toBe("mcp_server_valid_511");
+    expect(definitions.at(-1)?.name).toEqual(named("mcp_server_valid_511"));
   });
 
   it("creates sanitized Pi tool definitions with mapped parameter schemas", async () => {
@@ -573,7 +597,7 @@ describe("createMcpToolDefinitions", () => {
       apiKey: "sk-test",
     }));
 
-    expect(definitions.map((tool) => tool.name)).toEqual(["mcp_brave_api_web_search"]);
+    expect(definitions.map((tool) => tool.name)).toEqual([named("mcp_brave_api_web_search")]);
     expect(definitions[0]?.executionMode).toBe("parallel");
     expect(definitions[0]?.description).toBe("Search the web (via Brave API MCP server)");
     const parameters = definitions[0]?.parameters as { required?: string[]; properties?: Record<string, unknown> };
@@ -676,9 +700,9 @@ describe("createMcpToolDefinitions", () => {
     }));
 
     expect(definitions.map((tool) => tool.name)).toEqual([
-      "mcp_schema_valid",
-      "mcp_schema_properties_argument",
-      "mcp_schema_required_argument",
+      named("mcp_schema_valid"),
+      named("mcp_schema_properties_argument"),
+      named("mcp_schema_required_argument"),
     ]);
   });
 
@@ -705,7 +729,10 @@ describe("createMcpToolDefinitions", () => {
       apiKey: "sk-test",
     }));
 
-    expect(definitions.map((tool) => tool.name)).toEqual(["mcp_schema_depth_boundary", "mcp_schema_size_boundary"]);
+    expect(definitions.map((tool) => tool.name)).toEqual([
+      named("mcp_schema_depth_boundary"),
+      named("mcp_schema_size_boundary"),
+    ]);
   });
 
   it("truncates descriptions and prompt snippets to 4 KiB", async () => {
@@ -947,14 +974,14 @@ describe("schema keyword validation positions", () => {
 
   it.each(directKeywords)("accepts a schema at the %s position and rejects a non-schema there", async (keyword) => {
     expect(await prepare({ type: "object", properties: { x: { [keyword]: { type: "string" } } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", properties: { x: { [keyword]: 5 } } })).toEqual([]);
   });
 
   it.each(arrayKeywords)("accepts a schema array at the %s position and rejects a non-array there", async (keyword) => {
     expect(await prepare({ type: "object", properties: { x: { [keyword]: [{ type: "string" }] } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", properties: { x: { [keyword]: { type: "string" } } } })).toEqual([]);
     expect(await prepare({ type: "object", properties: { x: { [keyword]: [5] } } })).toEqual([]);
@@ -964,7 +991,7 @@ describe("schema keyword validation positions", () => {
     "accepts a schema map at the %s position and rejects a non-schema value there",
     async (keyword) => {
       expect(await prepare({ type: "object", properties: { x: { [keyword]: { k: { type: "string" } } } } })).toEqual([
-        "mcp_srv_probe",
+        named("mcp_srv_probe"),
       ]);
       expect(await prepare({ type: "object", properties: { x: { [keyword]: 5 } } })).toEqual([]);
       expect(await prepare({ type: "object", properties: { x: { [keyword]: { k: 5 } } } })).toEqual([]);
@@ -973,20 +1000,20 @@ describe("schema keyword validation positions", () => {
 
   it("accepts boolean subschemas and both items forms", async () => {
     expect(await prepare({ type: "object", properties: { x: { additionalProperties: false } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", properties: { x: { items: { type: "string" } } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", properties: { x: { items: [{ type: "string" }, true] } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", properties: { x: { items: 5 } } })).toEqual([]);
   });
 
   it("rejects a non-string-array required at any schema position", async () => {
     expect(await prepare({ type: "object", required: ["a"], properties: { a: { type: "string" } } })).toEqual([
-      "mcp_srv_probe",
+      named("mcp_srv_probe"),
     ]);
     expect(await prepare({ type: "object", required: "a" })).toEqual([]);
     expect(await prepare({ type: "object", properties: { x: { type: "object", required: [5] } } })).toEqual([]);
@@ -1006,93 +1033,154 @@ describe("schema keyword validation positions", () => {
         patternProperties: { type: "string" },
       },
     };
-    expect(await prepare(dataPositions)).toEqual(["mcp_srv_probe"]);
+    expect(await prepare(dataPositions)).toEqual([named("mcp_srv_probe")]);
   });
 });
 
-describe("proxy-supplied regex constraints", () => {
+describe("untrusted schema hazards", () => {
   const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
   const CATASTROPHIC = "^(a+)+$";
+  const REMOTE_REF = "https://evil.example/x.json";
 
-  function collectKeys(value: unknown, found: string[] = []): string[] {
-    if (Array.isArray(value)) {
-      for (const child of value) collectKeys(child, found);
-      return found;
-    }
-    if (value && typeof value === "object") {
-      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        found.push(key);
-        collectKeys(child, found);
-      }
-    }
-    return found;
-  }
-
-  const patternPositions: Array<[string, unknown]> = [
+  // Positions are chosen from the JSON Schema specification and from what TypeBox's validator
+  // actually walks. Deliberately NOT derived from the implementation's own keyword tables: a list
+  // copied from src cannot detect a position src forgot.
+  const hazardCatalogs: Array<[string, unknown]> = [
     ["root property", { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } }],
     [
       "deeply nested property",
+      { type: "object", properties: { o: { type: "object", properties: { s: { pattern: CATASTROPHIC } } } } },
+    ],
+    ["allOf branch", { type: "object", properties: { s: { allOf: [{ pattern: CATASTROPHIC }] } } }],
+    ["items schema", { type: "object", properties: { a: { type: "array", items: { pattern: CATASTROPHIC } } } }],
+    ["$defs entry", { type: "object", $defs: { s: { pattern: CATASTROPHIC } }, properties: {} }],
+    ["schema root", { type: "object", pattern: CATASTROPHIC, properties: {} }],
+    ["patternProperties keys", { type: "object", patternProperties: { [CATASTROPHIC]: { type: "string" } } }],
+    // The four escapes that a position-table walk misses.
+    [
+      "dependencies subschema (draft-07)",
       {
         type: "object",
-        properties: { outer: { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } } },
+        properties: { k: { type: "string" } },
+        dependencies: { k: { properties: { s: { pattern: CATASTROPHIC } } } },
       },
     ],
-    ["allOf branch", { type: "object", properties: { s: { allOf: [{ type: "string", pattern: CATASTROPHIC }] } } }],
-    ["items schema", { type: "object", properties: { a: { type: "array", items: { pattern: CATASTROPHIC } } } }],
-    ["$defs entry", { type: "object", $defs: { s: { type: "string", pattern: CATASTROPHIC } }, properties: {} }],
-    ["patternProperties keys", { type: "object", patternProperties: { [CATASTROPHIC]: { type: "string" } } }],
-    ["schema root", { type: "object", pattern: CATASTROPHIC, properties: {} }],
+    [
+      "additionalItems subschema",
+      { type: "object", properties: { a: { type: "array", additionalItems: { pattern: CATASTROPHIC } } } },
+    ],
+    [
+      "local ref into a data position (default)",
+      { type: "object", default: { e: { pattern: CATASTROPHIC } }, properties: { s: { $ref: "#/default/e" } } },
+    ],
+    [
+      "local ref into a data position (examples)",
+      { type: "object", examples: [{ pattern: CATASTROPHIC }], properties: { s: { $ref: "#/examples/0" } } },
+    ],
+    // Reference forms whose target is not in the document we were handed.
+    ["remote $ref", { type: "object", properties: { s: { $ref: REMOTE_REF } } }],
+    ["$dynamicRef", { type: "object", properties: { s: { $dynamicRef: "#meta" } } }],
+    ["$recursiveRef", { type: "object", properties: { s: { $recursiveRef: "#" } } }],
   ];
 
-  it.each(patternPositions)(
-    "drops a tool whose schema carries a regex constraint at the %s",
-    async (_position, inputSchema) => {
+  it.each(hazardCatalogs)(
+    "replaces the schema with the trusted envelope and keeps the sibling: %s",
+    async (_label, inputSchema) => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
-        jsonResponse(200, [
-          { name: "evil", server_name: "srv", input_schema: inputSchema },
-          { name: "benign", server_name: "srv", input_schema: { type: "object", properties: {} } },
-        ]),
+        jsonResponse(200, {
+          tools: [
+            { name: "risky", server_name: "srv", inputSchema },
+            {
+              name: "benign",
+              server_name: "srv",
+              inputSchema: { type: "object", properties: { q: { type: "string" } } },
+            },
+          ],
+        }),
       );
       const definitions = await createMcpToolDefinitions(auth);
 
-      // The valid sibling is preserved; only the regex-bearing tool is refused.
-      expect(definitions.map((definition) => definition.name)).toEqual(["mcp_srv_benign"]);
-      // The invariant that matters: the validator only ever sees `definition.parameters`, so if no
-      // registered schema contains a regex keyword, no regex can be compiled or executed.
-      for (const definition of definitions) {
-        expect(collectKeys(definition.parameters)).not.toContain("pattern");
-        expect(collectKeys(definition.parameters)).not.toContain("patternProperties");
-      }
+      // Both tools remain usable; the hazard costs the schema, not the tool.
+      expect(definitions.map((definition) => definition.name)).toEqual([
+        named("mcp_srv_risky"),
+        named("mcp_srv_benign"),
+      ]);
+
+      const risky = definitions[0];
+      const serialized = JSON.stringify(risky?.parameters);
+      // The exact proxy-supplied regex and ref must be absent from what Pi will compile.
+      expect(serialized).not.toContain(CATASTROPHIC);
+      expect(serialized).not.toContain(REMOTE_REF);
+      expect(serialized).not.toContain("$ref");
+      expect(serialized).not.toContain("$dynamicRef");
+      expect(serialized).not.toContain("$recursiveRef");
+      // It is the extension-owned envelope, which requires an object-valued `args`.
+      expect(risky?.parameters).toMatchObject({ type: "object", required: ["args"] });
+
+      // The untouched sibling still carries its own schema.
+      expect(JSON.stringify(definitions[1]?.parameters)).toContain('"q"');
     },
   );
 
-  it("reports regex-bearing drops under their own diagnostic class", async () => {
+  it("reports envelope degradation under its own class, without echoing the schema", async () => {
     vi.resetModules();
-    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(200, [
-        {
-          name: "lookup",
-          server_name: "srv",
-          input_schema: { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } },
-        },
-        { name: "broken", server_name: "srv", input_schema: { type: "array" } },
-      ]),
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "lookup",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { type: "string", pattern: CATASTROPHIC } } },
+          },
+          { name: "broken", server_name: "srv", inputSchema: { type: "array" } },
+        ],
+      }),
     );
 
-    await createDefinitions(auth);
-
+    const { report } = await createDefinitionsRaw(auth);
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
-    expect(diagnostics).toContain(
-      "LiteLLM MCP: dropped 1 MCP tool with unsupported pattern constraints: mcp_srv_lookup.\n",
-    );
-    // Kept distinct from the generic invalid-schema class so the two are separately actionable.
-    expect(diagnostics).toContain(
-      "LiteLLM MCP: dropped 1 MCP tool with an invalid or oversized input schema: mcp_srv_broken.\n",
-    );
-    // The regex itself is proxy-supplied and never echoed.
-    expect(diagnostics.join("\n")).not.toContain(CATASTROPHIC);
+
+    expect(report.enveloped).toBe(1);
+    expect(diagnostics.join("")).toContain("kept 1 MCP tool but replaced its schema with a safe args envelope");
+    // Kept distinct from a structural rejection, which is a real loss.
+    expect(diagnostics.join("")).toContain("dropped 1 MCP tool with an invalid or oversized input schema");
+    expect(diagnostics.join("")).not.toContain(CATASTROPHIC);
+  });
+
+  describe("negative controls: these must keep their supplied schema", () => {
+    const clean: Array<[string, unknown]> = [
+      [
+        "a property literally named pattern",
+        { type: "object", properties: { pattern: { type: "string" }, patternProperties: { type: "string" } } },
+      ],
+      [
+        "a local ref to a real subschema",
+        { type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } },
+      ],
+      ["an enum containing the word pattern", { type: "object", properties: { s: { enum: ["pattern", "other"] } } }],
+      [
+        "a default whose value is the string pattern",
+        { type: "object", properties: { s: { type: "string", default: "pattern" } } },
+      ],
+      ["a description mentioning pattern", { type: "object", description: "matches a pattern", properties: {} }],
+      [
+        "nested objects with no regex at all",
+        { type: "object", properties: { a: { type: "object", properties: { b: { type: "number" } } } } },
+      ],
+    ];
+
+    it.each(clean)("keeps the proxy schema for %s", async (_label, inputSchema) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, { tools: [{ name: "clean", server_name: "srv", inputSchema }] }),
+      );
+      const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+      expect(definitions).toHaveLength(1);
+      expect(report.enveloped).toBe(0);
+      // Passed through as supplied, not swapped for the envelope.
+      expect(JSON.stringify(definitions[0]?.parameters)).toBe(JSON.stringify(inputSchema));
+    });
   });
 });
 
@@ -1143,7 +1231,7 @@ describe("bounded untrusted display strings", () => {
 describe("body cap diagnostics under a failing cancel", () => {
   it("still emits the diagnostic and the cap error when reader.cancel() rejects", async () => {
     vi.resetModules();
-    const { discoverMcpTools: discoverTools } = await import("../src/mcp-tools.js");
+    const { discoverMcpTools: discoverToolsRaw } = await import("../src/mcp-tools.js");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
     // A body that breaches the cap and whose cancel() rejects, which is what an errored stream does.
@@ -1157,12 +1245,191 @@ describe("body cap diagnostics under a failing cancel", () => {
     });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
 
-    await expect(discoverTools("https://litellm.example.com", "sk-test")).rejects.toThrow(
+    await expect(discoverToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow(
       "MCP discovery response exceeds its 5242880-byte limit",
     );
     expect(stderr.mock.calls.map(([message]) => String(message))).toContain(
       "LiteLLM MCP: MCP discovery response exceeded its 5242880-byte limit.\n",
     );
+  });
+});
+
+describe("loss accounting reconciles to the raw catalog", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+
+  it("accounts for 4 raw entries yielding 2 registered tools", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          { name: "ok", server_name: "srv", inputSchema: { type: "object", properties: {} } },
+          {
+            name: "enveloped",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { pattern: "^a+$" } } },
+          },
+          { name: "no-server" }, // normalization loss: no server identity
+          { name: "garbage", server_name: "srv", inputSchema: "not-an-object" }, // malformed, not schemaless
+        ],
+      }),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    expect(report.discovered).toBe(4);
+    expect(definitions).toHaveLength(2);
+    expect(report.prepared).toBe(2);
+    expect(report.enveloped).toBe(1);
+
+    const byReason = Object.fromEntries(report.dropped.map((entry) => [entry.reason, entry.tools.length]));
+    expect(byReason).toEqual({ "invalid-tool": 1, "invalid-schema": 1 });
+
+    // Every raw entry is accounted for exactly once.
+    const droppedTotal = report.dropped.reduce((total, entry) => total + entry.tools.length, 0);
+    expect(report.prepared + droppedTotal + report.overflow).toBe(report.discovered);
+  });
+
+  it("labels a normalization loss safely when the entry has no usable name", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, { tools: [{ description: "\u001b[31mred\u001b[0m nonsense" }, {}] }),
+    );
+
+    await createDefinitionsRaw(auth);
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message)).join("");
+    expect(diagnostics).toContain("dropped 2 MCP tools with a missing name or server identity: entry_0, entry_1.");
+    // No proxy-supplied text, and no escape sequences, reach the diagnostic.
+    expect(diagnostics).not.toContain("nonsense");
+    expect(diagnostics).not.toContain("\u001b");
+  });
+
+  it("treats a malformed non-object schema as invalid rather than schemaless", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          { name: "arr", server_name: "srv", inputSchema: ["evil"] },
+          { name: "str", server_name: "srv", inputSchema: "evil" },
+          { name: "num", server_name: "srv", inputSchema: 7 },
+          { name: "absent", server_name: "srv" },
+        ],
+      }),
+    );
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    // Only the genuinely schemaless tool survives, and it uses the trusted envelope.
+    expect(definitions.map((definition) => definition.name)).toEqual([named("mcp_srv_absent")]);
+    expect(definitions[0]?.parameters).toMatchObject({ type: "object", required: ["args"] });
+    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 3 });
+    // The schemaless envelope is not a hazard degradation.
+    expect(report.enveloped).toBe(0);
+  });
+});
+
+describe("naming is membership-independent", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+  const tool = (name: string, serverId: string) => ({
+    name,
+    server_name: "shared",
+    server_id: serverId,
+    inputSchema: { type: "object", properties: {} },
+  });
+
+  async function namesFor(catalog: unknown[]): Promise<string[]> {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: catalog }));
+    const definitions = await createMcpToolDefinitions(auth);
+    vi.restoreAllMocks();
+    return definitions.map((definition) => definition.name);
+  }
+
+  it("does not rename a survivor when a colliding sibling appears or disappears", async () => {
+    const alone = await namesFor([tool("search", "one")]);
+    const together = await namesFor([tool("search", "one"), tool("search", "two")]);
+    const aloneAgain = await namesFor([tool("search", "one")]);
+
+    expect(alone).toEqual(aloneAgain);
+    // The first tool keeps exactly the same name whether or not its twin is present.
+    expect(together[0]).toBe(alone[0]);
+    expect(together[1]).not.toBe(together[0]);
+    for (const name of together) expect(name.length).toBeLessThanOrEqual(64);
+  });
+
+  it("does not rename a survivor when a sibling is dropped or falls beyond the cap", async () => {
+    const clean = await namesFor([tool("search", "one")]);
+    const withDroppedSibling = await namesFor([
+      tool("search", "one"),
+      { name: "broken", server_name: "shared", inputSchema: { type: "array" } },
+    ]);
+    const beyondCap = await namesFor([
+      tool("search", "one"),
+      ...Array.from({ length: 600 }, (_, index) => tool(`bulk-${index}`, `bulk-${index}`)),
+    ]);
+
+    expect(withDroppedSibling[0]).toBe(clean[0]);
+    expect(beyondCap[0]).toBe(clean[0]);
+  });
+
+  it("keeps names within the length limit and accepted charset for very long identities", async () => {
+    const names = await namesFor([
+      { name: "t".repeat(200), server_name: "s".repeat(200), server_id: "i", inputSchema: {} },
+    ]);
+    expect(names[0]).toMatch(/^mcp_[a-z0-9_]*_[a-f0-9]{10}$/);
+    expect(names[0]?.length).toBe(64);
+  });
+});
+
+describe("incident identity covers full membership", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+
+  it("re-reports when membership changes beyond the printed sample", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const broken = (name: string) => ({ name, server_name: "srv", inputSchema: { type: "array" } });
+    const lines = () =>
+      stderr.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("invalid or oversized input schema"));
+
+    // Seven drops: only the first five names are printed.
+    const first = ["a1", "a2", "a3", "a4", "a5", "f6", "f7"];
+    fetchMock.mockImplementation(async () => jsonResponse(200, { tools: first.map(broken) }));
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(1);
+    expect(lines()[0]).toContain("(+2 more)");
+
+    // Identical membership: stays quiet.
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(1);
+
+    // Same count, same first five, different tail. Must still re-report.
+    const swapped = ["a1", "a2", "a3", "a4", "a5", "z6", "z7"];
+    fetchMock.mockImplementation(async () => jsonResponse(200, { tools: swapped.map(broken) }));
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(2);
+  });
+
+  it("reports a body-cap breach again after a clean response on the same surface", async () => {
+    vi.resetModules();
+    const { discoverMcpTools: discoverToolsRaw } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const oversized = () => new Response("x".repeat(5 * 1024 * 1024 + 1), { status: 200 });
+    const capLines = () =>
+      stderr.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("MCP discovery response exceeded"));
+
+    fetchMock.mockImplementation(async () => oversized());
+    await expect(discoverToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow();
+    expect(capLines()).toHaveLength(1);
+
+    // A clean response clears the incident...
+    fetchMock.mockImplementation(async () => jsonResponse(200, { tools: [] }));
+    await discoverToolsRaw("https://litellm.example.com", "sk-test");
+
+    // ...so the same breach is reported again rather than suppressed as unchanged.
+    fetchMock.mockImplementation(async () => oversized());
+    await expect(discoverToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow();
+    expect(capLines()).toHaveLength(2);
   });
 });
 

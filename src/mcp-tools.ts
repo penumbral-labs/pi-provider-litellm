@@ -45,22 +45,50 @@ interface PreparedTool {
   syntheticArgsEnvelope: boolean;
 }
 
-/** Why a discovered MCP tool was not registered. Each reason is reported as its own diagnostic class. */
-export type McpDropReason = "duplicate-identity" | "invalid-schema" | "unsupported-pattern" | "name-collision";
+/**
+ * Why a discovered MCP tool was not registered as the proxy described it.
+ * `schema-envelope` is a degradation, not a loss: the tool still registers, with the
+ * extension-owned envelope in place of a schema that could not be proven safe.
+ */
+export type McpDropReason = "invalid-tool" | "duplicate-identity" | "invalid-schema" | "name-collision";
+export type McpDegradeReason = "schema-envelope";
+export type McpIncidentReason = McpDropReason | McpDegradeReason;
 
 const DROP_REASON_TEXT: Readonly<Record<McpDropReason, string>> = {
+  "invalid-tool": "a missing name or server identity",
   "duplicate-identity": "duplicate identities",
   "invalid-schema": "an invalid or oversized input schema",
-  "unsupported-pattern": "unsupported pattern constraints",
   "name-collision": "a colliding generated Pi name",
 };
 
+const DEGRADE_REASON_TEXT: Readonly<Record<McpDegradeReason, string>> = {
+  "schema-envelope": "a schema that could not be proven free of proxy-supplied regexes or references",
+};
+
+const INCIDENT_REASON_TEXT: Readonly<Record<McpIncidentReason, string>> = {
+  ...DROP_REASON_TEXT,
+  ...DEGRADE_REASON_TEXT,
+};
+
 export interface McpPreparationReport {
+  /** Raw tool entries the proxy returned, before any normalization. */
   discovered: number;
+  /** Tools registered with the schema the proxy supplied. */
   prepared: number;
+  /** Of `prepared`, how many carry the extension-owned envelope instead of the proxy's schema. */
+  enveloped: number;
   /** Tools discarded because the registered-tool cap was reached. */
   overflow: number;
   dropped: Array<{ reason: McpDropReason; tools: string[] }>;
+  degraded: Array<{ reason: McpDegradeReason; tools: string[] }>;
+}
+
+/** Bounded discovery result: `raw` is what the proxy returned, so losses can be reconciled. */
+export interface McpDiscovery {
+  raw: number;
+  tools: LiteLLMMcpTool[];
+  /** Entries dropped by normalization, as bounded safe labels. */
+  invalid: string[];
 }
 
 // Incident-aware suppression: an incident class is re-reported whenever its message changes
@@ -69,14 +97,30 @@ export interface McpPreparationReport {
 // without bound.
 const lastEmittedIncident = new Map<string, string>();
 
-function emitSafetyDiagnostic(incident: string, message: string): void {
-  if (lastEmittedIncident.get(incident) === message) return;
-  lastEmittedIncident.set(incident, message);
+/**
+ * Reports an incident unless its identity is unchanged since the last report of that class.
+ * `identity` must capture everything an operator would want to hear about again — for tool
+ * incidents that is the full sorted membership, not just the bounded sample that gets printed.
+ */
+function emitSafetyDiagnostic(incident: string, message: string, identity: string = message): void {
+  if (lastEmittedIncident.get(incident) === identity) return;
+  lastEmittedIncident.set(incident, identity);
   process.stderr.write(`LiteLLM MCP: ${message}\n`);
 }
 
-function plural(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+function clearIncident(incident: string): void {
+  lastEmittedIncident.delete(incident);
+}
+
+function membershipIdentity(tools: readonly string[]): string {
+  return createHash("sha256")
+    .update([...tools].sort().join("\0"))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
 /** Renders a bounded sample list. Names are already sanitized to `[a-z0-9_]`, so they are safe for stderr. */
@@ -87,27 +131,31 @@ function sampleList(names: readonly string[]): string {
 }
 
 /**
- * Reports MCP tools that Pi itself refused to register. `cause` is Pi-authored (never proxy-supplied),
- * and tool names are sanitized identities, so neither the proxy's schema nor its response body can reach stderr.
+ * Reports a registration pass that Pi aborted.
+ *
+ * Pi's `registerTool` is a synchronous replace-by-name whose only throw comes from a staleness
+ * check that is never reset, so a throw means the pass is over, not that one tool was rejected.
+ * `cause` is Pi-authored and bounded; no proxy schema, description, or body reaches stderr.
  */
-export function reportMcpRegistrationFailures(
-  failures: ReadonlyArray<{ tool: string; cause: unknown }>,
-  attempted: number,
-): void {
-  if (failures.length === 0) {
-    lastEmittedIncident.delete("registration-failure");
-    return;
-  }
-  const cause = failures[0]?.cause;
+export function reportMcpRegistrationFatal(registered: number, attempted: number, cause: unknown): void {
   const causeText = truncateUtf8(
     cause instanceof Error ? cause.message : String(cause),
     MAX_DIAGNOSTIC_CAUSE_BYTES,
     SHORT_TRUNCATION_MARKER,
   );
   emitSafetyDiagnostic(
-    "registration-failure",
-    `${failures.length} of ${plural(attempted, "MCP tool")} could not be registered: ` +
-      `${sampleList(failures.map((failure) => failure.tool))} (first cause: ${causeText}).`,
+    "registration-fatal",
+    `registration stopped after ${registered} of ${plural(attempted, "MCP tool")}; ` +
+      `no further attempts will be made by this extension instance (${causeText}).`,
+  );
+}
+
+/** Reports a discovery that yielded no registrable tool, so the silence is explained. */
+export function reportMcpEmptyCatalog(raw: number): void {
+  emitSafetyDiagnostic(
+    "empty-catalog",
+    `no MCP tools were registered from ${plural(raw, "raw entry", "raw entries")} returned by the proxy.`,
+    `empty-catalog:${raw}`,
   );
 }
 
@@ -155,6 +203,9 @@ async function readBoundedText(response: Response, limit: number, surface: strin
   } finally {
     reader.releaseLock();
   }
+  // A response that stayed within the cap clears the incident, so a later breach on this surface
+  // is reported again instead of being suppressed as an unchanged message.
+  clearIncident(`${surface}-body-cap`);
   return Buffer.concat(
     chunks.map((chunk) => Buffer.from(chunk)),
     size,
@@ -179,14 +230,35 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
     stringValue(raw.mcp_info?.server_id) ??
     stringValue(raw.server_id);
   if (!name || !serverName) return undefined;
-  const inputSchema = asRecord(raw.inputSchema) ?? asRecord(raw.input_schema) ?? {};
+  const suppliedSchema = raw.inputSchema ?? raw.input_schema;
+  const inputSchema = asRecord(raw.inputSchema) ?? asRecord(raw.input_schema);
   return {
     name,
     server_name: serverName,
     server_id: stringValue(raw.mcp_info?.server_id) ?? stringValue(raw.server_id) ?? serverName,
     description: stringValue(raw.description) ?? name,
-    input_schema: inputSchema,
+    input_schema: inputSchema ?? {},
+    // Present but not an object: malformed, as distinct from absent.
+    ...(inputSchema === undefined && suppliedSchema !== undefined && suppliedSchema !== null
+      ? { input_schema_malformed: true }
+      : {}),
   };
+}
+
+/**
+ * A bounded, injection-safe label for an entry that normalization rejected. Such an entry may have
+ * no usable name at all, so fall back to a positional placeholder rather than echoing proxy text.
+ */
+function invalidToolLabel(value: unknown, index: number): string {
+  const raw = asRecord(value) as RawLiteLLMMcpTool | undefined;
+  const name = raw ? stringValue(raw.name) : undefined;
+  const server = raw
+    ? (stringValue(raw.mcp_info?.server_name) ?? stringValue(raw.server_name) ?? stringValue(raw.server_id))
+    : undefined;
+  if (name && server) return `${sanitizeName(server)}_${sanitizeName(name)}`;
+  if (name) return `unknown_server_${sanitizeName(name)}`;
+  if (server) return `${sanitizeName(server)}_unnamed`;
+  return `entry_${index}`;
 }
 
 export async function discoverMcpTools(
@@ -195,7 +267,7 @@ export async function discoverMcpTools(
   headers?: Record<string, string>,
   onProgress?: (message: string) => void,
   parentSignal?: AbortSignal,
-): Promise<LiteLLMMcpTool[]> {
+): Promise<McpDiscovery> {
   parentSignal?.throwIfAborted();
   onProgress?.("Discovering MCP tools from server...");
   const signal = parentSignal
@@ -219,9 +291,16 @@ export async function discoverMcpTools(
     const bodyRecord = asRecord(body);
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : [];
     onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
-    const tools = rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
-    onProgress?.(`Successfully discovered ${tools.length} MCP tools`);
-    return tools;
+    const tools: LiteLLMMcpTool[] = [];
+    const invalid: string[] = [];
+    // Every raw entry lands in exactly one bucket, so later counts reconcile back to `raw`.
+    rawTools.forEach((raw, index) => {
+      const tool = normalizeMcpTool(raw);
+      if (tool) tools.push(tool);
+      else invalid.push(invalidToolLabel(raw, index));
+    });
+    onProgress?.(`Normalized ${tools.length} of ${rawTools.length} raw MCP tools`);
+    return { raw: rawTools.length, tools, invalid };
   } catch (error) {
     onProgress?.("MCP tools discovery encountered an error");
     if (parentSignal?.aborted) throw parentSignal.reason;
@@ -316,10 +395,17 @@ function toolIdentity(tool: LiteLLMMcpTool): string {
   return `${tool.server_id ?? tool.server_name}\0${tool.server_name}\0${tool.name}`;
 }
 
-function buildPiToolName(tool: LiteLLMMcpTool, forceHash = false): string {
-  const base = `mcp_${sanitizeName(tool.server_name)}_${sanitizeName(tool.name)}`;
-  if (!forceHash && base.length <= MAX_TOOL_NAME_LENGTH) return base;
+/**
+ * Derives a Pi tool name from the tool's identity alone.
+ *
+ * The hash is unconditional so the name is a pure function of `server_id`/`server_name`/`name`.
+ * A conditional hash would make a survivor's name depend on which *other* tools happened to be in
+ * the same catalog, so adding or removing a sibling would rename it — and because Pi cannot
+ * unregister, the old name would linger and the model would see one tool twice.
+ */
+function buildPiToolName(tool: LiteLLMMcpTool): string {
   const hash = createHash("sha256").update(toolIdentity(tool)).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
+  const base = `mcp_${sanitizeName(tool.server_name)}_${sanitizeName(tool.name)}`;
   return `${base.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
 }
 
@@ -454,18 +540,29 @@ function hasValidSchemaShape(record: Record<string, unknown>): boolean {
   return !("items" in record) || isValidSchema(items) || isValidSchemaArray(items);
 }
 
-function buildParameters(
-  inputSchema: Record<string, unknown>,
-):
-  | { parameters: TSchema; syntheticArgsEnvelope: boolean }
-  | Extract<McpDropReason, "invalid-schema" | "unsupported-pattern"> {
+/** The extension-owned parameter shape. Nothing in it originates from the proxy. */
+function trustedEnvelope(): TSchema {
+  return Type.Object({
+    args: Type.Record(Type.String(), Type.Unknown(), { description: "Tool arguments as key-value pairs" }),
+  });
+}
+
+type BuiltParameters = {
+  parameters: TSchema;
+  syntheticArgsEnvelope: boolean;
+  /** Set when the proxy supplied a usable schema that we replaced with the trusted envelope. */
+  degraded?: McpDegradeReason;
+};
+
+function buildParameters(tool: LiteLLMMcpTool): BuiltParameters | McpDropReason {
+  // An `inputSchema` that was present but not a JSON object is a malformed tool, not a schemaless
+  // one, and must not be silently upgraded to the permissive envelope.
+  if (tool.input_schema_malformed) return "invalid-schema";
+  const inputSchema = tool.input_schema;
+  // Absent or empty schema: the proxy asked for no parameters, which the trusted envelope models
+  // exactly. This is the normal schemaless path, not a degradation.
   if (Object.keys(inputSchema).length === 0) {
-    return {
-      parameters: Type.Object({
-        args: Type.Record(Type.String(), Type.Unknown(), { description: "Tool arguments as key-value pairs" }),
-      }),
-      syntheticArgsEnvelope: true,
-    };
+    return { parameters: trustedEnvelope(), syntheticArgsEnvelope: true };
   }
   if (inputSchema.type !== "object") return "invalid-schema";
   let serialized: string;
@@ -478,26 +575,32 @@ function buildParameters(
     return "invalid-schema";
   }
   if (!hasValidSchemaShape(inputSchema)) return "invalid-schema";
-  if (findSchemaHazard(inputSchema) !== undefined) return "unsupported-pattern";
+  // Structurally fine, but we will only forward it if the whole graph is provably free of
+  // proxy-supplied regexes and unresolvable references. Otherwise the tool still registers, with
+  // the trusted envelope standing in for its schema.
+  if (findSchemaHazard(inputSchema) !== undefined) {
+    return { parameters: trustedEnvelope(), syntheticArgsEnvelope: true, degraded: "schema-envelope" };
+  }
   return { parameters: Type.Unsafe(inputSchema), syntheticArgsEnvelope: false };
 }
 
-export function prepareTools(tools: LiteLLMMcpTool[]): {
+export function prepareTools(discovery: McpDiscovery): {
   prepared: PreparedTool[];
   report: McpPreparationReport;
 } {
   const drops = new Map<McpDropReason, string[]>();
-  const recordDrop = (reason: McpDropReason, tool: LiteLLMMcpTool): void => {
-    const names = drops.get(reason) ?? [];
-    names.push(buildPiToolName(tool));
-    drops.set(reason, names);
+  const degrades = new Map<McpDegradeReason, string[]>();
+  const recordDrop = (reason: McpDropReason, label: string): void => {
+    drops.set(reason, [...(drops.get(reason) ?? []), label]);
   };
 
+  for (const label of discovery.invalid) recordDrop("invalid-tool", label);
+
   const unique = new Map<string, LiteLLMMcpTool>();
-  for (const tool of tools) {
+  for (const tool of discovery.tools) {
     const identity = toolIdentity(tool);
     if (unique.has(identity)) {
-      recordDrop("duplicate-identity", tool);
+      recordDrop("duplicate-identity", buildPiToolName(tool));
       continue;
     }
     unique.set(identity, tool);
@@ -505,52 +608,65 @@ export function prepareTools(tools: LiteLLMMcpTool[]): {
 
   const accepted: Array<Omit<PreparedTool, "name">> = [];
   for (const tool of unique.values()) {
-    const built = buildParameters(tool.input_schema);
+    const built = buildParameters(tool);
     if (typeof built === "string") {
-      recordDrop(built, tool);
+      recordDrop(built, buildPiToolName(tool));
       continue;
     }
-    accepted.push({ tool, ...built });
+    if (built.degraded) {
+      degrades.set(built.degraded, [...(degrades.get(built.degraded) ?? []), buildPiToolName(tool)]);
+    }
+    accepted.push({ tool, parameters: built.parameters, syntheticArgsEnvelope: built.syntheticArgsEnvelope });
   }
 
-  // The cap is applied before naming so a tool that never registers cannot force a hash suffix onto a survivor.
   const candidates = accepted.slice(0, MAX_REGISTERED_TOOLS);
-  const nameCounts = new Map<string, number>();
-  for (const candidate of candidates) {
-    const name = buildPiToolName(candidate.tool);
-    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-  }
   const finalNames = new Set<string>();
   const prepared: PreparedTool[] = [];
   for (const candidate of candidates) {
-    const ordinaryName = buildPiToolName(candidate.tool);
-    const name = buildPiToolName(candidate.tool, (nameCounts.get(ordinaryName) ?? 0) > 1);
+    // Membership-independent: the name depends only on this tool's identity.
+    const name = buildPiToolName(candidate.tool);
     if (finalNames.has(name)) {
-      recordDrop("name-collision", candidate.tool);
+      recordDrop("name-collision", name);
       continue;
     }
     finalNames.add(name);
     prepared.push({ ...candidate, name });
   }
 
+  const envelopedNames = degrades.get("schema-envelope") ?? [];
   return {
     prepared,
     report: {
-      discovered: tools.length,
+      discovered: discovery.raw,
       prepared: prepared.length,
+      enveloped: envelopedNames.length,
       overflow: accepted.length - candidates.length,
-      dropped: [...drops.entries()].map(([reason, tools_]) => ({ reason, tools: tools_ })),
+      dropped: [...drops.entries()].map(([reason, tools]) => ({ reason, tools })),
+      degraded: [...degrades.entries()].map(([reason, tools]) => ({ reason, tools })),
     },
   };
 }
 
 function emitPreparationDiagnostics(report: McpPreparationReport): void {
   const seen = new Set<string>();
-  for (const { reason, tools } of report.dropped) {
+  const emitClass = (reason: McpIncidentReason, message: string, tools: string[]): void => {
     seen.add(reason);
-    emitSafetyDiagnostic(
+    // Identity covers the full membership, so a change beyond the printed sample still re-reports.
+    emitSafetyDiagnostic(reason, message, `${tools.length}:${membershipIdentity(tools)}`);
+  };
+  for (const { reason, tools } of report.dropped) {
+    emitClass(
       reason,
       `dropped ${plural(tools.length, "MCP tool")} with ${DROP_REASON_TEXT[reason]}: ${sampleList(tools)}.`,
+      tools,
+    );
+  }
+  for (const { reason, tools } of report.degraded) {
+    emitClass(
+      reason,
+      `kept ${plural(tools.length, "MCP tool")} but replaced ${tools.length === 1 ? "its" : "their"} schema with a ` +
+        `safe args envelope, because of ${DEGRADE_REASON_TEXT[reason]}: ${sampleList(tools)}.`,
+      tools,
     );
   }
   if (report.overflow > 0) {
@@ -558,12 +674,13 @@ function emitPreparationDiagnostics(report: McpPreparationReport): void {
     emitSafetyDiagnostic(
       "tool-cap",
       `ignoring ${plural(report.overflow, "MCP tool")} beyond the ${MAX_REGISTERED_TOOLS}-tool limit.`,
+      `tool-cap:${report.overflow}`,
     );
   }
   // Clear classes that did not recur, so the same incident is reported again if it comes back
-  // after a clean refresh instead of being suppressed as an unchanged message.
-  for (const reason of [...Object.keys(DROP_REASON_TEXT), "tool-cap"]) {
-    if (!seen.has(reason)) lastEmittedIncident.delete(reason);
+  // after a clean refresh instead of being suppressed as an unchanged identity.
+  for (const reason of [...Object.keys(INCIDENT_REASON_TEXT), "tool-cap"]) {
+    if (!seen.has(reason)) clearIncident(reason);
   }
 }
 
@@ -571,28 +688,30 @@ export async function createMcpToolDefinitions(
   getAuth: (ctx?: ExtensionContext) => Promise<LiteLLMRuntimeAuth>,
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
-): Promise<ToolDefinition[]> {
+): Promise<{ definitions: ToolDefinition[]; report: McpPreparationReport }> {
   const discoveryAuth = await getAuth();
-  const tools = await discoverMcpTools(
+  const discovery = await discoverMcpTools(
     discoveryAuth.baseUrl,
     discoveryAuth.apiKey,
     discoveryAuth.headers,
     onProgress,
     signal,
   );
-  const { prepared, report } = prepareTools(tools);
+  const { prepared, report } = prepareTools(discovery);
   emitPreparationDiagnostics(report);
-  const droppedTotal = report.dropped.reduce((total, entry) => total + entry.tools.length, 0) + report.overflow;
-  const droppedDetail = [
+  const lostTotal = report.dropped.reduce((total, entry) => total + entry.tools.length, 0) + report.overflow;
+  const lostDetail = [
     ...report.dropped.map((entry) => `${entry.reason}=${entry.tools.length}`),
     ...(report.overflow > 0 ? [`tool-cap=${report.overflow}`] : []),
   ].join(", ");
+  // raw = prepared + lost, so an operator can always account for every entry the proxy returned.
   onProgress?.(
-    `Prepared ${report.prepared} of ${report.discovered} discovered MCP tools; dropped ${droppedTotal}` +
-      `${droppedDetail ? ` (${droppedDetail})` : ""}`,
+    `Prepared ${report.prepared} of ${report.discovered} raw MCP tools ` +
+      `(${report.enveloped} kept with a safe args envelope); lost ${lostTotal}` +
+      `${lostDetail ? ` (${lostDetail})` : ""}`,
   );
 
-  return prepared.map(({ tool: mcpTool, name, parameters, syntheticArgsEnvelope }) => {
+  const definitions = prepared.map(({ tool: mcpTool, name, parameters, syntheticArgsEnvelope }) => {
     const description = truncateUtf8(
       `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       MAX_DESCRIPTION_BYTES,
@@ -607,7 +726,7 @@ export async function createMcpToolDefinitions(
     // `label` and the `details` fields below are proxy-supplied, so they are bounded like every other
     // untrusted string that reaches Pi's UI or the model.
     const label = truncateUtf8(`${mcpTool.server_name}: ${mcpTool.name}`, MAX_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
-    const detail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
+    const boundedDetail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
 
     return defineTool({
       name,
@@ -633,12 +752,14 @@ export async function createMcpToolDefinitions(
         return {
           content: [{ type: "text", text }],
           details: {
-            server: detail(mcpTool.server_name),
-            serverId: mcpTool.server_id === undefined ? undefined : detail(mcpTool.server_id),
-            tool: detail(mcpTool.name),
+            server: boundedDetail(mcpTool.server_name),
+            serverId: boundedDetail(mcpTool.server_id ?? mcpTool.server_name),
+            tool: boundedDetail(mcpTool.name),
           },
         };
       },
     });
   });
+
+  return { definitions, report };
 }

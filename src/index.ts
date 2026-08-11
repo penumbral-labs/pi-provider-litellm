@@ -28,7 +28,7 @@ import {
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions, reportMcpRegistrationFailures } from "./mcp-tools.js";
+import { createMcpToolDefinitions, reportMcpEmptyCatalog, reportMcpRegistrationFatal } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -909,6 +909,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
+  // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
+  // never cleared, so a refusal is fatal for this extension instance rather than a per-tool or
+  // retryable condition. Once seen, stop attempting registration here; a reload creates a fresh
+  // instance with its own state, which starts clean on its own.
+  let mcpRegistrationFatal = false;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
@@ -967,7 +972,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   async function registerMcpTools(auth: LiteLLMRuntimeAuth, signal?: AbortSignal): Promise<void> {
-    if (!mcpEnabled || discoveryDisabledReason()) return;
+    if (!mcpEnabled || discoveryDisabledReason() || mcpRegistrationFatal) return;
     const identity = mcpCatalogIdentity(auth);
     while (mcpRegistration) {
       await waitForMcpRegistration(mcpRegistration, signal);
@@ -979,34 +984,39 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const registration = (async () => {
       try {
         signal?.throwIfAborted();
-        const tools = await createMcpToolDefinitions(
+        const { definitions, report } = await createMcpToolDefinitions(
           (ctx) => (ctx?.modelRegistry ? resolveDefaultRuntimeAuth(ctx) : Promise.resolve(auth)),
           isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
           signal,
         );
         signal?.throwIfAborted();
-        const failures: Array<{ tool: string; cause: unknown }> = [];
         let registered = 0;
-        for (const tool of tools) {
-          try {
-            pi.registerTool(tool);
+        try {
+          for (const definition of definitions) {
+            // Checked per tool so a cancelled refresh stops promptly instead of driving a full
+            // registry rebuild for every remaining tool.
+            signal?.throwIfAborted();
+            pi.registerTool(definition);
             registered += 1;
-          } catch (error) {
-            // `tool.name` is the generated, sanitized Pi name and `error` is Pi-authored, so neither
-            // the proxy's schema nor its response body can reach the diagnostic.
-            failures.push({ tool: tool.name, cause: error });
           }
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          // Fatal for this instance: report once, with a bounded Pi-authored cause and no proxy text,
+          // then stop retrying so a stale instance cannot churn discovery on every later refresh.
+          mcpRegistrationFatal = true;
+          reportMcpRegistrationFatal(registered, definitions.length, error);
+          return;
         }
-        reportMcpRegistrationFailures(failures, tools.length);
         if (isVerboseDiscovery()) {
           process.stderr.write(
-            `LiteLLM MCP: registered ${registered} of ${tools.length} prepared MCP tools (${failures.length} failed).\n`,
+            `LiteLLM MCP: registered ${registered} of ${definitions.length} prepared MCP tools ` +
+              `(${report.discovered} raw, ${report.enveloped} enveloped).\n`,
           );
         }
-        // Only a fully successful pass marks the identity as registered. Successful registrations are
-        // kept either way, and leaving the identity unset lets a later refresh with a fresh extension
-        // ctx retry the failures instead of skipping them for the rest of the session.
-        if (failures.length === 0) registeredMcpIdentity = identity;
+        // A catalog that produced nothing is not a settled catalog: leaving the identity unset lets a
+        // later refresh retry discovery, which is network-only and non-blocking.
+        if (definitions.length > 0) registeredMcpIdentity = identity;
+        else reportMcpEmptyCatalog(report.discovered);
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(
