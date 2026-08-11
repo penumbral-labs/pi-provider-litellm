@@ -5,6 +5,7 @@
 - This package is a Pi extension that registers a `litellm` provider from `src/index.ts`.
 - Source is TypeScript ESM under `src/`; tests are Vitest specs under `tests/`.
 - Build output is `dist/`; do not edit generated output by hand.
+- Adding a `src/` module means adding it to the `allowedPackageFiles` allowlist in `scripts/supply-chain-guard.ts` in the same commit, or `npm run prepublishOnly` fails.
 - The package entrypoint is `./dist/index.js`, and the Pi extension registration comes from `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 
@@ -24,7 +25,7 @@
 - The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Cache data is stored as `litellm-models.json` under the Pi agent dir with a keyed API-key fingerprint and a 24-hour stale refresh window.
+- Model catalogs are persisted by Pi in `~/.pi/agent/models-store.json`; this extension owns no model cache. `src/cache.ts` provides only `writeJsonAtomic`, used for the models.dev catalog. Legacy `litellm-models*.json` files are ignored and never deleted.
 
 ## LiteLLM Request Hooks
 
@@ -33,11 +34,21 @@
 - `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 
+## Protocols And Model Hosts
+
+- `src/protocols.ts` is the single place a protocol's request base URL shape is defined. Add a `LiteLLMApi` member there and in `createLiteLLMProtocolApis()`; its explicit `Record` return type makes a missing entry a typecheck failure.
+- `api` values arriving from user `models.json` are unconstrained. Narrow with `isLiteLLMApi` before calling `resolveModelBaseUrl`, which assumes its `api` is already in the registry.
+- `filterModels` must not throw: pi's `getAvailable()` has no per-provider isolation, so one throw empties every provider's model list. Reject a model by returning a reason and reporting it, never by throwing.
+- The fail-closed host invariant is split deliberately: `src/index.ts` resolves and validates the credential root, `src/provider.ts` compares a model against that root. Both use the shared `isPlaceholderHost`; keep placeholder and scheme rules in those helpers instead of re-deriving them.
+- Any host remembered across calls must be scoped to the credential it came from. An unscoped root outlives `/logout` and can send a new key to a previously authenticated host.
+- Keep README's "Model host enforcement" section in sync when changing what hides a model or what the diagnostics say.
+
 ## Compatibility Rules
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
 - Kimi/Moonshot-style models are handled in `buildCompat()`; keep regression tests with model discovery changes.
-- Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM.
+- `compat` is per-protocol. `supportsStore`, `maxTokensField`, and `cacheControlFormat` are OpenAI-completions-only; `supportsDeveloperRole` also applies to `openai-responses`, where it defaults to true and must be disabled for Moonshot routes. Return `undefined` when a protocol needs no compat rather than an empty object.
+- Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM on the completions path.
 
 ## Smoke And CI
 
