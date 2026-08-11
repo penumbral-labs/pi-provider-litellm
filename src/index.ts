@@ -14,12 +14,7 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import {
-  discoverModels,
-  isGpt55Model,
-  normalizeBaseUrl,
-  shouldSuppressReasoningContent,
-} from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
