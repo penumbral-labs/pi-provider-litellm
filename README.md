@@ -154,7 +154,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default |
-| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata and defaults |
+| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata (for ids that carry provider evidence) and defaults |
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
@@ -227,6 +227,31 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models*.json` files are ignored and are not deleted.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
+
+### Deployment groups
+
+One public `model_name` on a LiteLLM proxy may be load-balanced across several deployments with different backends, regions, or model versions. `/model/info` returns one row per deployment, and those rows are reduced into a single Pi model conservatively:
+
+- The Responses API is selected only when every deployment explicitly reports Responses mode; anything mixed or unknown uses Chat Completions.
+- A capability such as vision or reasoning is advertised only when every deployment resolves to `true`.
+- Context and output limits are the minimum across deployments.
+- Displayed prices are the maximum across deployments, and only when every deployment resolves that price field.
+
+### Metadata authority
+
+Catalog metadata (limits, pricing, modalities, reasoning levels) is adopted only from evidence the proxy actually reports — `litellm_params.model`, `model_info.base_model`, or the deployment's adapter. A public route name is not treated as backend evidence, because an operator can point any route at any model. Two consequences are visible in the model list:
+
+- When deployments disagree about which provider backs a route, catalog metadata is withheld for the whole group rather than guessed, and a one-line diagnostic naming the affected routes is written to stderr.
+- An unqualified or ambiguous id is left unknown instead of being matched against every provider catalog, which previously allowed a bare id such as `gpt-4o` to inherit another provider's limits and pricing.
+
+A model whose price evidence is incomplete is suffixed so unknown cost is never presented as free:
+
+| Suffix | Meaning |
+|---|---|
+| ` (incomplete metadata)` | A reduced `/model/info` group without complete price evidence. Its metadata is not re-derived from the model id when read back from the cache. |
+| ` (no metadata)` | An evidence-free `/v1/models` or `/health` model. Pi catalog metadata may be filled in later from the model id, including for cached entries. |
+
+Models restored from `models-store.json` while offline produce the same requests as they did immediately after discovery.
 
 ## Troubleshooting
 

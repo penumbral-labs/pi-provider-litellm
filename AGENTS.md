@@ -19,12 +19,22 @@
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; conservative deployment-group reduction lives in `src/model-groups.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
-- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
+- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json` for ids that carry provider evidence (a known prefix or `owned_by`); unqualified ids stay unknown instead of being matched against every provider catalog. Keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Cache data is stored as `litellm-models.json` under the Pi agent dir with a keyed API-key fingerprint and a 24-hour stale refresh window.
+
+## Deployment Groups And Metadata Authority
+
+- `/model/info` returns one row per deployment. Rows sharing a `model_name` are reduced by `reduceModelGroup` before any transport, capability, limit, price, or compatibility decision. Never shallow-merge them.
+- `reduceModelGroup` is pure and table-tested with an injected catalog resolver. Keep fetch, environment, clock, and provider scans out of it.
+- A public route name is not backend evidence. It may act as a catalog hint only when the group reduces to exactly one routable deployment, which is what the resolver's `singleton` argument means.
+- Model-name suffixes are a behavioral contract, not decoration. ` (no metadata)` marks evidence-free `/v1/models` and `/health` models and authorizes `enrichCachedModel` to re-derive catalog metadata from the model id. Reduced `/model/info` groups must use ` (incomplete metadata)` so cached reads cannot re-authorize withheld metadata. Adding a producer of either suffix is a contract change.
+- Discovery and offline rehydration must produce identical models; `tests/provider.test.ts` covers that round trip. A hand-built cached model is not a round-trip test.
+- Anthropic alias recognition derives from `catalogLookupIds` alone. Do not add a second alias pattern that can drift from it.
+- Withholding catalog authority is safe but invisible, so it emits a bounded stderr diagnostic that ignores `LITELLM_VERBOSE_DISCOVERY`. Keep such diagnostics to counts and public route ids.
 
 ## LiteLLM Request Hooks
 
