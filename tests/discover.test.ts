@@ -634,6 +634,11 @@ describe("discoverModels native Messages selection", () => {
             litellm_params: { model: "custom/claude-sonnet-4-6" },
           },
           {
+            model_name: "known-nonclaude-prefix",
+            model_info: { id: "known-prefix", mode: "chat" },
+            litellm_params: { model: "openai/claude-sonnet-4-6" },
+          },
+          {
             model_name: "missing-mode-claude",
             model_info: { id: "missing-mode", litellm_provider: "anthropic" },
             litellm_params: { model: "anthropic/claude-sonnet-4-6" },
@@ -719,6 +724,7 @@ describe("discoverModels native Messages selection", () => {
       ["bedrock-converse-claude", "anthropic-messages"],
       ["vertex-claude", "anthropic-messages"],
       ["custom-claude", "openai-completions"],
+      ["known-nonclaude-prefix", "openai-completions"],
       ["missing-mode-claude", "openai-completions"],
       ["bedrock-nova", "openai-completions"],
       ["bedrock-converse-llama", "openai-completions"],

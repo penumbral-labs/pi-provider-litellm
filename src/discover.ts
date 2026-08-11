@@ -237,7 +237,7 @@ function resolveClaudeBackendIdentity(
   const qualifiedClaude = candidates.some((candidate) => {
     if (!candidate.includes("/")) return false;
     const prefix = candidate.slice(0, candidate.indexOf("/")).trim().toLowerCase();
-    return adapterCatalogProvider(prefix) !== undefined && semanticFamily(candidate) === "claude";
+    return CLAUDE_CAPABLE_ADAPTERS.has(prefix) && semanticFamily(candidate) === "claude";
   });
   return qualifiedClaude ? { semanticFamily: "claude" } : undefined;
 }
