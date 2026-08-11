@@ -87,7 +87,9 @@ describe("discoverMcpTools", () => {
       .mockResolvedValueOnce(new Response("x".repeat(5 * 1024 * 1024 + 1), { status: 200 }));
 
     await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).rejects.toThrow("invalid JSON");
-    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).rejects.toThrow("exceeds 5 MiB");
+    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).rejects.toThrow(
+      "exceeds its 5242880-byte limit",
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -209,7 +211,7 @@ describe("executeMcpTool", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
       (_input, init) =>
         new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+          init?.signal?.addEventListener("abort", () => reject(new TypeError("fetch failed")), { once: true });
         }),
     );
 
@@ -226,6 +228,37 @@ describe("executeMcpTool", () => {
 
     await expect(execution).rejects.toBe(reason);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates the original reason when cancelled while reading the response body", async () => {
+    const controller = new AbortController();
+    const reason = new Error("tool cancelled after headers");
+    const encoder = new TextEncoder();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(encoder.encode('{"result":"partial'));
+          init?.signal?.addEventListener("abort", () => streamController.error(new TypeError("body read failed")), {
+            once: true,
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    });
+
+    const execution = executeMcpTool(
+      "https://litellm.example.com",
+      "sk-test",
+      "brave",
+      "search",
+      {},
+      undefined,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1));
+    controller.abort(reason);
+
+    await expect(execution).rejects.toBe(reason);
   });
 
   it("rejects response parse and MCP result errors", async () => {
@@ -247,6 +280,22 @@ describe("executeMcpTool", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("accepts an explicit null MCP error as success", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { error: null, result: "ok" }));
+
+    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).resolves.toBe(
+      JSON.stringify("ok", null, 2),
+    );
+  });
+
+  it("bounds tool-call bodies before parsing", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("x".repeat(5 * 1024 * 1024 + 1), { status: 200 }));
+
+    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
+      "MCP tool call response exceeds its 5242880-byte limit",
+    );
+  });
+
   it("attempts a malformed successful body exactly once", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
@@ -259,17 +308,116 @@ describe("executeMcpTool", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("truncates returned result text to 64 KiB with a marker", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "x".repeat(70 * 1024) }));
+  it("truncates returned result text to 64 KiB with a marker without splitting multibyte text", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "😀".repeat(20 * 1024) }));
 
     const text = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
 
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(64 * 1024);
     expect(text).toContain("[truncated by pi-provider-litellm]");
+    expect(text).not.toContain("�");
+  });
+
+  it.each([
+    { error: { message: "x".repeat(70 * 1024) } },
+    { result: { isError: true, content: [{ text: "x".repeat(70 * 1024) }] } },
+  ])("truncates MCP error text to 64 KiB", async (body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
+
+    const error = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}).catch(
+      (failure: unknown) => failure,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(Buffer.byteLength((error as Error).message)).toBeLessThanOrEqual(64 * 1024);
+    expect((error as Error).message).toContain("[truncated by pi-provider-litellm]");
+  });
+
+  it("bounds nested MCP error traversal", async () => {
+    let error: unknown = "too deep";
+    for (let depth = 0; depth < 100; depth += 1) error = [error];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { error }));
+
+    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
+      "MCP error",
+    );
   });
 });
 
 describe("createMcpToolDefinitions", () => {
+  it("emits each safety diagnostic once without leaking credentials or schema content", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitions } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const privateSchemaText = "private-schema-value";
+    const duplicate = {
+      name: "duplicate",
+      server_name: "server",
+      server_id: "server-id",
+      input_schema: { type: "object", properties: {} },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        duplicate,
+        duplicate,
+        {
+          name: "bad-one",
+          server_name: "server",
+          input_schema: { type: "object", properties: { secret: privateSchemaText } },
+        },
+        {
+          name: "bad-two",
+          server_name: "server",
+          input_schema: { type: "object", properties: { secret: "also-private" } },
+        },
+        ...Array.from({ length: 513 }, (_, index) => ({
+          name: `valid-${index}`,
+          server_name: "server",
+          input_schema: { type: "object", properties: {} },
+        })),
+      ]),
+    );
+
+    await createDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-secret-must-not-leak",
+    }));
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics.filter((message) => message.includes("duplicate MCP tool identity"))).toHaveLength(1);
+    expect(diagnostics.filter((message) => message.includes("invalid or oversized input schema"))).toHaveLength(1);
+    expect(diagnostics.filter((message) => message.includes("512-tool limit"))).toHaveLength(1);
+    expect(diagnostics.join("\n")).not.toContain("sk-secret-must-not-leak");
+    expect(diagnostics.join("\n")).not.toContain(privateSchemaText);
+    expect(diagnostics.join("\n")).not.toContain("also-private");
+  });
+
+  it("keeps final names stable when a collision partner falls beyond the tool cap", async () => {
+    const collidingTool = {
+      name: "search",
+      server_name: "shared",
+      input_schema: { type: "object", properties: {} },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { ...collidingTool, server_id: "server-one" },
+        ...Array.from({ length: 511 }, (_, index) => ({
+          name: `tool-${index}`,
+          server_name: "server",
+          input_schema: { type: "object", properties: {} },
+        })),
+        { ...collidingTool, server_id: "server-two" },
+      ]),
+    );
+
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions[0]?.name).toMatch(/^mcp_shared_search_[a-f0-9]{10}$/);
+  });
+
   it("caps registered tools after invalid entries are isolated", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
@@ -327,23 +475,25 @@ describe("createMcpToolDefinitions", () => {
   });
 
   it("uses unique bounded names across server IDs and deduplicates exact identities", async () => {
+    const longServerName = `shared-${"server".repeat(10)}`;
+    const longToolName = `search-${"tool".repeat(12)}`;
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
         {
-          name: "search",
-          server_name: "shared",
+          name: longToolName,
+          server_name: longServerName,
           server_id: "server-one",
           input_schema: { type: "object", properties: {} },
         },
         {
-          name: "search",
-          server_name: "shared",
+          name: longToolName,
+          server_name: longServerName,
           server_id: "server-two",
           input_schema: { type: "object", properties: {} },
         },
         {
-          name: "search",
-          server_name: "shared",
+          name: longToolName,
+          server_name: longServerName,
           server_id: "server-one",
           input_schema: { type: "object", properties: {} },
         },
@@ -371,6 +521,26 @@ describe("createMcpToolDefinitions", () => {
         { name: "valid", server_name: "schema", input_schema: { type: "object", properties: {} } },
         { name: "array-root", server_name: "schema", input_schema: { type: "array", items: {} } },
         { name: "array-properties", server_name: "schema", input_schema: { type: "object", properties: [] } },
+        {
+          name: "invalid-property",
+          server_name: "schema",
+          input_schema: { type: "object", properties: { query: "not-a-schema" } },
+        },
+        {
+          name: "nested-invalid-property",
+          server_name: "schema",
+          input_schema: { type: "object", properties: { query: { type: "object", properties: [] } } },
+        },
+        {
+          name: "invalid-required",
+          server_name: "schema",
+          input_schema: { type: "object", properties: {}, required: "query" },
+        },
+        {
+          name: "non-string-required",
+          server_name: "schema",
+          input_schema: { type: "object", properties: {}, required: ["query", 1] },
+        },
         { name: "deep", server_name: "schema", input_schema: tooDeep },
         {
           name: "large",
@@ -386,6 +556,32 @@ describe("createMcpToolDefinitions", () => {
     }));
 
     expect(definitions.map((tool) => tool.name)).toEqual(["mcp_schema_valid"]);
+  });
+
+  it("accepts schemas at the depth and size boundaries", async () => {
+    let acceptedDepth: Record<string, unknown> = { type: "string" };
+    for (let depth = 0; depth < 7; depth += 1) {
+      acceptedDepth = { type: "object", properties: { nested: acceptedDepth } };
+    }
+    const prefix = JSON.stringify({ type: "object", properties: { value: { description: "" } } }).length;
+    const acceptedSize = {
+      type: "object",
+      properties: { value: { description: "x".repeat(64 * 1024 - prefix) } },
+    };
+    expect(Buffer.byteLength(JSON.stringify(acceptedSize))).toBe(64 * 1024);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "depth-boundary", server_name: "schema", input_schema: acceptedDepth },
+        { name: "size-boundary", server_name: "schema", input_schema: acceptedSize },
+      ]),
+    );
+
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions.map((tool) => tool.name)).toEqual(["mcp_schema_depth_boundary", "mcp_schema_size_boundary"]);
   });
 
   it("truncates descriptions and prompt snippets to 4 KiB", async () => {
@@ -468,9 +664,9 @@ describe("createMcpToolDefinitions", () => {
     });
   });
 
-  it("unwraps only a synthetic args envelope", async () => {
+  it("unwraps a synthetic args envelope for an absent schema", async () => {
     vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse(200, [{ name: "unknown-schema", server_name: "server", input_schema: {} }]))
+      .mockResolvedValueOnce(jsonResponse(200, [{ name: "unknown-schema", server_name: "server" }]))
       .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
 
     const [definition] = await createMcpToolDefinitions(async () => ({
@@ -482,6 +678,22 @@ describe("createMcpToolDefinitions", () => {
     expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]).toMatchObject({
       body: JSON.stringify({ server_id: "server", name: "unknown-schema", arguments: { value: "unwrapped" } }),
     });
+  });
+
+  it("propagates definition-level execution failures", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(200, [
+          { name: "failure", server_name: "server", input_schema: { type: "object", properties: {} } },
+        ]),
+      )
+      .mockResolvedValueOnce(jsonResponse(500, { error: "failed" }));
+    const [definition] = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    await expect(definition?.execute("call-1", {}, undefined, undefined, {} as never)).rejects.toThrow("HTTP 500");
   });
 
   it("passes Pi cancellation through generated tool execution", async () => {

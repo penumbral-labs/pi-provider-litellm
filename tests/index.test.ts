@@ -329,6 +329,50 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
+  it("isolates MCP registration failures so valid sibling tools still register", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            { name: "bad", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    const registered: string[] = [];
+    pi.registerTool = (tool) => {
+      if (tool.name === "mcp_server_bad") throw new Error("definition rejected");
+      registered.push(tool.name);
+      pi.tools.push(tool);
+    };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await extension(pi);
+
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(registered).toContain("mcp_server_good");
+    expect(registered).not.toContain("mcp_server_bad");
+    expect(stderr).toHaveBeenCalledWith("LiteLLM (litellm): An MCP tool could not be registered.\n");
+    expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
+  });
+
   it("does not block model refresh on MCP discovery", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let mcpStarted!: () => void;
@@ -423,6 +467,7 @@ describe("extension startup", () => {
     controller.abort(reason);
 
     await expect(refresh).rejects.toBe(reason);
+    expect(pi.providers[0]?.getModels().map((model) => model.id)).toEqual(["fresh-model"]);
   });
 
   it("retains Pi-managed models when discovery fails", async () => {

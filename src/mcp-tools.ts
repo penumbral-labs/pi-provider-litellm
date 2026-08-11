@@ -8,6 +8,7 @@ import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
 const LIST_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
 const MAX_DISCOVERY_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_CALL_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTERED_TOOLS = 512;
 const MAX_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_SCHEMA_BYTES = 64 * 1024;
@@ -33,9 +34,9 @@ interface RawLiteLLMMcpTool {
 
 interface PreparedTool {
   tool: LiteLLMMcpTool;
+  name: string;
   parameters: TSchema;
   syntheticArgsEnvelope: boolean;
-  identity: string;
 }
 
 const emittedDiagnostics = new Set<string>();
@@ -80,7 +81,7 @@ async function readBoundedText(response: Response, limit: number, surface: strin
       if (size > limit) {
         await reader.cancel();
         emitSafetyDiagnostic(`${surface}-body-cap`, `${surface} response exceeded its ${limit}-byte limit.`);
-        throw new Error(`${surface} response exceeds 5 MiB`);
+        throw new Error(`${surface} response exceeds its ${limit}-byte limit`);
       }
       chunks.push(value);
     }
@@ -161,18 +162,34 @@ export async function discoverMcpTools(
   }
 }
 
-function mcpErrorMessage(value: unknown): string | undefined {
+function mcpErrorMessage(value: unknown, depth = 0): string | undefined {
+  if (depth > MAX_SCHEMA_DEPTH) return undefined;
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
-    return value.map(mcpErrorMessage).find((message): message is string => message !== undefined);
+    for (const entry of value) {
+      const message = mcpErrorMessage(entry, depth + 1);
+      if (message !== undefined) return message;
+    }
+    return undefined;
   }
   const record = asRecord(value);
-  return stringValue(record?.message) ?? stringValue(record?.error) ?? stringValue(record?.text);
+  if (!record) return undefined;
+  return (
+    stringValue(record.message) ??
+    (record.error !== value ? mcpErrorMessage(record.error, depth + 1) : undefined) ??
+    stringValue(record.text)
+  );
 }
 
 function serializeResult(value: unknown): string {
   const serialized = JSON.stringify(value, null, 2) ?? "null";
   return truncateUtf8(serialized, MAX_RESULT_BYTES, TRUNCATION_MARKER);
+}
+
+function mcpCallError(serverId: string, toolName: string, detail: string): Error {
+  return new Error(
+    truncateUtf8(`Error calling ${toolName} on ${serverId}: ${detail}`, MAX_RESULT_BYTES, TRUNCATION_MARKER),
+  );
 }
 
 export async function executeMcpTool(
@@ -200,29 +217,24 @@ export async function executeMcpTool(
       body: JSON.stringify({ server_id: serverId, name: toolName, arguments: args }),
       signal,
     });
+    if (!response.ok) throw mcpCallError(serverId, toolName, `HTTP ${response.status}`);
+    const body = parseJson(await readBoundedText(response, MAX_CALL_BODY_BYTES, "MCP tool call"), "MCP tool call");
+    const bodyRecord = asRecord(body);
+    if (bodyRecord?.error != null) {
+      throw mcpCallError(serverId, toolName, mcpErrorMessage(bodyRecord.error) ?? "MCP error");
+    }
+    const result = bodyRecord && "result" in bodyRecord ? bodyRecord.result : body;
+    const resultRecord = asRecord(result);
+    if (resultRecord?.isError === true || bodyRecord?.isError === true) {
+      const message =
+        mcpErrorMessage(resultRecord?.content ?? bodyRecord?.content ?? result) ?? serializeResult(result);
+      throw mcpCallError(serverId, toolName, message);
+    }
+    return serializeResult(result);
   } catch (error) {
     if (parentSignal?.aborted) throw parentSignal.reason;
     throw error;
   }
-  if (!response.ok) throw new Error(`Error calling ${toolName} on ${serverId}: HTTP ${response.status}`);
-
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error(`Error calling ${toolName} on ${serverId}: invalid JSON response`);
-  }
-  const bodyRecord = asRecord(body);
-  if (bodyRecord && "error" in bodyRecord) {
-    throw new Error(`Error calling ${toolName} on ${serverId}: ${mcpErrorMessage(bodyRecord.error) ?? "MCP error"}`);
-  }
-  const result = bodyRecord && "result" in bodyRecord ? bodyRecord.result : body;
-  const resultRecord = asRecord(result);
-  if (resultRecord?.isError === true || bodyRecord?.isError === true) {
-    const message = mcpErrorMessage(resultRecord?.content ?? bodyRecord?.content ?? result) ?? serializeResult(result);
-    throw new Error(`Error calling ${toolName} on ${serverId}: ${message}`);
-  }
-  return serializeResult(result);
 }
 
 function sanitizeName(name: string): string {
@@ -251,6 +263,28 @@ function schemaDepth(value: unknown, depth = 0): number {
   return values.reduce((maximum, child) => Math.max(maximum, schemaDepth(child, depth + 1)), depth);
 }
 
+function hasValidSchemaShape(value: unknown): boolean {
+  if (Array.isArray(value)) return value.every(hasValidSchemaShape);
+  const record = asRecord(value);
+  if (!record) return true;
+  if (
+    "required" in record &&
+    (!Array.isArray(record.required) || !record.required.every((item) => typeof item === "string"))
+  ) {
+    return false;
+  }
+  if ("properties" in record) {
+    const properties = asRecord(record.properties);
+    if (
+      !properties ||
+      !Object.values(properties).every((property) => asRecord(property) && hasValidSchemaShape(property))
+    ) {
+      return false;
+    }
+  }
+  return Object.values(record).every(hasValidSchemaShape);
+}
+
 function buildParameters(
   inputSchema: Record<string, unknown>,
 ): { parameters: TSchema; syntheticArgsEnvelope: boolean } | undefined {
@@ -263,14 +297,19 @@ function buildParameters(
     };
   }
   if (inputSchema.type !== "object") return undefined;
-  if ("properties" in inputSchema && !asRecord(inputSchema.properties)) return undefined;
   let serialized: string;
   try {
     serialized = JSON.stringify(inputSchema);
   } catch {
     return undefined;
   }
-  if (byteLength(serialized) > MAX_SCHEMA_BYTES || schemaDepth(inputSchema) > MAX_SCHEMA_DEPTH) return undefined;
+  if (
+    byteLength(serialized) > MAX_SCHEMA_BYTES ||
+    schemaDepth(inputSchema) > MAX_SCHEMA_DEPTH ||
+    !hasValidSchemaShape(inputSchema)
+  ) {
+    return undefined;
+  }
   return { parameters: Type.Unsafe(inputSchema), syntheticArgsEnvelope: false };
 }
 
@@ -285,14 +324,14 @@ function prepareTools(tools: LiteLLMMcpTool[]): PreparedTool[] {
     unique.set(identity, tool);
   }
 
-  const candidates: PreparedTool[] = [];
-  for (const [identity, tool] of unique) {
+  const candidates: Array<Omit<PreparedTool, "name">> = [];
+  for (const tool of unique.values()) {
     const built = buildParameters(tool.input_schema);
     if (!built) {
       emitSafetyDiagnostic("invalid-schema", "Ignored an MCP tool with an invalid or oversized input schema.");
       continue;
     }
-    candidates.push({ tool, identity, ...built });
+    candidates.push({ tool, ...built });
   }
 
   const nameCounts = new Map<string, number>();
@@ -301,16 +340,18 @@ function prepareTools(tools: LiteLLMMcpTool[]): PreparedTool[] {
     nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
   }
   const finalNames = new Set<string>();
-  return candidates.filter((candidate) => {
+  const prepared: PreparedTool[] = [];
+  for (const candidate of candidates) {
     const ordinaryName = buildPiToolName(candidate.tool);
     const name = buildPiToolName(candidate.tool, (nameCounts.get(ordinaryName) ?? 0) > 1);
     if (finalNames.has(name)) {
       emitSafetyDiagnostic("name-collision", "Ignored an MCP tool whose generated Pi name collided.");
-      return false;
+      continue;
     }
     finalNames.add(name);
-    return true;
-  });
+    prepared.push({ ...candidate, name });
+  }
+  return prepared;
 }
 
 export async function createMcpToolDefinitions(
@@ -334,15 +375,8 @@ export async function createMcpToolDefinitions(
     );
   }
   const prepared = normalizedTools.slice(0, MAX_REGISTERED_TOOLS);
-  const nameCounts = new Map<string, number>();
-  for (const candidate of prepared) {
-    const name = buildPiToolName(candidate.tool);
-    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-  }
 
-  return prepared.map(({ tool: mcpTool, parameters, syntheticArgsEnvelope }) => {
-    const ordinaryName = buildPiToolName(mcpTool);
-    const name = buildPiToolName(mcpTool, (nameCounts.get(ordinaryName) ?? 0) > 1);
+  return prepared.map(({ tool: mcpTool, name, parameters, syntheticArgsEnvelope }) => {
     const description = truncateUtf8(
       `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       MAX_DESCRIPTION_BYTES,

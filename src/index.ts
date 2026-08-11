@@ -985,7 +985,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
         );
         signal?.throwIfAborted();
-        for (const tool of tools) pi.registerTool(tool);
+        for (const tool of tools) {
+          try {
+            pi.registerTool(tool);
+          } catch {
+            process.stderr.write(`LiteLLM (${PROVIDER_NAME}): An MCP tool could not be registered.\n`);
+          }
+        }
         registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
