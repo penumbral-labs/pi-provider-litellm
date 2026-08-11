@@ -17,7 +17,18 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
-  resolveCredentialRoot?: (credential?: Credential, requestBaseUrl?: string) => string | undefined;
+  /**
+   * Resolves the proxy root the given request/credential must target.
+   *
+   * `apiKey` identifies the resolved credential on request paths, where no
+   * `Credential` is available; implementations use it to scope any remembered
+   * root to the credential it came from.
+   */
+  resolveCredentialRoot?: (request: {
+    credential?: Credential;
+    requestBaseUrl?: string;
+    apiKey?: string;
+  }) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
@@ -102,6 +113,16 @@ function requestModel(
   return { ...model, provider, baseUrl: resolveModelBaseUrl(active.root, model.api) };
 }
 
+function requestRoot(
+  options: LiteLLMProviderOptions,
+  requestOptions: { apiKey?: string; env?: Record<string, string> } | undefined,
+): string | undefined {
+  return options.resolveCredentialRoot?.({
+    requestBaseUrl: requestOptions?.env?.LITELLM_BASE_URL,
+    apiKey: requestOptions?.apiKey,
+  });
+}
+
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
   const reportedAvailabilityDiagnostics = new Set<string>();
   const reportOnce = (message: string): void => {
@@ -123,7 +144,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     filterModels(models, credential) {
       let active: { root: string; host: string };
       try {
-        const root = options.resolveCredentialRoot?.(credential);
+        const root = options.resolveCredentialRoot?.({ credential });
         if (!root) {
           // Staying silent here hid the single most common misconfiguration, but
           // an unconfigured install has no models and nothing to explain.
@@ -157,22 +178,10 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   const guardedProvider: Provider<LiteLLMApi> = {
     ...provider,
     stream: <T extends LiteLLMApi>(model: Model<T>, context: Context, requestOptions?: ApiStreamOptions<T>) =>
-      provider.stream(
-        requestModel(
-          options.id,
-          model,
-          options.resolveCredentialRoot?.(undefined, requestOptions?.env?.LITELLM_BASE_URL),
-        ),
-        context,
-        requestOptions,
-      ),
+      provider.stream(requestModel(options.id, model, requestRoot(options, requestOptions)), context, requestOptions),
     streamSimple: (model: Model<LiteLLMApi>, context: Context, requestOptions?: SimpleStreamOptions) =>
       provider.streamSimple(
-        requestModel(
-          options.id,
-          model,
-          options.resolveCredentialRoot?.(undefined, requestOptions?.env?.LITELLM_BASE_URL),
-        ),
+        requestModel(options.id, model, requestRoot(options, requestOptions)),
         context,
         requestOptions,
       ),

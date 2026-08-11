@@ -126,7 +126,7 @@ function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[
     baseUrl: "https://proxy.example/v1",
     auth,
     discover: vi.fn(async () => discovered("fresh")),
-    resolveCredentialRoot: (_credential, requestBaseUrl) => requestBaseUrl ?? "https://proxy.example",
+    resolveCredentialRoot: ({ requestBaseUrl }) => requestBaseUrl ?? "https://proxy.example",
     ...overrides,
   });
 }

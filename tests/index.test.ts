@@ -843,12 +843,14 @@ describe("extension startup", () => {
     };
     const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
     models.setProvider(provider);
+    // Stored without the /v1 suffix so the asserted URL can only be produced by
+    // the guard reprojecting through the protocol registry.
     const model = {
       id: "oauth-model",
       name: "OAuth model",
       provider: "litellm",
       api: "openai-completions" as const,
-      baseUrl: "https://credential.example.com/v1",
+      baseUrl: "https://credential.example.com",
       reasoning: false,
       input: ["text"] as ("text" | "image")[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -860,6 +862,73 @@ describe("extension startup", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
+  });
+
+  it("does not pin api-key requests to a previously authenticated OAuth host", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://environment.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const model = {
+      id: "shared-model",
+      name: "Shared model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+    const completeWith = async (credential: Credential, baseUrl: string) => {
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(provider.id, async () => credential);
+      const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+      models.setProvider(provider);
+      return models.complete({ ...model, baseUrl }, { messages: [] });
+    };
+
+    // First authenticate via SSO, which is what makes the extension remember a
+    // runtime host at all.
+    await completeWith(
+      {
+        type: "oauth",
+        access: "sk-oauth",
+        refresh: "",
+        expires: Number.MAX_SAFE_INTEGER,
+        baseUrl: "https://sso.example.com",
+      },
+      "https://sso.example.com/v1",
+    );
+    // Then switch to an api key for a different proxy, as /logout followed by
+    // env-based auth does, without reloading the extension.
+    const switched = await completeWith(
+      { type: "api_key", key: "sk-second", env: { LITELLM_BASE_URL: "https://second.example.com" } },
+      "https://second.example.com/v1",
+    );
+
+    expect(switched.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual([
+      "https://sso.example.com/v1/chat/completions",
+      "https://second.example.com/v1/chat/completions",
+    ]);
   });
 
   it("registers unconfigured when the configured base URL is invalid", async () => {
