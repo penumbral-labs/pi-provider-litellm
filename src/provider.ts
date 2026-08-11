@@ -11,7 +11,7 @@ import {
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
 import {
   createLiteLLMProtocolApis,
-  isLiteLLMApi,
+  isSelectableLiteLLMApi,
   resolveModelBaseUrl,
   SELECTABLE_LITELLM_API_NAMES,
 } from "./protocols.js";
@@ -82,7 +82,7 @@ function activeCredentialRoot(root: string): { root: string; host: string } {
 // bounds for models that came from user models.json config rather than from our
 // own discovery.
 function modelError(model: Model<LiteLLMApi>, activeHost: string): Error | undefined {
-  if (!isLiteLLMApi(model.api)) {
+  if (!isSelectableLiteLLMApi(model.api)) {
     return new Error(
       `LiteLLM model ${model.id} declares unsupported protocol "${model.api}"; ` +
         `set "api" to one of ${SELECTABLE_LITELLM_API_NAMES.join(", ")} in models.json`,

@@ -45,6 +45,15 @@ export function isLiteLLMApi(api: string): api is LiteLLMApi {
   return Object.hasOwn(LITELLM_PROTOCOLS, api);
 }
 
+// Stricter than isLiteLLMApi: a protocol this provider implements but discovery
+// cannot select is not something we can govern end to end, because Pi dispatches a
+// model whose api matches none of our listed models without routing through this
+// provider. Refusing to list such a model keeps the catalog honest about what the
+// host guard actually covers.
+export function isSelectableLiteLLMApi(api: string): api is LiteLLMApi {
+  return isLiteLLMApi(api) && LITELLM_PROTOCOLS[api].selectable;
+}
+
 export function resolveModelBaseUrl(baseUrl: string, api: LiteLLMApi): string {
   return LITELLM_PROTOCOLS[api].modelBaseUrl(normalizeBaseUrl(baseUrl));
 }

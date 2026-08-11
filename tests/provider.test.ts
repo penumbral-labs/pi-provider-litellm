@@ -9,6 +9,7 @@ import {
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { createLiteLLMProtocolApis } from "../src/protocols.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, ModelProtocol } from "../src/types.js";
 
@@ -322,13 +323,29 @@ describe("createLiteLLMProvider", () => {
     const baseModel = discovered("model").models[0];
     const models = toNativeModels("litellm", "https://proxy.example", [
       baseModel,
-      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
+      { ...baseModel, id: "responses", api: "openai-responses", compat: {} },
     ]);
 
     expect(value.filterModels?.(models, credential).map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
       { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
-      { api: "anthropic-messages", baseUrl: "https://proxy.example" },
+      { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
     ]);
+  });
+
+  it("does not list a protocol discovery cannot select", () => {
+    // Pi dispatches a model whose api matches none of our listed models without
+    // routing through this provider, so we cannot govern its host. Listing it would
+    // imply a guarantee the guard does not provide.
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "https://proxy.example", [
+      baseModel,
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: undefined },
+    ]);
+
+    expect(value.filterModels?.(models, credential).map((model) => model.id)).toEqual(["model"]);
+    expect(String(stderr.mock.calls.at(-1)?.[0])).toContain('declares unsupported protocol "anthropic-messages"');
   });
 
   it("derives the request base from the active root, not the cached model path", () => {
@@ -579,18 +596,38 @@ describe("createLiteLLMProvider", () => {
     expect(apiSpies.anthropic).not.toHaveBeenCalled();
   });
 
-  it("routes Messages models through the Anthropic API", () => {
-    apiSpies.anthropic.mockReturnValueOnce({});
+  it("maps the Messages protocol to the bare proxy root in the registry", () => {
+    // The registry entry stays correct and wired even though discovery cannot select
+    // it: the Anthropic API appends /v1/messages to the base URL itself.
     const messagesModel = toNativeModels("litellm", "https://proxy.example/v1/", [
-      { ...discovered("messages").models[0], api: "anthropic-messages", compat: {} },
+      { ...discovered("messages").models[0], api: "anthropic-messages", compat: undefined },
+    ])[0];
+
+    expect(messagesModel.baseUrl).toBe("https://proxy.example");
+    expect(Object.keys(createLiteLLMProtocolApis())).toContain("anthropic-messages");
+  });
+
+  it("rejects a non-selectable protocol on stream and streamSimple before dispatch", () => {
+    const messagesModel = toNativeModels("litellm", "https://proxy.example/v1/", [
+      { ...discovered("messages").models[0], api: "anthropic-messages", compat: undefined },
     ])[0];
     const value = controller();
 
-    value.stream(messagesModel, { messages: [] });
-
-    expect(messagesModel.baseUrl).toBe("https://proxy.example");
-    expect(apiSpies.anthropic).toHaveBeenCalledOnce();
+    expect(() => value.stream(messagesModel, { messages: [] })).toThrow(/declares unsupported protocol/);
+    expect(() => value.streamSimple(messagesModel, { messages: [] })).toThrow(/declares unsupported protocol/);
+    expect(apiSpies.anthropic).not.toHaveBeenCalled();
     expect(apiSpies.completions).not.toHaveBeenCalled();
     expect(apiSpies.responses).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale-host model on stream and streamSimple before dispatch", () => {
+    // The direct-id and session-restore paths reach stream without passing through
+    // filterModels, so the guard has to reject there too, not only in the listing.
+    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
+    const stale = { ...native("stale"), baseUrl: "https://stale.example/v1" };
+
+    expect(() => value.stream(stale, { messages: [] })).toThrow(/stale LiteLLM model host/);
+    expect(() => value.streamSimple(stale, { messages: [] })).toThrow(/stale LiteLLM model host/);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 });

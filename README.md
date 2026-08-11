@@ -232,7 +232,16 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 
 Models this provider dispatches are sent to the host the active credential resolves to. A model that cannot be matched to that host is hidden from `/model` rather than requested, and its request URL is derived from the credential's root rather than from whatever base URL the model carries.
 
-**Scope.** The guarantee covers models this provider streams, which is the models discovery produced and any `models.json` model whose `api` matches one of theirs. It is not a guarantee about every model Pi can name. Pi routes a model to this provider only when the provider already lists a model using the same `api`; a `models.json` entry with an otherwise-unused `api` is hidden from `/model` but, if selected by id or restored from a saved session, is streamed by Pi directly at its configured `baseUrl`. Do not rely on this enforcement to contain a hand-written custom-API entry.
+Two separate mechanisms are involved, and they are worth keeping apart: **model-list filtering** decides what `/model` offers, and the **dispatch-time guard** decides whether a request is allowed once a model has been chosen. Choosing a model by id, or restoring one from a saved session, skips the filtering and reaches the guard directly.
+
+| Model | Offered in `/model` | Dispatch |
+|---|---|---|
+| Protocol discovery selects, host matches the credential | yes | sent to the credential's host, with the URL derived from that host |
+| Protocol discovery selects, host differs — stale cache, switched proxy | no | rejected before any request, including by id or session restore |
+| Protocol this provider implements but discovery cannot select (`anthropic-messages`) | no | **not contained** — see below |
+| `api` this provider does not implement | no | **not contained** — see below |
+
+**Known gap for the last two rows.** Pi routes a model to a provider only when that provider already lists a model using the same `api`. For an `api` with no discovered models, Pi dispatches through its global API registry without calling this provider, so the guard never runs and the request goes to whatever `baseUrl` the entry configures, carrying this provider's credentials. Such a model is kept out of `/model`, and it is rejected if it ever does reach this provider, but neither prevents a direct or session-restored dispatch. Closing it requires a change in Pi — routing by the provider's declared protocols rather than by its current model list. Until then, do not point a `models.json` LiteLLM entry at a host you do not intend to receive your proxy credentials.
 
 A model is dropped when:
 
@@ -259,11 +268,11 @@ Discovery maps each model to a request protocol and derives its request URL from
 | `openai-completions` | `<root>/v1` | default for chat-style routes |
 | `openai-responses` | `<root>/v1` | `/model/info` reports `mode: "responses"` |
 
-A model whose `api` is set to anything else in `~/.pi/agent/models.json` is dropped with a diagnostic naming the supported values.
+A model in `~/.pi/agent/models.json` whose `api` is anything other than these two is kept out of `/model` and rejected if it reaches this provider, with a diagnostic naming the supported values.
 
-An `anthropic-messages` request path exists internally, but discovery never selects it and it is not supported for configuration yet. Do not set it in `models.json`: because no discovered model shares that `api`, Pi streams such an entry outside this provider, so it escapes the host enforcement above and is sent to whatever `baseUrl` the entry names — while still appearing in `/model` as though it were governed. Native Messages support is separate work.
+An `anthropic-messages` request path exists internally — it maps to the bare proxy root, because the Anthropic API appends `/v1/messages` itself — but discovery never selects it and it is not supported for configuration. Setting it in `models.json` is unsafe for the reason given under [Model host enforcement](#model-host-enforcement), not merely unsupported. Native Messages support is separate work.
 
-For models this provider dispatches, a per-model `baseUrl` in `models.json` is not honored as a request target — it is re-derived from the active credential host, and the model is dropped when its host differs.
+For models this provider dispatches, a per-model `baseUrl` in `models.json` is not honored as a request target — it is re-derived from the active credential host, and the model is rejected when its host differs.
 
 ## Troubleshooting
 
