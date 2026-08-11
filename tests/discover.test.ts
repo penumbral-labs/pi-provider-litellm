@@ -1054,6 +1054,40 @@ describe("discoverModels response-mode models", () => {
     expect(result.models[0]?.api).toBe("openai-completions");
   });
 
+  it("removes native adaptive-thinking compat when /health downgrades Claude to Chat", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, { healthy_endpoints: [{ model: "claude-opus-5", model_id: "uuid-1" }] });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-opus-5",
+              model_info: { mode: "chat", litellm_provider: "bedrock_converse" },
+              litellm_params: { model: "bedrock/us.anthropic.claude-opus-5" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "claude-opus-5",
+      api: "openai-completions",
+      compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("forceAdaptiveThinking");
+  });
+
   it("keeps authoritative Chat compatibility when /health downgrades protocol selection", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);

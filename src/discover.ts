@@ -539,12 +539,14 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
   if (model.api === "openai-completions") return model;
+  const sourceApi = model.api;
+  const downgradedCompat = sourceApi === "anthropic-messages" ? undefined : model.compat;
   return {
     ...model,
     api: "openai-completions",
     compat: {
-      ...buildCompat(model.id, "openai-completions", model.api === "anthropic-messages" ? "claude" : undefined),
-      ...model.compat,
+      ...buildCompat(model.id, "openai-completions", sourceApi === "anthropic-messages" ? "claude" : undefined),
+      ...downgradedCompat,
     },
   };
 }
