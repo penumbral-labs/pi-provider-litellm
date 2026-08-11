@@ -289,7 +289,7 @@ describe("discoverModels via /model/info", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "custom-model",
-      name: "custom-model (no metadata)",
+      name: "custom-model (incomplete metadata)",
       contextWindow: 128000,
       maxTokens: 8192,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -334,7 +334,7 @@ describe("discoverModels via /model/info", () => {
       expect(result.models).toEqual([
         expect.objectContaining({
           id: "shared-route",
-          name: "shared-route (no metadata)",
+          name: "shared-route (incomplete metadata)",
           reasoning: false,
           input: ["text"],
           contextWindow: 64000,
@@ -412,7 +412,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      name: "openai/gpt-5.5 (no metadata)",
+      name: "openai/gpt-5.5 (incomplete metadata)",
       reasoning: false,
       input: ["text"],
       contextWindow: 128_000,
