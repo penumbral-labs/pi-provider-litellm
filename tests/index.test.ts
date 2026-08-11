@@ -295,6 +295,7 @@ describe("extension startup", () => {
   it("restores same-host Pi-managed models offline with protocol projection", async () => {
     process.env.LITELLM_OFFLINE = "1";
     process.env.LITELLM_BASE_URL = "https://proxy.test/v1";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
     await extension(pi);
@@ -321,6 +322,7 @@ describe("extension startup", () => {
       store: createModelsStore([stored]),
     });
 
+    expect(pi.providers[0]?.getModels()).toEqual([stored]);
     expect(
       pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
         type: "api_key",
@@ -328,6 +330,7 @@ describe("extension startup", () => {
         env: { LITELLM_BASE_URL: "https://proxy.test/v1" },
       }),
     ).toEqual([stored]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("ignores legacy cache files without deleting them", async () => {
