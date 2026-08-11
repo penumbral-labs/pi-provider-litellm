@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk } from "./helpers.js";
+import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -77,6 +77,87 @@ describe("native provider stream compatibility", () => {
       .result();
 
     expect(message.content).toContainEqual({ type: "toolCall", id: "call_1", name: "add", arguments: { a: 714 } });
+  });
+
+  it.each([
+    {
+      name: "Kimi K2.6 binary thinking",
+      backend: "moonshot/kimi-k2.6",
+      params: ["thinking"],
+      reasoning: "high" as const,
+      expected: { thinking: { type: "enabled" } },
+      absent: ["reasoning_effort"],
+    },
+    {
+      name: "Kimi K3 effort",
+      backend: "moonshot/kimi-k3",
+      params: ["reasoning_effort"],
+      reasoning: "max" as const,
+      expected: { reasoning_effort: "max" },
+      absent: ["thinking", "include_reasoning", "reasoning_content", "merge_reasoning_content_in_choices"],
+    },
+    {
+      name: "DeepSeek V4 native controls",
+      backend: "deepseek/deepseek-v4",
+      params: ["thinking", "reasoning_effort"],
+      reasoning: "max" as const,
+      expected: { thinking: { type: "enabled" }, reasoning_effort: "max" },
+      absent: [],
+    },
+    {
+      name: "Azure Foundry DeepSeek effort only",
+      backend: "azure_ai/deepseek-v4",
+      params: ["reasoning_effort"],
+      reasoning: "high" as const,
+      expected: { reasoning_effort: "high" },
+      absent: ["thinking"],
+    },
+  ])("serializes $name from discovered policy", async ({ backend, params, reasoning, expected, absent }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "evidence-route",
+        litellm_params: { model: backend, allowed_openai_params: params },
+        model_info: { id: "deployment", mode: "chat" },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning }).result();
+
+    expect(requests[0]).toMatchObject(expected);
+    for (const field of absent) expect(requests[0]).not.toHaveProperty(field);
+  });
+
+  it("serializes disabled Kimi K2.6 as binary thinking off", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "binary-route",
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+        model_info: { id: "deployment", mode: "chat", supported_openai_params: ["thinking"] },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }).result();
+
+    expect(requests[0]).toMatchObject({ thinking: { type: "disabled" } });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("omits unsupported controls for Kimi K2.7 Code", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "code-route",
+        litellm_params: { model: "moonshot/kimi-k2.7-code" },
+        model_info: { id: "deployment", mode: "chat", supported_openai_params: ["thinking"] },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
   });
 
   it("handles thinking and a tool result across turns", async () => {

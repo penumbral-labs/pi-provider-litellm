@@ -11,6 +11,7 @@ import {
   effectiveDeploymentCount,
   reduceModelGroup,
   type SemanticFamily,
+  type SemanticModel,
 } from "./model-groups.js";
 import type {
   DiscoveredModel,
@@ -89,9 +90,10 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
 export function buildCompat(
   modelId: string,
   api: DiscoveredModel["api"] = "openai-completions",
+  semantic?: SemanticFamily,
 ): DiscoveredModel["compat"] {
   if (api === "openai-responses") return {};
-  if (isMoonshotModel(modelId)) {
+  if (semantic === "kimi" || (semantic === undefined && isMoonshotModel(modelId))) {
     return {
       supportsStore: false,
       supportsDeveloperRole: false,
@@ -100,7 +102,7 @@ export function buildCompat(
       maxTokensField: "max_tokens",
     };
   }
-  if (ANTHROPIC_MODEL_PATTERN.test(modelId)) {
+  if (semantic === "claude" || (semantic === undefined && ANTHROPIC_MODEL_PATTERN.test(modelId))) {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
@@ -193,6 +195,17 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
+function semanticModel(id: string): SemanticModel | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?[56](?:$|[./_:-])/.test(value)) return "kimi-k2.5-k2.6";
+  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?7(?:[-_/]?(?:code|highspeed))?(?:$|[./_:-])/.test(value)) {
+    return "kimi-k2.7-code";
+  }
+  if (/(?:^|[./_-])kimi[-_/]?k?3(?:$|[./_:-])/.test(value)) return "kimi-k3";
+  if (/(?:^|[./_-])deepseek[-_/]?v?4(?:$|[./_:-])/.test(value)) return "deepseek-v4";
+  return undefined;
+}
+
 function semanticFamily(id: string): SemanticFamily | undefined {
   const value = id.toLowerCase();
   if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
@@ -230,12 +243,18 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
   let family: SemanticFamily | undefined;
+  let model: SemanticModel | undefined;
   for (const candidate of candidates) {
     family ??= semanticFamily(candidate);
+    model ??= semanticModel(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, family, resolved.model);
+    if (resolved)
+      return {
+        ...catalogResolution(resolved.provider, family, resolved.model),
+        ...(model ? { semanticModel: model } : {}),
+      };
   }
-  return family ? { semanticFamily: family } : undefined;
+  return family ? { semanticFamily: family, ...(model ? { semanticModel: model } : {}) } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -460,17 +479,26 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
   if (!reduced) return undefined;
   const incompleteMetadataName =
     deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+  const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
   return {
     id: reduced.id,
     name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
-    reasoning: reduced.reasoning,
-    ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
+    reasoning: reasoningPolicy?.reasoning ?? reduced.reasoning,
+    ...(reasoningPolicy?.thinkingLevelMap
+      ? { thinkingLevelMap: reasoningPolicy.thinkingLevelMap }
+      : reduced.thinkingLevelMap
+        ? { thinkingLevelMap: reduced.thinkingLevelMap }
+        : {}),
     input: reduced.vision ? ["text", "image"] : ["text"],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat: buildCompat(reduced.id, reduced.api),
+    compat:
+      reduced.api === "openai-completions"
+        ? { ...buildCompat(reduced.id, reduced.api, reduced.semanticFamily), ...reasoningPolicy?.compat }
+        : buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
+    ...(reduced.semanticFamily === "kimi" ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
   };
 }
 
@@ -501,6 +529,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
     compat: buildCompat(id),
+    ...(isMoonshotModel(id) ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
   };
 }
 
@@ -523,6 +552,7 @@ function mapFromModelsList(
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
     compat: buildCompat(id),
+    ...(isMoonshotModel(id) ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
   };
 }
 

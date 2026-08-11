@@ -103,6 +103,7 @@ describe("reduceModelGroup", () => {
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
       acceptedOpenAIParams: [],
+      reasoningPolicy: { reasoning: false },
     };
 
     for (const order of permutations(deployments)) {
@@ -351,5 +352,94 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result?.acceptedOpenAIParams).toEqual(["reasoning_effort"]);
+  });
+
+  it.each([
+    {
+      name: "Kimi K2.6 with binary thinking",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: "off", high: "high" },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      },
+    },
+    {
+      name: "Kimi K2.7 Code without a required control",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, low: null, medium: null, xhigh: null, max: null },
+        compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      },
+    },
+    {
+      name: "Kimi K3 with effort",
+      semanticModel: "kimi-k3" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: null, medium: null, xhigh: null },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 with native controls",
+      semanticModel: "deepseek-v4" as const,
+      params: ["thinking", "reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { low: null, medium: null, xhigh: null },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
+      },
+    },
+    {
+      name: "DeepSeek V4 through an effort-only route",
+      semanticModel: "deepseek-v4" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, low: null, medium: null, xhigh: null },
+        compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
+      },
+    },
+  ])("derives $name policy from semantic and accepted-control evidence", ({ semanticModel, params, expected }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supported_openai_params: params },
+          litellm_params: { model: "internal/model" },
+        }),
+      ],
+      () => ({ semanticFamily: semanticModel.startsWith("kimi") ? "kimi" : "deepseek", semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toMatchObject(expected);
+  });
+
+  it("fails closed for mixed semantic generations and accepted controls", () => {
+    const deployments = [
+      row({
+        model_info: { id: "k2", supported_openai_params: ["thinking"] },
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+      }),
+      row({
+        model_info: { id: "k3", supported_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: "moonshot/kimi-k3" },
+      }),
+    ];
+    const result = reduceModelGroup(deployments, (entry) => ({
+      semanticFamily: "kimi",
+      semanticModel: entry.model_info?.id === "k2" ? "kimi-k2.5-k2.6" : "kimi-k3",
+    }));
+
+    expect(result?.acceptedOpenAIParams).toEqual([]);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false });
   });
 });

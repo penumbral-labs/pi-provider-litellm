@@ -10,8 +10,13 @@ export type LiteLLMRuntimeAuth = {
   headers?: Record<string, string>;
 };
 
+export interface LiteLLMModelPolicy {
+  normalizeStrictToolMessages: boolean;
+}
+
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
   api?: LiteLLMApi;
+  litellmPolicy?: LiteLLMModelPolicy;
 };
 
 export interface DiscoveryResult {

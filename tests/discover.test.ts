@@ -458,7 +458,7 @@ describe("discoverModels via /model/info", () => {
         litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
         model_info: { mode: "chat", litellm_provider: "azure_ai" },
       }),
-    ).toEqual({ semanticFamily: "deepseek" });
+    ).toEqual({ semanticFamily: "deepseek", semanticModel: "deepseek-v4" });
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -477,9 +477,94 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
       name: "foundry-route (no metadata)",
-      reasoning: false,
+      reasoning: true,
       contextWindow: 128_000,
+      thinkingLevelMap: { off: null, high: "high", max: "max" },
+      compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
     });
+  });
+
+  it.each([
+    {
+      name: "Kimi K2.6",
+      backend: "moonshot/kimi-k2.6",
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: "off", high: "high" },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      },
+    },
+    {
+      name: "Kimi K2.7 Code",
+      backend: "moonshot/kimi-k2.7-code",
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, high: "high" },
+        compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      },
+    },
+    {
+      name: "Kimi K3",
+      backend: "moonshot/kimi-k3",
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, low: "low", high: "high", max: "max" },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "direct DeepSeek V4",
+      backend: "deepseek/deepseek-v4",
+      params: ["thinking", "reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: "off", high: "high", max: "max" },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
+      },
+    },
+  ])("discovers evidence-based reasoning policy for $name", async ({ backend, params, expected }) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "public-route",
+            litellm_params: { model: backend },
+            model_info: { id: "deployment", mode: "chat", supported_openai_params: params },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject(expected);
+  });
+
+  it("does not infer controls from a Kimi-looking public route", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k3-public-alias",
+            litellm_params: { model: "openai/internal-route" },
+            model_info: { mode: "chat", litellm_provider: "openai", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ reasoning: true });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.compat).not.toMatchObject({ thinkingFormat: "deepseek" });
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {

@@ -5,10 +5,23 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
+export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" | "kimi-k3";
+
+type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
+
+export interface ReasoningPolicy {
+  reasoning: boolean;
+  thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
+  compat?: Pick<
+    OpenAICompat,
+    "requiresReasoningContentOnAssistantMessages" | "supportsReasoningEffort" | "thinkingFormat"
+  >;
+}
 
 export interface CatalogResolution {
   provider?: string;
   semanticFamily?: SemanticFamily;
+  semanticModel?: SemanticModel;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -32,7 +45,9 @@ export interface ReducedModelGroup {
   hasCompleteCost: boolean;
   catalogProvider?: string;
   semanticFamily?: SemanticFamily;
+  semanticModel?: SemanticModel;
   acceptedOpenAIParams: string[];
+  reasoningPolicy: ReasoningPolicy;
 }
 
 const RESPONSES_MODE_PATTERN = /^responses?$/i;
@@ -111,6 +126,95 @@ function intersectParams(entries: readonly ModelInfoEntry[]): string[] {
   return [...first].filter((param) => rest.every((params) => params.has(param))).sort();
 }
 
+const ONLY_HIGH = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: "high",
+  xhigh: null,
+  max: null,
+} as const;
+
+function buildReasoningPolicy(
+  semanticModel: SemanticModel | undefined,
+  acceptedOpenAIParams: readonly string[],
+): ReasoningPolicy {
+  const acceptsThinking = acceptedOpenAIParams.includes("thinking");
+  const acceptsEffort = acceptedOpenAIParams.includes("reasoning_effort");
+  if (semanticModel === "kimi-k2.5-k2.6" && acceptsThinking) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+    };
+  }
+  if (semanticModel === "kimi-k2.7-code") {
+    return {
+      reasoning: true,
+      thinkingLevelMap: ONLY_HIGH,
+      compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+    };
+  }
+  if (semanticModel === "kimi-k3" && acceptsEffort) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: null,
+        high: "high",
+        xhigh: null,
+        max: "max",
+      },
+      compat: {
+        thinkingFormat: "openai",
+        supportsReasoningEffort: true,
+        requiresReasoningContentOnAssistantMessages: true,
+      },
+    };
+  }
+  if (semanticModel === "deepseek-v4" && acceptsThinking && acceptsEffort) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: {
+        off: "off",
+        minimal: null,
+        low: null,
+        medium: null,
+        high: "high",
+        xhigh: null,
+        max: "max",
+      },
+      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
+    };
+  }
+  if (semanticModel === "deepseek-v4" && acceptsEffort) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: null,
+        medium: null,
+        high: "high",
+        xhigh: null,
+        max: "max",
+      },
+      compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
+    };
+  }
+  if (semanticModel === "deepseek-v4" && acceptsThinking) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+    };
+  }
+  return { reasoning: false };
+}
+
 function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefined {
   const info = entry.model_info;
   if (!info) return undefined;
@@ -155,6 +259,7 @@ export function reduceModelGroup(
   const catalogs = deployments.map(resolveCatalog);
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
+  const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
@@ -192,6 +297,7 @@ export function reduceModelGroup(
   const thinkingLevelMap = catalogProvider
     ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
     : undefined;
+  const acceptedOpenAIParams = intersectParams(deployments);
 
   return {
     id: deployments[0]?.model_name as string,
@@ -206,7 +312,9 @@ export function reduceModelGroup(
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
-    acceptedOpenAIParams: intersectParams(deployments),
+    ...(semanticModel ? { semanticModel } : {}),
+    acceptedOpenAIParams,
+    reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams),
   };
 }
 

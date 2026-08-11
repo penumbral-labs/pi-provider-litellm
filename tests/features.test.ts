@@ -649,16 +649,13 @@ describe("feature parity", () => {
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
-    expect(updated).toMatchObject({
+    expect(updated).toEqual({
       messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
       litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
     });
   });
 
-  it("does not send thinking for Kimi OpenAI completions requests", async () => {
+  it("does not inject reasoning controls from a Kimi-looking public route", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -687,12 +684,7 @@ describe("feature parity", () => {
       { payload: { messages: [] } },
       { model: { provider: "litellm", id: "kimi-k3", api: "openai-completions" } },
     );
-    expect(updated).toEqual({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(updated).toBeUndefined();
   });
 
   it("leaves Kimi Responses requests unchanged", async () => {
@@ -741,7 +733,13 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: { normalizeStrictToolMessages: true },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -754,9 +752,6 @@ describe("feature parity", () => {
         },
         { role: "tool", tool_call_id: "call_1", content: "tool output" },
       ],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
     });
   });
 
@@ -790,7 +785,13 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: { normalizeStrictToolMessages: true },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -806,9 +807,6 @@ describe("feature parity", () => {
           ],
         },
       ],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
     });
   });
 
@@ -834,7 +832,7 @@ describe("feature parity", () => {
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages } }, { model: { provider: "litellm", id: "kimi-k3" } });
 
-    expect(updated?.messages).toBe(messages);
+    expect(updated).toBeUndefined();
   });
 
   it("leaves strict-schema tool messages untouched for non-Moonshot models", async () => {

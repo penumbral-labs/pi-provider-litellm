@@ -441,7 +441,7 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.baseUrl).toBe("https://litellm.example.com/v1");
   });
 
-  it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
+  it("does not infer reasoning controls from configured provider alias route text", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(
       join(agentDir, "settings.json"),
@@ -457,7 +457,7 @@ describe("extension startup", () => {
       }),
       "utf8",
     );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "openai-key";
     process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
@@ -468,14 +468,10 @@ describe("extension startup", () => {
 
     const result = await pi.handlers.get("before_provider_request")?.[0]?.(
       { payload: { model: "kimi-k2.6" } },
-      { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
+      { model: { provider: "litellm-anthropic", id: "kimi-k2.6", api: "openai-completions" } },
     );
 
-    expect(result).toMatchObject({
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(result).toBeUndefined();
   });
 
   it("returns a native API-key credential without discovery side effects", async () => {

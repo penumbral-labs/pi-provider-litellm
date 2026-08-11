@@ -17,7 +17,6 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import {
   discoverModels,
   isGpt55Model,
-  isMoonshotModel,
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
@@ -31,7 +30,7 @@ import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
+import type { DiscoveryOptions, LiteLLMModelPolicy, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -713,24 +712,15 @@ function prepareLiteLLMRequestPayload(
   modelId: string | undefined,
   api: Api | undefined,
   sessionId: string | undefined,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): Record<string, unknown> | undefined {
+  const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
-  const update = (key: string, value: unknown): void => {
-    if (payload[key] !== undefined) return;
-    next ??= { ...payload };
-    next[key] = value;
-  };
-
-  if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
-    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
-      if (key !== "thinking") update(key, value);
-    }
-  }
 
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
-    api !== "openai-responses" &&
+    openAIApi === "openai-completions" &&
     modelId &&
     isGpt55Model(modelId) &&
     Array.isArray(payload.tools) &&
@@ -760,7 +750,7 @@ function prepareLiteLLMRequestPayload(
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
   // must carry string content, and tool results must be plain text.
-  if (modelId && isMoonshotModel(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && modelPolicy?.normalizeStrictToolMessages) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -771,7 +761,11 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
+  if (
+    (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
+    modelId &&
+    GEMINI_MODEL_PATTERN.test(modelId)
+  ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -1068,6 +1062,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ctx.model?.id,
       ctx.model?.api,
       sessionId,
+      (ctx.model as typeof ctx.model & { litellmPolicy?: LiteLLMModelPolicy }).litellmPolicy,
     );
   });
 
