@@ -531,6 +531,112 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 16384,
     });
   });
+
+  it("never emits the fallback-only sentinel for a reduced deployment group", async () => {
+    // The ` (no metadata)` suffix authorizes catalog re-derivation from the model
+    // id during offline cache reads, so no `/model/info` group may carry it.
+    const groups = [
+      [{ model_name: "singleton-route", model_info: { id: "one", mode: "chat" } }],
+      [
+        { model_name: "plural-route", model_info: { id: "a", mode: "chat" } },
+        { model_name: "plural-route", model_info: { id: "b", mode: "chat" }, litellm_params: { model: "x/y" } },
+      ],
+      [
+        { model_name: "conflicting-route", model_info: { id: "same", mode: "chat" } },
+        { model_name: "conflicting-route", model_info: { id: "same", mode: "chat", max_input_tokens: 8_000 } },
+      ],
+      [
+        { model_name: "embedding-sibling-route", model_info: { id: "chat", mode: "chat" } },
+        { model_name: "embedding-sibling-route", model_info: { id: "embed", mode: "embedding" } },
+      ],
+    ];
+
+    for (const data of groups) {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data }) });
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0]?.name).not.toContain(" (no metadata)");
+      expect(result.models[0]?.name).toBe(`${result.models[0]?.id} (incomplete metadata)`);
+    }
+  });
+
+  it("does not use a public route name as evidence for conflicting duplicate deployment ids", async () => {
+    // One deployment id with two disagreeing backends is not a single deployment,
+    // so the catalog-resolvable route name must not enrich the group.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+            {
+              model_name: "openai/gpt-5.5",
+              model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 },
+              litellm_params: { model: "internal/mystery" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      maxTokens: 16_384,
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("reports conflicting deployment provider identity once with bounded detail", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const conflicting = (route: string) => [
+      { model_name: route, model_info: { id: `${route}-a`, mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
+      {
+        model_name: route,
+        model_info: { id: `${route}-b`, mode: "chat" },
+        litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+      },
+    ];
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: ["route-a", "route-b", "route-c", "route-d"].flatMap(conflicting),
+        }),
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("4 route group(s) have conflicting deployment provider identity");
+    // Bounded: a count, at most three route ids, and no deployment ids or params.
+    expect(diagnostics[0]).toContain("route-a, route-b, route-c (+1 more)");
+    expect(diagnostics[0]).not.toContain("route-d");
+    expect(diagnostics[0]).not.toContain("route-a-a");
+  });
+
+  it("stays silent when provider identity is unanimous or wholly unknown", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "agreed", model_info: { id: "a", mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
+            { model_name: "agreed", model_info: { id: "b", mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
+            { model_name: "unknown", model_info: { id: "c", mode: "chat" }, litellm_params: { model: "internal/x" } },
+            { model_name: "unknown", model_info: { id: "d", mode: "chat" }, litellm_params: { model: "internal/y" } },
+          ],
+        }),
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(stderr).not.toHaveBeenCalled();
+  });
 });
 
 describe("discoverModels wildcard expansion via /v1/models", () => {
