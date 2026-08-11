@@ -1,6 +1,6 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMcpToolDefinitions, discoverMcpTools, executeMcpTool } from "../src/mcp-tools.js";
+import { createMcpToolDefinitions, discoverMcpTools, executeMcpTool, findSchemaHazard } from "../src/mcp-tools.js";
 import type { LiteLLMMcpTool } from "../src/types.js";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -1163,5 +1163,49 @@ describe("body cap diagnostics under a failing cancel", () => {
     expect(stderr.mock.calls.map(([message]) => String(message))).toContain(
       "LiteLLM MCP: MCP discovery response exceeded its 5242880-byte limit.\n",
     );
+  });
+});
+
+describe("findSchemaHazard", () => {
+  it("reports a regex wherever the validator could compile one", () => {
+    expect(findSchemaHazard({ type: "object", properties: { s: { pattern: "^a+$" } } })).toBe("regex");
+    expect(findSchemaHazard({ type: "object", patternProperties: { "^a+$": { type: "string" } } })).toBe("regex");
+  });
+
+  it("reports references whose target is outside the supplied document", () => {
+    expect(findSchemaHazard({ $ref: "https://evil.example/x.json" })).toBe("nonlocal-ref");
+    expect(findSchemaHazard({ $dynamicRef: "#meta" })).toBe("nonlocal-ref");
+    expect(findSchemaHazard({ $recursiveRef: "#" })).toBe("nonlocal-ref");
+    // A local pointer is safe: this walk covers the whole document, so the target was inspected.
+    expect(findSchemaHazard({ $defs: { s: { type: "string" } }, $ref: "#/$defs/s" })).toBeUndefined();
+  });
+
+  it("degrades rather than recursing without bound on a deep graph", () => {
+    let deep: Record<string, unknown> = { type: "string" };
+    for (let level = 0; level < 40; level += 1) deep = { wrapper: deep };
+    expect(findSchemaHazard(deep)).toBe("budget");
+  });
+
+  it("degrades rather than walking without bound on a wide graph", () => {
+    // Well inside the depth and serialized-size limits, but past the node budget.
+    const wide = { type: "object", enum: Array.from({ length: 25_000 }, (_, index) => index) };
+    expect(findSchemaHazard(wide)).toBe("budget");
+  });
+
+  it("degrades on a cyclic graph instead of looping forever", () => {
+    const cyclic: Record<string, unknown> = { type: "object" };
+    cyclic.self = cyclic;
+    expect(findSchemaHazard(cyclic)).toBe("cycle");
+  });
+
+  it("returns no hazard for ordinary schemas, including keyword names used as argument names", () => {
+    expect(findSchemaHazard({ type: "object", properties: { q: { type: "string" } } })).toBeUndefined();
+    expect(
+      findSchemaHazard({
+        type: "object",
+        properties: { pattern: { type: "string" }, patternProperties: { type: "string" } },
+      }),
+    ).toBeUndefined();
+    expect(findSchemaHazard({ type: "object", properties: { s: { enum: ["pattern"] } } })).toBeUndefined();
   });
 });

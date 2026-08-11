@@ -345,73 +345,120 @@ const DIRECT_SCHEMA_KEYWORDS = [
 const SCHEMA_ARRAY_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems"] as const;
 const SCHEMA_MAP_KEYWORDS = ["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"] as const;
 
-// `pattern` and the keys of `patternProperties` are compiled into a backtracking RegExp by TypeBox
-// (schema/engine/pattern.mjs) and executed with no timeout, so a proxy-supplied regex is an unbounded
-// CPU sink. Detection recurses over exactly the schema positions the validator walks.
-const PATTERN_KEYWORDS = ["pattern", "patternProperties"] as const;
+// TypeBox compiles a schema's `pattern` and the keys of `patternProperties` into a backtracking
+// RegExp and executes them with no time limit, so a proxy-supplied expression is an unbounded CPU
+// sink. A `$ref` resolves an arbitrary JSON pointer, which means a regex can be parked under any key
+// at all — including data-only positions such as `default` or `examples`. Enumerating "positions
+// where a subschema may appear" is therefore not a sound bound. We instead walk the entire supplied
+// document, every key and every value, and refuse to vouch for anything we could not fully inspect.
+const UNSAFE_REGEX_KEY = "pattern";
+const UNSAFE_REGEX_MAP_KEY = "patternProperties";
+const NONLOCAL_REF_KEYS = ["$dynamicRef", "$recursiveRef"] as const;
+const MAX_SCAN_NODES = 20_000;
+// Keywords whose immediate children are keyed by *name* rather than by keyword. Inside one of these
+// a key like `patternProperties` is the name of a tool argument, not a constraint, so the keyword
+// checks must not fire on it. This is the only context the scan needs; it does not restrict where
+// the scan looks, only how a key is interpreted.
+const NAME_KEYED_KEYWORDS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+  "dependencies",
+]);
 
-type SchemaVerdict = "ok" | "invalid-schema" | "unsupported-pattern";
-type SchemaRejection = Extract<SchemaVerdict, "invalid-schema" | "unsupported-pattern">;
+/** Why a supplied schema could not be proven safe to hand to the validator. */
+export type SchemaHazard = "regex" | "nonlocal-ref" | "budget" | "cycle";
 
-function worseVerdict(left: SchemaVerdict, right: SchemaVerdict): SchemaVerdict {
-  if (left === "invalid-schema" || right === "invalid-schema") return "invalid-schema";
-  if (left === "unsupported-pattern" || right === "unsupported-pattern") return "unsupported-pattern";
-  return "ok";
+/**
+ * Walks the whole untrusted schema graph looking for anything the validator could turn into a
+ * regex, plus references we cannot resolve within the document we were given.
+ *
+ * Bounded three ways so a hostile document cannot exhaust us while we inspect it: a depth cap, a
+ * node budget, and identity-based cycle detection. Hitting any bound returns a hazard rather than
+ * `undefined`, because an unfinished scan proves nothing.
+ *
+ * A local `#/...` ref is safe precisely because this walk covers the whole document, so its target
+ * has been inspected too. Any other ref form is a hazard.
+ */
+export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | undefined {
+  const seen = new WeakSet<object>();
+  let budget = MAX_SCAN_NODES;
+
+  const walk = (value: unknown, depth: number, keysAreNames: boolean): SchemaHazard | undefined => {
+    if (budget-- <= 0) return "budget";
+    if (depth > MAX_SCHEMA_DEPTH) return "budget";
+    if (value === null || typeof value !== "object") return undefined;
+    if (seen.has(value)) return "cycle";
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        const hazard = walk(child, depth + 1, false);
+        if (hazard) return hazard;
+      }
+      return undefined;
+    }
+
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (!keysAreNames) {
+        // A regex only matters where the validator would compile one: `pattern` holding a string,
+        // or `patternProperties` holding a map whose keys are expressions.
+        if (key === UNSAFE_REGEX_KEY && typeof child === "string") return "regex";
+        if (key === UNSAFE_REGEX_MAP_KEY && asRecord(child) !== undefined) return "regex";
+        // A local `#/...` pointer is safe because this walk covers the whole document, so its
+        // target has been inspected too. Anything else points outside what we can see.
+        if (key === "$ref" && typeof child === "string" && !child.startsWith("#")) return "nonlocal-ref";
+        if ((NONLOCAL_REF_KEYS as readonly string[]).includes(key) && typeof child === "string") {
+          return "nonlocal-ref";
+        }
+      }
+      const hazard = walk(child, depth + 1, !keysAreNames && NAME_KEYED_KEYWORDS.has(key));
+      if (hazard) return hazard;
+    }
+    return undefined;
+  };
+
+  return walk(root, 0, false);
 }
 
-function schemaVerdict(value: unknown, depth: number): SchemaVerdict {
-  if (typeof value === "boolean") return "ok";
+function isValidSchema(value: unknown): boolean {
+  if (typeof value === "boolean") return true;
   const schema = asRecord(value);
-  return schema === undefined ? "invalid-schema" : recordVerdict(schema, depth);
+  return schema !== undefined && hasValidSchemaShape(schema);
 }
 
-function schemaMapVerdict(value: unknown, depth: number): SchemaVerdict {
+function isValidSchemaMap(value: unknown): boolean {
   const schemas = asRecord(value);
-  if (schemas === undefined) return "invalid-schema";
-  return Object.values(schemas).reduce<SchemaVerdict>(
-    (verdict, child) => worseVerdict(verdict, schemaVerdict(child, depth)),
-    "ok",
-  );
+  return schemas !== undefined && Object.values(schemas).every(isValidSchema);
 }
 
-function schemaArrayVerdict(value: unknown, depth: number): SchemaVerdict {
-  if (!Array.isArray(value)) return "invalid-schema";
-  return value.reduce<SchemaVerdict>((verdict, child) => worseVerdict(verdict, schemaVerdict(child, depth)), "ok");
+function isValidSchemaArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isValidSchema);
 }
 
 function isValidRequired(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function recordVerdict(record: Record<string, unknown>, depth: number): SchemaVerdict {
-  // Bounded here rather than relying on the caller's size/depth gates being evaluated first.
-  if (depth > MAX_SCHEMA_DEPTH) return "invalid-schema";
-  if ("required" in record && !isValidRequired(record.required)) return "invalid-schema";
-  if (PATTERN_KEYWORDS.some((keyword) => keyword in record)) return "unsupported-pattern";
-  const next = depth + 1;
-  let verdict: SchemaVerdict = "ok";
-  for (const keyword of SCHEMA_MAP_KEYWORDS) {
-    if (keyword in record) verdict = worseVerdict(verdict, schemaMapVerdict(record[keyword], next));
-  }
-  for (const keyword of SCHEMA_ARRAY_KEYWORDS) {
-    if (keyword in record) verdict = worseVerdict(verdict, schemaArrayVerdict(record[keyword], next));
-  }
-  for (const keyword of DIRECT_SCHEMA_KEYWORDS) {
-    if (keyword in record) verdict = worseVerdict(verdict, schemaVerdict(record[keyword], next));
-  }
-  if ("items" in record) {
-    const items = record.items;
-    verdict = worseVerdict(
-      verdict,
-      Array.isArray(items) ? schemaArrayVerdict(items, next) : schemaVerdict(items, next),
-    );
-  }
-  return verdict;
+// Shape validation is a separate concern from the hazard scan above: it exists to avoid handing the
+// validator a structurally broken document, and it deliberately only looks where a subschema may
+// legally appear so that data positions are not misread as constraints.
+function hasValidSchemaShape(record: Record<string, unknown>): boolean {
+  if ("required" in record && !isValidRequired(record.required)) return false;
+  if (SCHEMA_MAP_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaMap(record[keyword]))) return false;
+  if (SCHEMA_ARRAY_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaArray(record[keyword]))) return false;
+  if (DIRECT_SCHEMA_KEYWORDS.some((keyword) => keyword in record && !isValidSchema(record[keyword]))) return false;
+  const items = record.items;
+  return !("items" in record) || isValidSchema(items) || isValidSchemaArray(items);
 }
 
 function buildParameters(
   inputSchema: Record<string, unknown>,
-): { parameters: TSchema; syntheticArgsEnvelope: boolean } | SchemaRejection {
+):
+  | { parameters: TSchema; syntheticArgsEnvelope: boolean }
+  | Extract<McpDropReason, "invalid-schema" | "unsupported-pattern"> {
   if (Object.keys(inputSchema).length === 0) {
     return {
       parameters: Type.Object({
@@ -430,8 +477,8 @@ function buildParameters(
   if (byteLength(serialized) > MAX_SCHEMA_BYTES || schemaDepth(inputSchema) > MAX_SCHEMA_DEPTH) {
     return "invalid-schema";
   }
-  const verdict = recordVerdict(inputSchema, 0);
-  if (verdict !== "ok") return verdict;
+  if (!hasValidSchemaShape(inputSchema)) return "invalid-schema";
+  if (findSchemaHazard(inputSchema) !== undefined) return "unsupported-pattern";
   return { parameters: Type.Unsafe(inputSchema), syntheticArgsEnvelope: false };
 }
 
