@@ -351,8 +351,8 @@ describe("native provider stream compatibility", () => {
 
   it("repairs strict tool messages for a cached Moonshot model stored without a request policy", async () => {
     // Shape written by releases that gated strict repair on the model id, before
-    // discovery attached a request policy. Cache entries carry no provenance, so
-    // the policy has to be re-derived on read or the repair silently stops.
+    // discovery attached a request policy: no policy, but the Moonshot compat
+    // block those releases produced is still there to be read as evidence.
     const modelsStore = new InMemoryModelsStore();
     await modelsStore.write("litellm", {
       models: [
@@ -367,7 +367,13 @@ describe("native provider stream compatibility", () => {
           cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
           contextWindow: 262_144,
           maxTokens: 32_768,
-          compat: { supportsStore: false, maxTokensField: "max_tokens" },
+          compat: {
+            supportsStore: false,
+            supportsDeveloperRole: false,
+            supportsReasoningEffort: false,
+            supportsStrictMode: false,
+            maxTokensField: "max_tokens",
+          },
         },
       ],
       checkedAt: Date.now(),

@@ -145,14 +145,23 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
   return resolveCatalogModel(id, ownedBy)?.model;
 }
 
-// Cache entries carry no provenance, so a stored model written before request
-// policies existed cannot be told apart from a current one. Re-deriving the
-// Moonshot policy from the route name keeps strict tool-message repair working
-// for those entries; it matches what the `/health` and `/v1/models` paths do
-// with the same evidence, and it is a no-op against non-Moonshot backends.
+// The Moonshot strict-schema compat block is the only one that pins
+// `maxTokensField`, so its presence identifies a model that discovery already
+// judged to be Moonshot-backed. Releases before request policies existed wrote
+// that same block, which makes it usable provenance.
+function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
+  const openAICompat = compat as Model<"openai-completions">["compat"];
+  return openAICompat?.maxTokensField === "max_tokens" && openAICompat.supportsStrictMode === false;
+}
+
+// A cached model written before request policies existed carries none, and
+// startup refreshes offline, so strict tool-message repair would silently stop
+// for it. Re-derive the policy from the compatibility evidence already stored
+// on the model rather than from its route name: the name is not evidence of a
+// backend, and a route that only looks like Kimi never carried this block.
 function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
   const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
-  if (cached.litellmPolicy || !isMoonshotModel(model.id)) return model;
+  if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
   const restored: typeof cached = { ...cached, litellmPolicy: { normalizeStrictToolMessages: true } };
   return restored;
 }
