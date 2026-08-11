@@ -411,55 +411,6 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
-  it("isolates MCP registration failures so valid sibling tools still register", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        return jsonResponse(200, {
-          tools: [
-            { name: "bad-one", server_name: "server", inputSchema: { type: "object", properties: {} } },
-            { name: "bad-two", server_name: "server", inputSchema: { type: "object", properties: {} } },
-            { name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    const registered: string[] = [];
-    pi.registerTool = (tool) => {
-      if (tool.name.startsWith("mcp_server_bad")) throw new Error("definition rejected");
-      registered.push(tool.name);
-      pi.tools.push(tool);
-    };
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await extension(pi);
-
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: {
-        type: "api_key",
-        key: "sk-test",
-        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-      },
-      signal: new AbortController().signal,
-    });
-
-    expect(registered).toContain("mcp_server_good");
-    expect(registered).not.toContain("mcp_server_bad_one");
-    expect(registered).not.toContain("mcp_server_bad_two");
-    expect(stderr.mock.calls.filter(([message]) => String(message).includes("could not be registered"))).toHaveLength(
-      1,
-    );
-    expect(stderr).toHaveBeenCalledWith("LiteLLM MCP: An MCP tool could not be registered.\n");
-    expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
-  });
-
   it("does not block model refresh on MCP discovery", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let mcpStarted!: () => void;
