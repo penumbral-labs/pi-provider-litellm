@@ -33,6 +33,20 @@
 - `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 
+## LiteLLM MCP Tools
+
+- Everything a LiteLLM MCP server returns is untrusted input: tool names, server names, descriptions, schemas, and results.
+- The safety invariant is that **no proxy-supplied regular expression or unresolvable reference reaches Pi or TypeBox**. `pattern`, `patternProperties` keys, and `$ref` targets are all compiled or resolved by the validator with no time limit.
+- Do not implement that check by enumerating the schema positions where a subschema may appear. A `$ref` resolves an arbitrary JSON pointer, so a regex can hide under any key, including data-only ones like `default` and `examples`. `findSchemaHazard()` in `src/mcp-tools.ts` walks the entire supplied graph instead, bounded by depth, a node budget, and identity-based cycle detection; an incomplete walk is a hazard, not a pass.
+- A hazard degrades the tool to the extension-owned `args` envelope; it does not drop the tool. Real MCP schemas commonly use `pattern`, so dropping them costs real functionality. The envelope's own library-generated `patternProperties` is fine because it is not proxy-supplied.
+- A present-but-non-object `inputSchema` is `invalid-schema`, never treated as schemaless. Only an absent or empty schema takes the envelope as its normal path.
+- Tool names must stay a pure function of tool identity. Always append the identity hash; never make the hash conditional on what else is in the catalog, or adding a sibling will rename a survivor and Pi cannot unregister the old name.
+- Every raw catalog entry must land in exactly one count or class, so `raw = registered + dropped + tool-cap` always reconciles. Add a class rather than letting a loss go unreported.
+- Diagnostics dedupe on full membership, not on the printed sample, and a class that stops occurring is cleared. Never interpolate proxy-supplied text or credentials into stderr; generated names and counts only.
+- `pi.registerTool` is a synchronous replace-by-name whose only failure is a never-reset staleness check, so a refusal is fatal for the pass and for that extension instance. Do not model it as a per-tool rejection or add retry; a reload provides a clean instance.
+- `POST /mcp-rest/tools/call` is side-effecting and must stay exactly-once, and cancellation must preserve the caller's original abort reason. Keep the tests that assert call counts and reason identity.
+- Do not write timing-based tests for any of this. Assert the registered `parameters` and the absence of the exact proxy-supplied regex or ref, and keep the schema-position test lists independent of the implementation's own tables.
+
 ## Compatibility Rules
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
