@@ -519,10 +519,14 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // `/health` detail lookups are per deployment, not complete route groups, so they can never select Messages.
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
+  if (model.api === "openai-completions") return model;
   return {
     ...model,
     api: "openai-completions",
-    compat: buildCompat(model.id, "openai-completions"),
+    compat: {
+      ...buildCompat(model.id, "openai-completions", model.api === "anthropic-messages" ? "claude" : undefined),
+      ...model.compat,
+    },
   };
 }
 

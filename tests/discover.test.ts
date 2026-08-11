@@ -998,6 +998,44 @@ describe("discoverModels response-mode models", () => {
     expect(result.models[0]?.api).toBe("openai-completions");
   });
 
+  it("keeps authoritative Chat compatibility when /health downgrades protocol selection", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, { healthy_endpoints: [{ model: "bedrock-production", model_id: "uuid-1" }] });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "bedrock-production",
+              litellm_params: {
+                model: "bedrock/arn:aws:bedrock:us-east-1:123456789012:inference-profile/production",
+              },
+              model_info: {
+                mode: "chat",
+                litellm_provider: "bedrock",
+                base_model: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).toMatchObject({
+      id: "bedrock-production",
+      api: "openai-completions",
+      compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+    });
+  });
+
   it("does not derive thinking controls from a health-only route name", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
