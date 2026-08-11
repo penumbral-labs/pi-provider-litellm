@@ -205,6 +205,7 @@ function semanticFamily(id: string): SemanticFamily | undefined {
 }
 
 const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
+const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku)(?:$|[./_:-])/i;
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
@@ -229,27 +230,30 @@ function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | 
 
 function resolveClaudeBackendIdentity(
   adapter: string | undefined,
-  candidates: readonly string[],
+  routingModel: string | undefined,
+  baseModel: string | undefined,
 ): CatalogResolution["backendIdentity"] {
-  const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
-  if (families.length === 0 || families.some((family) => family !== "claude")) return undefined;
-  if (adapter && !CLAUDE_CAPABLE_ADAPTERS.has(adapter)) return undefined;
-  const qualifiedClaude = candidates.some((candidate) => {
-    if (!candidate.includes("/")) return false;
-    const prefix = candidate.slice(0, candidate.indexOf("/")).trim().toLowerCase();
-    return CLAUDE_CAPABLE_ADAPTERS.has(prefix) && semanticFamily(candidate) === "claude";
-  });
-  return qualifiedClaude ? { semanticFamily: "claude" } : undefined;
+  if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter)) return undefined;
+  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
+  if (routingModel && routingFamily !== "claude") return undefined;
+  const candidates = routingModel ? [routingModel] : baseModel ? [baseModel] : [];
+  if (candidates.length === 0 || candidates.some((candidate) => !CLAUDE_MODEL_PATTERN.test(candidate))) return undefined;
+  return { semanticFamily: "claude" };
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapter = entry.model_info?.litellm_provider?.trim().toLowerCase();
   const adapterProvider = adapterCatalogProvider(adapter);
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => candidate?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
-  const family = candidates.map(semanticFamily).find((candidate) => candidate !== undefined);
-  const backendIdentity = resolveClaudeBackendIdentity(adapter, candidates);
+  const routingModel = entry.litellm_params?.model?.trim() || undefined;
+  const baseModel = entry.model_info?.base_model?.trim() || undefined;
+  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
+  const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
+  const compatibleBase = !routingModel || (routingFamily !== undefined && routingFamily === baseFamily);
+  const family = routingModel ? routingFamily : baseFamily;
+  const candidates = [routingModel, ...(compatibleBase ? [baseModel] : [])].filter(
+    (candidate): candidate is string => candidate !== undefined,
+  );
+  const backendIdentity = resolveClaudeBackendIdentity(adapter, routingModel, compatibleBase ? baseModel : undefined);
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
@@ -510,14 +514,11 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // `/health` detail lookups are per deployment, not complete route groups, so they can never select Messages.
   if (!model) return undefined;
   if (!entry.model_name) delete model.thinkingLevelMap;
-  if (model.api === "anthropic-messages") {
-    return {
-      ...model,
-      api: "openai-completions",
-      compat: { supportsStore: false, cacheControlFormat: "anthropic" },
-    };
-  }
-  return { ...model, api: "openai-completions" };
+  return {
+    ...model,
+    api: "openai-completions",
+    compat: buildCompat(model.id, "openai-completions"),
+  };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {

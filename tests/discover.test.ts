@@ -639,6 +639,45 @@ describe("discoverModels native Messages selection", () => {
             litellm_params: { model: "openai/claude-sonnet-4-6" },
           },
           {
+            model_name: "anthropic-unprefixed-claude",
+            model_info: { id: "anthropic-unprefixed", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "claude-3-5-sonnet-20241022" },
+          },
+          {
+            model_name: "bedrock-unprefixed-claude",
+            model_info: {
+              id: "bedrock-unprefixed",
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            },
+          },
+          {
+            model_name: "adapter-only-anthropic",
+            model_info: { id: "adapter-only", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "internal/private" },
+          },
+          {
+            model_name: "bedrock-nova-claude-base",
+            model_info: {
+              id: "nova-conflict",
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic/claude-3-5-sonnet-20241022",
+            },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "azure-claude-base",
+            model_info: {
+              id: "azure-conflict",
+              mode: "chat",
+              litellm_provider: "anthropic",
+              base_model: "vertex_ai/claude-sonnet-4@20250514",
+            },
+            litellm_params: { model: "azure/deployment-x" },
+          },
+          {
             model_name: "missing-mode-claude",
             model_info: { id: "missing-mode", litellm_provider: "anthropic" },
             litellm_params: { model: "anthropic/claude-sonnet-4-6" },
@@ -725,6 +764,11 @@ describe("discoverModels native Messages selection", () => {
       ["vertex-claude", "anthropic-messages"],
       ["custom-claude", "openai-completions"],
       ["known-nonclaude-prefix", "openai-completions"],
+      ["anthropic-unprefixed-claude", "anthropic-messages"],
+      ["bedrock-unprefixed-claude", "anthropic-messages"],
+      ["adapter-only-anthropic", "openai-completions"],
+      ["bedrock-nova-claude-base", "openai-completions"],
+      ["azure-claude-base", "openai-completions"],
       ["missing-mode-claude", "openai-completions"],
       ["bedrock-nova", "openai-completions"],
       ["bedrock-converse-llama", "openai-completions"],
@@ -805,6 +849,7 @@ describe("discoverModels response-mode models", () => {
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.3-codex-openai",
       api: "openai-completions",
+      compat: { supportsStore: false },
     });
   });
 
