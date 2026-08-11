@@ -1055,14 +1055,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   for (const definition of definitions) {
-    let oauthRuntimeRoot: string | undefined;
+    // An OAuth credential carries its host on the credential itself, so the request
+    // path — which never sees the credential — needs the root from the most recent
+    // resolution. Pi resolves auth immediately before every request, so remembering
+    // which credential kind produced the root keeps it from outliving that credential:
+    // an API-key resolution invalidates it, and key B can never reach OAuth host A.
+    let rememberedRoot: { credentialType: "oauth"; root: string } | undefined;
     const providerAuth = createProviderAuth(definition);
     const oauthToAuth = providerAuth.oauth?.toAuth;
     if (oauthToAuth) {
       providerAuth.oauth!.toAuth = async (credential) => {
         const auth = await oauthToAuth(credential);
-        oauthRuntimeRoot = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
+        const root = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
+        rememberedRoot = root ? { credentialType: "oauth", root } : undefined;
         return auth;
+      };
+    }
+    const apiKeyResolve = providerAuth.apiKey?.resolve;
+    if (apiKeyResolve) {
+      providerAuth.apiKey!.resolve = async (context) => {
+        rememberedRoot = undefined;
+        return apiKeyResolve(context);
       };
     }
     const provider = createLiteLLMProvider({
@@ -1071,7 +1084,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       baseUrl: requestBaseUrl(definition),
       auth: providerAuth,
       resolveCredentialRoot: (credential, requestBaseUrl) =>
-        resolveSanitizedCredentialRoot(definition, credential, oauthRuntimeRoot ?? requestBaseUrl),
+        // An explicit credential is always authoritative over anything remembered.
+        resolveSanitizedCredentialRoot(
+          definition,
+          credential,
+          (credential ? undefined : rememberedRoot?.root) ?? requestBaseUrl,
+        ),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);

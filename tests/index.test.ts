@@ -862,6 +862,67 @@ describe("extension startup", () => {
     expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
   });
 
+  it("stops using the remembered OAuth host after switching to an API key", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://api-key.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-oauth",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://sso.example.com",
+    }));
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+    const baseModel = {
+      id: "switch-model",
+      name: "Switch model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+
+    // First request resolves the OAuth credential, which remembers the SSO host.
+    await models.complete({ ...baseModel, baseUrl: "https://sso.example.com/v1" }, { messages: [] });
+
+    // Swapping to an API key must invalidate that memory: the key belongs to the
+    // environment host, and a model discovered there must not be judged against SSO.
+    await credentials.modify(provider.id, async () => ({ type: "api_key", key: "sk-api-key" }));
+    const apiKeyModel = { ...baseModel, baseUrl: "https://api-key.example.com/v1" };
+    const result = await models.complete(apiKeyModel, { messages: [] });
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual([
+      "https://sso.example.com/v1/chat/completions",
+      "https://api-key.example.com/v1/chat/completions",
+    ]);
+    expect(provider.filterModels?.([apiKeyModel], { type: "api_key", key: "sk-api-key" })).toEqual([apiKeyModel]);
+  });
+
   it("registers unconfigured when the configured base URL is invalid", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "localhost:4000";
@@ -873,7 +934,20 @@ describe("extension startup", () => {
 
     expect(pi.providers).toHaveLength(1);
     await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-test" } });
-    expect(pi.providers[0]?.filterModels?.([], { type: "api_key", key: "sk-test" })).toEqual([]);
+    // A configured-but-invalid root must reject real cached models, not just an empty list.
+    const cached = {
+      id: "cached-model",
+      name: "Cached model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://proxy.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+    expect(pi.providers[0]?.filterModels?.([cached], { type: "api_key", key: "sk-test" })).toEqual([]);
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {
