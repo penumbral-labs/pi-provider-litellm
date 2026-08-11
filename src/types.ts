@@ -10,10 +10,19 @@ export type LiteLLMRuntimeAuth = {
   headers?: Record<string, string>;
 };
 
-type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
 
 export type DiscoveredModel = {
   [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
+}[LiteLLMApi];
+
+// The `api` and `compat` fields of one protocol, carried together. Model builders
+// spread a single ModelProtocol value instead of assigning the two fields
+// separately, so a protocol can never be paired with another protocol's
+// compatibility metadata: the pairing is fixed by whichever union member the
+// builder returned, and a hand-written mismatch fails to typecheck.
+export type ModelProtocol = {
+  [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
 }[LiteLLMApi];
 
 export interface DiscoveryResult {

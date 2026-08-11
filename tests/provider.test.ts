@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "../src/types.js";
+import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, ModelProtocol } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ anthropic: vi.fn(), completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -58,22 +58,55 @@ const discovered = (id: string): DiscoveryResult => ({
   ],
 });
 
+// Compile-time pairing assertions. Each @ts-expect-error IS the test: typecheck
+// fails if the annotated line stops being an error, i.e. if the union stops
+// rejecting a cross-protocol compat pairing.
+//
+// String values need `as const`. Without it the literal widens and TypeScript
+// reports a widening error (TS2322) instead of the pairing error (TS2353), which
+// would satisfy @ts-expect-error for the wrong reason.
 {
-  // The @ts-expect-error is the assertion: typecheck fails if the discriminated
-  // union ever stops rejecting OpenAI compat fields on a Messages model.
-  const invalidMessagesModel: DiscoveredModel = {
+  const messagesWithCompletionsField: DiscoveredModel = {
     ...discovered("messages").models[0],
     api: "anthropic-messages",
     compat: {
-      // @ts-expect-error OpenAI compatibility fields are invalid for Messages models.
+      // @ts-expect-error supportsStore is an OpenAI-completions field.
       supportsStore: false,
     },
   };
-  void invalidMessagesModel;
+  const responsesWithCompletionsField: DiscoveredModel = {
+    ...discovered("responses").models[0],
+    api: "openai-responses",
+    compat: {
+      // @ts-expect-error maxTokensField is an OpenAI-completions field.
+      maxTokensField: "max_tokens" as const,
+    },
+  };
+  const responsesWithCacheControl: DiscoveredModel = {
+    ...discovered("responses").models[0],
+    api: "openai-responses",
+    compat: {
+      // @ts-expect-error cacheControlFormat is an OpenAI-completions field.
+      cacheControlFormat: "anthropic" as const,
+    },
+  };
+  // A ModelProtocol cannot be assembled from mismatched halves either, which is
+  // what makes the discovery builders structurally safe rather than merely careful.
+  const mismatchedProtocol: ModelProtocol = {
+    api: "openai-responses",
+    // @ts-expect-error completions compat cannot pair with the Responses protocol.
+    compat: { supportsStore: false, maxTokensField: "max_tokens" as const },
+  };
+  void messagesWithCompletionsField;
+  void responsesWithCompletionsField;
+  void responsesWithCacheControl;
+  void mismatchedProtocol;
 }
 
 // `api` must stay required and span exactly the protocols the registry implements.
 expectTypeOf<DiscoveredModel["api"]>().toEqualTypeOf<LiteLLMApi>();
+// Every ModelProtocol member must carry both fields, so a builder cannot omit one.
+expectTypeOf<ModelProtocol>().toExtend<{ api: LiteLLMApi }>();
 
 function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
