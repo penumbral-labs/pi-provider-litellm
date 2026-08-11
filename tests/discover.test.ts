@@ -537,35 +537,36 @@ describe("discoverModels via /model/info", () => {
     // fields fall to zero, and the model is still marked incomplete so unknown
     // cache pricing is never presented as complete or free. A model must not lose
     // the marker just because input and output happen to be known.
-    mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            {
-              model_name: "priced-without-cache-rates",
-              litellm_params: { model: "internal/unknown" },
-              model_info: {
-                id: "only",
-                mode: "chat",
-                max_input_tokens: 32_000,
-                max_output_tokens: 4_000,
-                input_cost_per_token: 0.000003,
-                output_cost_per_token: 0.000015,
-              },
-            },
-          ],
-        }),
+    const priced = (id: string, input: number) => ({
+      model_name: "priced-without-cache-rates",
+      litellm_params: { model: "internal/unknown" },
+      model_info: {
+        id,
+        mode: "chat",
+        max_input_tokens: 32_000,
+        max_output_tokens: 4_000,
+        input_cost_per_token: input,
+        output_cost_per_token: 0.000015,
+      },
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    for (const [data, expectedInput] of [
+      [[priced("only", 0.000003)], 3],
+      [[priced("a", 0.000003), priced("b", 0.000004)], 4],
+    ] as const) {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data }) });
 
-    expect(result.models[0]).toMatchObject({
-      id: "priced-without-cache-rates",
-      name: "priced-without-cache-rates (incomplete metadata)",
-      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 32_000,
-      maxTokens: 4_000,
-    });
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0]).toMatchObject({
+        id: "priced-without-cache-rates",
+        name: "priced-without-cache-rates (incomplete metadata)",
+        cost: { input: expectedInput, output: 15, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      });
+    }
   });
 
   it("never emits the fallback-only sentinel for a reduced deployment group", async () => {

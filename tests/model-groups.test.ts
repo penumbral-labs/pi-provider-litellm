@@ -330,6 +330,43 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("retains proven display prices and zeroes only unresolved fields without catalog authority", () => {
+    // Characterization of the existing per-field cost block. No backend resolves,
+    // so cache pricing is genuinely unknown rather than free: input and output
+    // survive at their proven values, the unresolved cache fields read zero, and
+    // `hasCompleteCost` stays false so the model can be marked incomplete.
+    const priced = (id: string, input: number, output: number) =>
+      row({
+        model_info: {
+          id,
+          mode: "chat",
+          input_cost_per_token: input,
+          output_cost_per_token: output,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+        litellm_params: { model: "internal/unknown" },
+      });
+
+    const singleton = reduceModelGroup([priced("only", 0.000003, 0.000015)], resolveCatalog);
+    expect(singleton).toMatchObject({
+      deploymentCount: 1,
+      hasCompleteCost: false,
+      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(singleton).not.toHaveProperty("catalogProvider");
+    expect(singleton?.cost.tiers).toBeUndefined();
+
+    // Proven fields still reduce to the maximum across a group.
+    expect(
+      reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)], resolveCatalog),
+    ).toMatchObject({
+      deploymentCount: 2,
+      hasCompleteCost: false,
+      cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
   it("keeps semantic family evidence when no catalog identity resolves", () => {
     const result = reduceModelGroup(
       [
