@@ -3,6 +3,13 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
+import {
+  catalogResolution,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  reduceModelGroup,
+  type SemanticFamily,
+} from "./model-groups.js";
 import type {
   DiscoveredModel,
   DiscoveryOptions,
@@ -15,8 +22,6 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-const DEFAULT_MAX_TOKENS = 16_384;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 28 * 24 * 60 * 60 * 1000;
@@ -52,16 +57,6 @@ const modelsDevRefreshes = new Map<string, Promise<ModelsDevResponse | undefined
 
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
-}
-
-const RESPONSES_MODE_PATTERN = /^responses?$/i;
-
-function isResponsesMode(mode: string | null | undefined): boolean {
-  return mode != null && RESPONSES_MODE_PATTERN.test(mode);
-}
-
-function isChatStyleMode(mode: string | null | undefined): boolean {
-  return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
 // Matches both the conventional `anthropic/...` prefix and aliases that
@@ -111,24 +106,29 @@ function toKnownProvider(provider: string | undefined): BuiltinProvider | undefi
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
-function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
-  const prefixProvider = toKnownProvider(id.split("/")[0]);
+function catalogProviderCandidates(id: string, ownedBy?: string): BuiltinProvider[] {
+  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
+  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+  const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
+  if (/^(?:claude-)?(?:opus|sonnet|haiku)-\d+-\d+$/.test(anthropicAlias)) candidates.push("anthropic");
+  if (anthropicAlias === "fable-5" || anthropicAlias === "opus-5") candidates.push("anthropic");
+  return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
+}
+
+function resolveCatalogModel(
+  id: string,
+  ownedBy?: string,
+): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  const candidates = [toKnownProvider(ownedBy), prefixProvider, lookupIds.length > 1 ? "anthropic" : undefined].filter(
-    (provider): provider is BuiltinProvider => provider !== undefined,
-  );
-
-  for (const provider of candidates) {
-    const match = findCatalogModelInProvider(provider, lookupIds);
-    if (match) return match;
+  for (const provider of catalogProviderCandidates(id, ownedBy)) {
+    const model = findCatalogModelInProvider(provider, lookupIds);
+    if (model) return { provider, model };
   }
-
-  for (const provider of getProviders()) {
-    const match = findCatalogModelInProvider(provider, lookupIds);
-    if (match) return match;
-  }
-
   return undefined;
+}
+
+function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
+  return resolveCatalogModel(id, ownedBy)?.model;
 }
 
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
@@ -186,23 +186,44 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
-function mapModelInfoCost(
-  info: NonNullable<ModelInfoEntry["model_info"]>,
-  fallback?: DiscoveredModel["cost"],
-): NonNullable<DiscoveredModel["cost"]> {
-  return {
-    input: info.input_cost_per_token !== undefined ? info.input_cost_per_token * 1_000_000 : (fallback?.input ?? 0),
-    output: info.output_cost_per_token !== undefined ? info.output_cost_per_token * 1_000_000 : (fallback?.output ?? 0),
-    cacheRead:
-      info.cache_read_input_token_cost !== undefined
-        ? info.cache_read_input_token_cost * 1_000_000
-        : (fallback?.cacheRead ?? 0),
-    cacheWrite:
-      info.cache_creation_input_token_cost !== undefined
-        ? info.cache_creation_input_token_cost * 1_000_000
-        : (fallback?.cacheWrite ?? 0),
-    ...(fallback?.tiers ? { tiers: fallback.tiers } : {}),
-  };
+function semanticFamily(id: string): SemanticFamily | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
+  if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
+  if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
+  if (/(?:^|[./_-])(?:openai|gpt|o\d)(?:$|[./_:-])/.test(value)) return "openai";
+  return undefined;
+}
+
+const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
+  anthropic: "anthropic",
+  bedrock: "amazon-bedrock",
+  bedrock_converse: "amazon-bedrock",
+  deepseek: "deepseek",
+  openai: "openai",
+  vertex_ai: "google-vertex",
+};
+
+function resolveModelInfoCatalog(entry: ModelInfoEntry) {
+  const adapter = entry.model_info?.litellm_provider?.trim().toLowerCase();
+  const adapterProvider = adapter ? ADAPTER_CATALOG_PROVIDERS[adapter] : undefined;
+  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model].filter(
+    (candidate): candidate is string => Boolean(candidate?.trim()),
+  );
+  for (const candidate of candidates) {
+    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    if (resolved) return catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model);
+  }
+
+  const id = entry.model_name;
+  const isProviderQualified = id?.includes("/") && toKnownProvider(id.split("/")[0]) !== undefined;
+  const isBareAnthropicAlias = id != null && catalogLookupIds(id).length > 1;
+  if (id && (isProviderQualified || isBareAnthropicAlias)) {
+    const resolved = resolveCatalogModel(id);
+    if (resolved) return catalogResolution(resolved.provider, semanticFamily(resolved.model.id), resolved.model);
+  }
+  return undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -412,32 +433,30 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
-  const id = entry.model_name;
-  if (!id) return undefined;
-  const info = entry.model_info ?? {};
-  if (!isChatStyleMode(info.mode)) return undefined;
-  const responsesMode = isResponsesMode(info.mode);
-  const catalogModel = findCatalogModel(id);
+function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
+  const reduced = reduceModelGroup(entries, resolveModelInfoCatalog);
+  if (!reduced) return undefined;
   return {
-    id,
-    name: id,
-    reasoning: info.supports_reasoning ?? false,
-    ...(catalogModel?.thinkingLevelMap ? { thinkingLevelMap: catalogModel.thinkingLevelMap } : {}),
-    input: info.supports_vision ? ["text", "image"] : ["text"],
-    cost: mapModelInfoCost(info, catalogModel?.cost),
-    contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
+    id: reduced.id,
+    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (no metadata)`,
+    reasoning: reduced.reasoning,
+    ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
+    input: reduced.vision ? ["text", "image"] : ["text"],
+    cost: reduced.cost,
+    contextWindow: reduced.contextWindow,
+    maxTokens: reduced.maxTokens,
+    compat: buildCompat(reduced.id),
+    ...(reduced.api === "openai-responses" ? { api: "openai-responses" as const } : {}),
   };
+}
+
+function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
+  return mapFromModelInfoGroup([entry]);
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  if (model) delete model.thinkingLevelMap;
-  return model;
+  return mapFromModelInfo({ ...entry, model_name: fallbackId });
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
@@ -531,17 +550,14 @@ export async function discoverModels(
   progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
-    const entries = new Map<string, ModelInfoEntry>();
+    const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
       if (!entry.model_name) continue;
-      const previous = entries.get(entry.model_name);
-      entries.set(entry.model_name, {
-        ...previous,
-        ...entry,
-        model_info: { ...previous?.model_info, ...entry.model_info },
-      });
+      const group = groups.get(entry.model_name) ?? [];
+      group.push(entry);
+      groups.set(entry.model_name, group);
     }
-    let models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
+    let models = [...groups.values()].map(mapFromModelInfoGroup).filter((m): m is DiscoveredModel => m !== undefined);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in
