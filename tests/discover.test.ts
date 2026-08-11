@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
@@ -401,6 +402,93 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["azure/gpt-4o", 128_000, 16_384, 2.5],
+    ["azure/gpt-5", 400_000, 128_000, 1.25],
+  ])(
+    "enriches an opaque Azure deployment from base_model %s",
+    async (baseModel, contextWindow, maxTokens, inputCost) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "azure-production",
+              litellm_params: { model: "azure/prod-deployment-01" },
+              model_info: { mode: "chat", litellm_provider: "azure", base_model: baseModel },
+            },
+          ],
+        }),
+      );
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]).toMatchObject({
+        id: "azure-production",
+        input: ["text", "image"],
+        contextWindow,
+        maxTokens,
+        cost: { input: inputCost },
+      });
+    },
+  );
+
+  it("enriches every deployment in an opaque Azure group from base_model", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: ["a", "b"].map((deployment) => ({
+          model_name: "azure-production-group",
+          litellm_params: { model: `azure/prod-deployment-${deployment}` },
+          model_info: {
+            id: deployment,
+            mode: "chat",
+            litellm_provider: "azure",
+            base_model: "azure/gpt-4o",
+          },
+        })),
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "azure-production-group",
+      input: ["text", "image"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 2.5, output: 10 },
+    });
+  });
+
+  it("enriches an opaque Bedrock ARN with Claude cache compatibility", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "bedrock-production",
+            litellm_params: {
+              model: "bedrock/arn:aws:bedrock:us-east-1:123456789012:inference-profile/production",
+            },
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "bedrock-production",
+      input: ["text", "image"],
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      compat: { cacheControlFormat: "anthropic" },
+    });
+  });
+
   it("does not use a qualified public route as evidence for a multi-deployment group", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -485,6 +573,33 @@ describe("discoverModels via /model/info", () => {
         model_info: { litellm_provider: "moonshot", base_model: "kimi-k3" },
       }),
     ).toMatchObject({ provider: "moonshotai", semanticFamily: "kimi", semanticModel: "kimi-k3" });
+  });
+
+  it("derives DeepSeek policy from an opaque Azure Foundry deployment and base_model", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "foundry-route",
+            litellm_params: { model: "azure_ai/deepseek-production", allowed_openai_params: ["reasoning_effort"] },
+            model_info: {
+              mode: "chat",
+              litellm_provider: "azure_ai",
+              base_model: "deepseek/deepseek-v4-pro",
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "foundry-route",
+      reasoning: true,
+      thinkingLevelMap: { off: null, high: "high", max: "max" },
+      compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
+    });
   });
 
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
@@ -652,7 +767,7 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(getSupportedThinkingLevels(result.models[0]!)).toEqual([]);
     expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
   });
 
@@ -678,7 +793,7 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(getSupportedThinkingLevels(result.models[0]!)).toEqual([]);
     expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
   });
 

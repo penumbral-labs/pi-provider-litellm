@@ -1,4 +1,4 @@
-import { type Context, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { type Context, getSupportedThinkingLevels, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
@@ -144,7 +144,8 @@ describe("native provider stream compatibility", () => {
     await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
 
     expect(model.reasoning).toBe(true);
-    expect(model).not.toHaveProperty("thinkingLevelMap");
+    expect(getSupportedThinkingLevels(model)).toEqual([]);
+    expect(requests).toHaveLength(1);
     expect(requests[0]).not.toHaveProperty("thinking");
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
   });

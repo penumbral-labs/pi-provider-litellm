@@ -178,7 +178,11 @@ function buildReasoningPolicy(
         compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
       };
     }
-    return { reasoning, compat: { ...replay, supportsReasoningEffort: false } };
+    return {
+      reasoning,
+      thinkingLevelMap: reasoning ? { off: null, minimal: null, low: null, medium: null, high: null } : undefined,
+      compat: { ...replay, supportsReasoningEffort: false },
+    };
   }
   if (semanticModel === "deepseek-v4") {
     const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
@@ -219,7 +223,11 @@ function buildReasoningPolicy(
         compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
       };
     }
-    return { reasoning, compat: { ...replay, supportsReasoningEffort: false } };
+    return {
+      reasoning,
+      thinkingLevelMap: reasoning ? { off: null, minimal: null, low: null, medium: null, high: null } : undefined,
+      compat: { ...replay, supportsReasoningEffort: false },
+    };
   }
   return { reasoning: semanticModel ? reasoning : false };
 }

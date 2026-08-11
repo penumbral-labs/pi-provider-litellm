@@ -490,6 +490,7 @@ describe("reduceModelGroup", () => {
 
     expect(result?.reasoningPolicy).toEqual({
       reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null },
       compat: {
         requiresReasoningContentOnAssistantMessages: true,
         supportsReasoningEffort: false,
