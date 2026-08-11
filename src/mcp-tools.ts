@@ -45,11 +45,9 @@ interface PreparedTool {
   syntheticArgsEnvelope: boolean;
 }
 
-/**
- * Why a discovered MCP tool was not registered as the proxy described it.
- * `schema-envelope` is a degradation, not a loss: the tool still registers, with the
- * extension-owned envelope in place of a schema that could not be proven safe.
- */
+// Why a discovered MCP tool was not registered as the proxy described it.
+// `schema-envelope` is a degradation, not a loss: the tool still registers, with the
+// extension-owned envelope in place of a schema that could not be proven safe.
 export type McpDropReason = "invalid-tool" | "duplicate-identity" | "invalid-schema" | "name-collision";
 export type McpDegradeReason = "schema-envelope";
 export type McpIncidentReason = McpDropReason | McpDegradeReason;
@@ -71,23 +69,23 @@ const INCIDENT_REASON_TEXT: Readonly<Record<McpIncidentReason, string>> = {
 };
 
 export interface McpPreparationReport {
-  /** Raw tool entries the proxy returned, before any normalization. */
+  // Raw tool entries the proxy returned, before any normalization.
   discovered: number;
-  /** Tools registered with the schema the proxy supplied. */
+  // Tools registered with the schema the proxy supplied.
   prepared: number;
-  /** Of `prepared`, how many carry the extension-owned envelope instead of the proxy's schema. */
+  // Of `prepared`, how many carry the extension-owned envelope instead of the proxy's schema.
   enveloped: number;
-  /** Tools discarded because the registered-tool cap was reached. */
+  // Tools discarded because the registered-tool cap was reached.
   overflow: number;
   dropped: Array<{ reason: McpDropReason; tools: string[] }>;
   degraded: Array<{ reason: McpDegradeReason; tools: string[] }>;
 }
 
-/** Bounded discovery result: `raw` is what the proxy returned, so losses can be reconciled. */
+// Bounded discovery result: `raw` is what the proxy returned, so losses can be reconciled.
 export interface McpDiscovery {
   raw: number;
   tools: LiteLLMMcpTool[];
-  /** Entries dropped by normalization, as bounded safe labels. */
+  // Entries dropped by normalization, as bounded safe labels.
   invalid: string[];
 }
 
@@ -97,11 +95,9 @@ export interface McpDiscovery {
 // without bound.
 const lastEmittedIncident = new Map<string, string>();
 
-/**
- * Reports an incident unless its identity is unchanged since the last report of that class.
- * `identity` must capture everything an operator would want to hear about again — for tool
- * incidents that is the full sorted membership, not just the bounded sample that gets printed.
- */
+// Reports an incident unless its identity is unchanged since the last report of that class.
+// `identity` must capture everything an operator would want to hear about again — for tool
+// incidents that is the full sorted membership, not just the bounded sample that gets printed.
 function emitSafetyDiagnostic(incident: string, message: string, identity: string = message): void {
   if (lastEmittedIncident.get(incident) === identity) return;
   lastEmittedIncident.set(incident, identity);
@@ -123,20 +119,18 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
   return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
-/** Renders a bounded sample list. Names are already sanitized to `[a-z0-9_]`, so they are safe for stderr. */
+// Renders a bounded sample list. Names are already sanitized to `[a-z0-9_]`, so they are safe for stderr.
 function sampleList(names: readonly string[]): string {
   const shown = names.slice(0, MAX_DIAGNOSTIC_SAMPLES);
   const remainder = names.length - shown.length;
   return remainder > 0 ? `${shown.join(", ")} (+${remainder} more)` : shown.join(", ");
 }
 
-/**
- * Reports a registration pass that Pi aborted.
- *
- * Pi's `registerTool` is a synchronous replace-by-name whose only throw comes from a staleness
- * check that is never reset, so a throw means the pass is over, not that one tool was rejected.
- * `cause` is Pi-authored and bounded; no proxy schema, description, or body reaches stderr.
- */
+// Reports a registration pass that Pi aborted.
+//
+// Pi's `registerTool` is a synchronous replace-by-name whose only throw comes from a staleness
+// check that is never reset, so a throw means the pass is over, not that one tool was rejected.
+// `cause` is Pi-authored and bounded; no proxy schema, description, or body reaches stderr.
 export function reportMcpRegistrationFatal(registered: number, attempted: number, cause: unknown): void {
   const causeText = truncateUtf8(
     cause instanceof Error ? cause.message : String(cause),
@@ -150,7 +144,7 @@ export function reportMcpRegistrationFatal(registered: number, attempted: number
   );
 }
 
-/** Reports a discovery that yielded no registrable tool, so the silence is explained. */
+// Reports a discovery that yielded no registrable tool, so the silence is explained.
 export function reportMcpEmptyCatalog(raw: number): void {
   emitSafetyDiagnostic(
     "empty-catalog",
@@ -245,10 +239,8 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   };
 }
 
-/**
- * A bounded, injection-safe label for an entry that normalization rejected. Such an entry may have
- * no usable name at all, so fall back to a positional placeholder rather than echoing proxy text.
- */
+// A bounded, injection-safe label for an entry that normalization rejected. Such an entry may have
+// no usable name at all, so fall back to a positional placeholder rather than echoing proxy text.
 function invalidToolLabel(value: unknown, index: number): string {
   const raw = asRecord(value) as RawLiteLLMMcpTool | undefined;
   const name = raw ? stringValue(raw.name) : undefined;
@@ -395,14 +387,12 @@ function toolIdentity(tool: LiteLLMMcpTool): string {
   return `${tool.server_id ?? tool.server_name}\0${tool.server_name}\0${tool.name}`;
 }
 
-/**
- * Derives a Pi tool name from the tool's identity alone.
- *
- * The hash is unconditional so the name is a pure function of `server_id`/`server_name`/`name`.
- * A conditional hash would make a survivor's name depend on which *other* tools happened to be in
- * the same catalog, so adding or removing a sibling would rename it — and because Pi cannot
- * unregister, the old name would linger and the model would see one tool twice.
- */
+// Derives a Pi tool name from the tool's identity alone.
+//
+// The hash is unconditional so the name is a pure function of `server_id`/`server_name`/`name`.
+// A conditional hash would make a survivor's name depend on which *other* tools happened to be in
+// the same catalog, so adding or removing a sibling would rename it — and because Pi cannot
+// unregister, the old name would linger and the model would see one tool twice.
 function buildPiToolName(tool: LiteLLMMcpTool): string {
   const hash = createHash("sha256").update(toolIdentity(tool)).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
   const base = `mcp_${sanitizeName(tool.server_name)}_${sanitizeName(tool.name)}`;
@@ -454,20 +444,18 @@ const NAME_KEYED_KEYWORDS = new Set([
   "dependencies",
 ]);
 
-/** Why a supplied schema could not be proven safe to hand to the validator. */
+// Why a supplied schema could not be proven safe to hand to the validator.
 export type SchemaHazard = "regex" | "nonlocal-ref" | "budget" | "cycle";
 
-/**
- * Walks the whole untrusted schema graph looking for anything the validator could turn into a
- * regex, plus references we cannot resolve within the document we were given.
- *
- * Bounded three ways so a hostile document cannot exhaust us while we inspect it: a depth cap, a
- * node budget, and identity-based cycle detection. Hitting any bound returns a hazard rather than
- * `undefined`, because an unfinished scan proves nothing.
- *
- * A local `#/...` ref is safe precisely because this walk covers the whole document, so its target
- * has been inspected too. Any other ref form is a hazard.
- */
+// Walks the whole untrusted schema graph looking for anything the validator could turn into a
+// regex, plus references we cannot resolve within the document we were given.
+//
+// Bounded three ways so a hostile document cannot exhaust us while we inspect it: a depth cap, a
+// node budget, and identity-based cycle detection. Hitting any bound returns a hazard rather than
+// `undefined`, because an unfinished scan proves nothing.
+//
+// A local `#/...` ref is safe precisely because this walk covers the whole document, so its target
+// has been inspected too. Any other ref form is a hazard.
 export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | undefined {
   const seen = new WeakSet<object>();
   let budget = MAX_SCAN_NODES;
@@ -540,7 +528,7 @@ function hasValidSchemaShape(record: Record<string, unknown>): boolean {
   return !("items" in record) || isValidSchema(items) || isValidSchemaArray(items);
 }
 
-/** The extension-owned parameter shape. Nothing in it originates from the proxy. */
+// The extension-owned parameter shape. Nothing in it originates from the proxy.
 function trustedEnvelope(): TSchema {
   return Type.Object({
     args: Type.Record(Type.String(), Type.Unknown(), { description: "Tool arguments as key-value pairs" }),
@@ -550,7 +538,7 @@ function trustedEnvelope(): TSchema {
 type BuiltParameters = {
   parameters: TSchema;
   syntheticArgsEnvelope: boolean;
-  /** Set when the proxy supplied a usable schema that we replaced with the trusted envelope. */
+  // Set when the proxy supplied a usable schema that we replaced with the trusted envelope.
   degraded?: McpDegradeReason;
 };
 
