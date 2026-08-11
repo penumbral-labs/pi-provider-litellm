@@ -339,6 +339,35 @@ describe("createLiteLLMProvider", () => {
     expect(activePlaceholder.filterModels?.([native("stored")], credential)).toEqual([]);
   });
 
+  // The documentation host is a real, third-party-operated domain, so any spelling of it
+  // that slipped through would send a live credential off the machine.
+  it.each([
+    ["https://litellm.example.com"],
+    ["https://litellm.example.com."],
+    ["https://litellm.example.com:8000"],
+    ["https://LITELLM.EXAMPLE.COM"],
+    ["http://litellm.example.com/v1"],
+  ])("never dispatches a request to placeholder host spelling %s", (root) => {
+    const value = controller({ resolveCredentialRoot: () => root });
+
+    expect(value.filterModels?.([native("stored")], credential)).toEqual([]);
+    expect(() => value.stream(native("stored"), { messages: [] })).toThrow(/placeholder LiteLLM model host/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(apiSpies.anthropic).not.toHaveBeenCalled();
+    expect(apiSpies.responses).not.toHaveBeenCalled();
+  });
+
+  it("treats a trailing-dot host as the same host as its cached models", () => {
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example." });
+
+    // A fully-qualified spelling of the active host must not read as a different host
+    // and silently empty the model list. The dot survives into the request URL, which
+    // resolves to the same host.
+    expect(value.filterModels?.([native("stored")], credential)).toEqual([
+      { ...native("stored"), baseUrl: "https://proxy.example./v1" },
+    ]);
+  });
+
   it("drops a model with an unsupported transport instead of failing the whole list", () => {
     const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
     const usable = native("usable");

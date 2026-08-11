@@ -476,30 +476,39 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
   return definitions;
 }
 
+// Validate at the prompt, where the message is actionable. Storing an unusable root
+// silently succeeds and only surfaces later as an empty model list plus one stderr line.
+function loginBaseUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) throw new Error("Base URL is required");
+  const { root, host } = credentialRoot(trimmed, "Entered base URL");
+  if (isPlaceholderHost(host)) {
+    throw new Error(`${DEFAULT_LITELLM_BASE_URL} is the documentation example; enter your own LiteLLM proxy URL`);
+  }
+  return root;
+}
+
 async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredential> {
-  const rawBaseUrl = (
+  const baseUrl = loginBaseUrl(
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
       placeholder: "https://litellm.example.com",
-    })
-  ).trim();
-  if (!rawBaseUrl) throw new Error("Base URL is required");
+    }),
+  );
   const key = (await interaction.prompt({ type: "secret", message: "Enter API key:" })).trim();
   if (!key) throw new Error("Both base URL and API key are required");
-  return { type: "api_key", key, env: { [ENV_BASE_URL]: normalizeBaseUrl(rawBaseUrl) } };
+  return { type: "api_key", key, env: { [ENV_BASE_URL]: baseUrl } };
 }
 
 async function loginOAuth(interaction: AuthInteraction, headers?: Record<string, string>): Promise<OAuthCredential> {
-  const rawBaseUrl = (
+  const baseUrl = loginBaseUrl(
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
       placeholder: "https://litellm.example.com",
-    })
-  ).trim();
-  if (!rawBaseUrl) throw new Error("Base URL is required");
-  const baseUrl = normalizeBaseUrl(rawBaseUrl);
+    }),
+  );
   interaction.notify({
     type: "auth_url",
     url: `${baseUrl}/sso/key/generate`,
@@ -745,6 +754,9 @@ function prepareLiteLLMRequestPayload(
   api: Api | undefined,
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
+  // Native Messages payloads are Anthropic-shaped and must never be rewritten by this
+  // hook. This is the single gate for that; the checks below only distinguish Chat
+  // Completions from Responses.
   if (api === "anthropic-messages") return undefined;
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
@@ -804,11 +816,7 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (
-    (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
-    modelId &&
-    GEMINI_MODEL_PATTERN.test(modelId)
-  ) {
+  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -831,7 +839,7 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if ((openAIApi === "openai-completions" || openAIApi === "openai-responses") && sessionId) {
+  if (sessionId) {
     next ??= { ...payload };
     next.litellm_session_id = sessionId;
   }
@@ -968,34 +976,39 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   async function resolveRuntimeAuth(
     ctx: ExtensionContext,
   ): Promise<{ auth: LiteLLMRuntimeAuth } | { unavailable: string } | undefined> {
-    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
-    if (!auth) return undefined;
-    const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const apiKey = auth.auth.apiKey;
-    let baseUrl: string | undefined;
     try {
-      baseUrl = resolveSanitizedCredentialRoot(
+      // Auth resolution itself can reject — pi wraps a throwing OAuth `toAuth` in a
+      // ModelsError — so it belongs inside the containment, not ahead of it.
+      const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
+      if (!auth) return undefined;
+      const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
+      const apiKey = auth.auth.apiKey;
+      // A remembered host from a previous resolution is only reusable for the same
+      // credential; otherwise a later key could be paired with the earlier host.
+      const rememberedBaseUrl =
+        apiKey && defaultRuntimeAuth?.apiKey === apiKey ? defaultRuntimeAuth.baseUrl : undefined;
+      const baseUrl = resolveSanitizedCredentialRoot(
         definitions.find((definition) => definition.name === PROVIDER_NAME)!,
         undefined,
-        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? defaultRuntimeAuth?.baseUrl,
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? rememberedBaseUrl,
       );
       if (!baseUrl || !apiKey) return undefined;
       requireNonPlaceholderCredentialRoot(baseUrl);
+      const headers = Object.fromEntries(
+        Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
+      return {
+        auth: {
+          baseUrl: normalizeBaseUrl(baseUrl),
+          apiKey,
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+        },
+      };
     } catch (error) {
       return { unavailable: error instanceof Error ? error.message : String(error) };
     }
-    const headers = Object.fromEntries(
-      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-    return {
-      auth: {
-        baseUrl: normalizeBaseUrl(baseUrl),
-        apiKey,
-        headers: Object.keys(headers).length > 0 ? headers : undefined,
-      },
-    };
   }
 
   const reportedRuntimeAuthDiagnostics = new Set<string>();

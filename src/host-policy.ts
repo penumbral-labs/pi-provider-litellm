@@ -4,11 +4,19 @@ import { normalizeBaseUrl } from "./discover.js";
 // placeholder, never a real proxy, so credentials must never be sent to it.
 export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
 
-const PLACEHOLDER_HOSTS = new Set([new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()]);
+// Compared on hostname only: a port or a fully-qualified trailing dot still reaches the
+// same third-party documentation host, so neither may be used to slip past this gate.
+const PLACEHOLDER_HOSTNAMES = new Set([canonicalHostname(new URL(DEFAULT_LITELLM_BASE_URL).hostname)]);
+
+function canonicalHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, "");
+}
 
 // Every LiteLLM host rule lives here so availability, request, and discovery paths cannot drift apart.
 export function isPlaceholderHost(host: string): boolean {
-  return PLACEHOLDER_HOSTS.has(host.toLowerCase());
+  // Accepts either a bare hostname or a `host:port` value.
+  const hostname = host.startsWith("[") ? (host.match(/^\[[^\]]*\]/)?.[0] ?? host) : (host.split(":")[0] ?? host);
+  return PLACEHOLDER_HOSTNAMES.has(canonicalHostname(hostname));
 }
 
 export function refreshRequired(message: string): Error {
@@ -23,7 +31,10 @@ export function credentialRoot(baseUrl: string, subject: string): { root: string
     const root = normalizeBaseUrl(baseUrl);
     const url = new URL(root);
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
-    return { root, host: url.host.toLowerCase() };
+    // Host identity is compared as canonical hostname plus port, so a trailing dot
+    // cannot present one host as two and split cached models from active credentials.
+    const port = url.port ? `:${url.port}` : "";
+    return { root, host: `${canonicalHostname(url.hostname)}${port}` };
   } catch {
     throw refreshRequired(`${subject} has an invalid LiteLLM model URL`);
   }

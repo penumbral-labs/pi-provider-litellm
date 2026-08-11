@@ -923,6 +923,28 @@ describe("extension startup", () => {
     expect(provider.filterModels?.([apiKeyModel], { type: "api_key", key: "sk-api-key" })).toEqual([apiKeyModel]);
   });
 
+  it.each([
+    ["the documentation placeholder", "https://litellm.example.com", /documentation example/i],
+    ["a placeholder variant with a trailing dot", "https://litellm.example.com.", /documentation example/i],
+    ["a placeholder variant with a port", "https://litellm.example.com:8000", /documentation example/i],
+    ["a URL with no scheme", "localhost:4000", /invalid LiteLLM model URL/i],
+    ["a non-http scheme", "file:///etc/passwd", /invalid LiteLLM model URL/i],
+  ])("refuses %s at login and sends no request", async (_label, entered, expected) => {
+    const agentDir = await makeAgentDir();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      throw new Error(`unexpected request: ${String(input)}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      loginOAuth(pi.providers[0]!, { onPrompt: async (options) => (options.placeholder ? entered : "sk-login") }),
+    ).rejects.toThrow(expected);
+    // A refused root must never be contacted, not even for the SSO key exchange.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("registers unconfigured when the configured base URL is invalid", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "localhost:4000";

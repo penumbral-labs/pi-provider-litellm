@@ -512,6 +512,78 @@ describe("feature parity", () => {
     await expect(listTool?.execute?.("call-1", {}, undefined, undefined, ctx)).rejects.toThrow(diagnostic);
   });
 
+  it("starts a turn normally when resolving LiteLLM auth itself rejects", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+    // Pi wraps a throwing OAuth `toAuth` in a ModelsError and rejects getProviderAuth.
+    const ctx = {
+      modelRegistry: {
+        getProviderAuth: async () => {
+          throw new Error("OAuth auth derivation failed for litellm");
+        },
+        getProvider: () => pi.providers[0],
+      },
+    };
+
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, ctx)).resolves.toBeUndefined();
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, ctx)).resolves.toBeUndefined();
+
+    const diagnostics = stderrSpy.mock.calls.filter(([line]) => /OAuth auth derivation failed/.test(String(line)));
+    expect(diagnostics).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never pairs a later API key with a remembered host from an earlier credential", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    delete process.env.LITELLM_BASE_URL;
+    const requested: Array<{ url: string; auth: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = input instanceof Request ? input : undefined;
+      requested.push({
+        url: request?.url ?? String(input),
+        auth: new Headers(request?.headers ?? init?.headers).get("authorization"),
+      });
+      return jsonResponse(200, []);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+
+    // A turn with key-a for host A leaves that host remembered for in-turn tool calls.
+    await beforeAgentStart?.(
+      { systemPrompt: "p" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: "key-a", baseUrl: "https://a.example.com" } }),
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+    expect(requested.length).toBeGreaterThan(0);
+    expect(requested.every(({ url }) => url.startsWith("https://a.example.com"))).toBe(true);
+    const afterTurn = requested.length;
+
+    // Mid-turn, a different key that carries no host of its own must not inherit host A.
+    const listTool = pi.tools.find((tool) => tool.name === "litellm_skill_list");
+    await expect(
+      listTool?.execute?.("call-1", {}, undefined, undefined, {
+        modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: "key-b" } }),
+          getProvider: () => pi.providers[0],
+        },
+      }),
+    ).rejects.toThrow(/no credentials for litellm/);
+    expect(requested.slice(afterTurn)).toEqual([]);
+  });
+
   it("disables LiteLLM skills through settings", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     await writeFile(
