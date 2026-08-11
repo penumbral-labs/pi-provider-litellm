@@ -32,6 +32,9 @@ const ENV_KEYS = [
   "CUSTOM_LITELLM_KEY",
 ];
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+// The documentation placeholder. Reaching it with a real key is the failure these
+// guards exist to prevent, so tests name it rather than repeating the literal.
+const PLACEHOLDER_BASE_URL = "https://litellm.example.com";
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -991,7 +994,59 @@ describe("extension startup", () => {
   });
 
   it.each([
-    ["placeholder", "https://litellm.example.com"],
+    ["an api key", { type: "api_key" as const, key: "sk-secret", env: { LITELLM_BASE_URL: PLACEHOLDER_BASE_URL } }],
+    [
+      "an SSO credential",
+      {
+        type: "oauth" as const,
+        access: "sk-secret",
+        refresh: "",
+        expires: Number.MAX_SAFE_INTEGER,
+        baseUrl: PLACEHOLDER_BASE_URL,
+      },
+    ],
+  ])("never sends %s to the placeholder host during discovery", async (_label, credential) => {
+    process.env.LITELLM_BASE_URL = PLACEHOLDER_BASE_URL;
+    process.env.LITELLM_API_KEY = "sk-secret";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(refreshProvider(pi.providers[0]!, { allowNetwork: true, force: true, credential })).rejects.toThrow(
+      /placeholder/,
+    );
+
+    // No request at all, so the real key cannot have reached the placeholder domain.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never exposes the key to LiteLLM tool surfaces on a placeholder host", async () => {
+    process.env.LITELLM_BASE_URL = PLACEHOLDER_BASE_URL;
+    process.env.LITELLM_API_KEY = "sk-secret";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const skillTool = pi.tools.find((tool) => tool.name === "litellm_skill_list");
+
+    await expect(
+      skillTool?.execute?.("call-1", {}, undefined, undefined, {
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "sk-secret" },
+            env: { LITELLM_BASE_URL: PLACEHOLDER_BASE_URL },
+          }),
+          getProvider: () => pi.providers[0],
+        },
+      }),
+    ).rejects.toThrow(/no credentials for litellm/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["placeholder", PLACEHOLDER_BASE_URL],
     ["scheme-less", "localhost:4000"],
   ])("keeps a %s base URL from failing agent start", async (_label, baseUrl) => {
     // before_agent_start runs on every turn, including turns that never touch

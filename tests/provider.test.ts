@@ -331,6 +331,52 @@ describe("createLiteLLMProvider", () => {
     ]);
   });
 
+  it("derives the request base from the active root, not the cached model path", () => {
+    // Same host, different path prefix, as a multi-tenant proxy produces. The cached
+    // path must not survive: this fails if the reprojection reads model.baseUrl.
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/tenant-a" });
+    const cached = { ...native("tenant"), baseUrl: "https://proxy.example/tenant-b/v1" };
+
+    expect(value.filterModels?.([cached], credential)?.map((model) => model.baseUrl)).toEqual([
+      "https://proxy.example/tenant-a/v1",
+    ]);
+  });
+
+  it("derives the request scheme from the active root", () => {
+    // Host matches, scheme does not. The active credential decides, so a cached
+    // http entry cannot downgrade an https proxy.
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    const cached = { ...native("scheme"), baseUrl: "http://proxy.example/v1" };
+
+    expect(value.filterModels?.([cached], credential)?.map((model) => model.baseUrl)).toEqual([
+      "https://proxy.example/v1",
+    ]);
+  });
+
+  it("treats a differing port as a different host", () => {
+    // The likeliest real mismatch: a local proxy moved port. Port is part of the
+    // host comparison, so the cached entry is dropped rather than repointed.
+    const value = controller({ resolveCredentialRoot: () => "http://localhost:8000" });
+    const cached = { ...native("port"), baseUrl: "http://localhost:4000/v1" };
+
+    expect(value.filterModels?.([cached], credential)).toEqual([]);
+  });
+
+  it("blocks a cached path mismatch on the request path too", () => {
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/tenant-a" });
+    const cached = { ...native("tenant"), baseUrl: "https://proxy.example/tenant-b/v1" };
+
+    // Same host, so the model is usable, but the URL must come from the active root.
+    const streamed = value.stream(cached, { messages: [] });
+    void streamed;
+
+    expect(apiSpies.completions).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "https://proxy.example/tenant-a/v1" }),
+      expect.anything(),
+      undefined,
+    );
+  });
+
   it("filters stale LiteLLM models without taking down other providers", async () => {
     const models = createModels({
       credentials: credentialStore({
