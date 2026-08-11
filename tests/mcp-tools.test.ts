@@ -916,29 +916,97 @@ describe("createMcpToolDefinitions", () => {
   });
 });
 
-describe("body cap diagnostics under a failing cancel", () => {
-  it("still emits the diagnostic and the cap error when reader.cancel() rejects", async () => {
-    vi.resetModules();
-    const { discoverMcpTools: discoverTools } = await import("../src/mcp-tools.js");
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+describe("schema keyword validation positions", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
 
-    // A body that breaches the cap and whose cancel() rejects, which is what an errored stream does.
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(5 * 1024 * 1024 + 1));
-      },
-      cancel() {
-        return Promise.reject(new Error("upstream reset"));
-      },
-    });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+  async function prepare(inputSchema: unknown): Promise<string[]> {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [{ name: "probe", server_name: "srv", input_schema: inputSchema }]),
+    );
+    const definitions = await createMcpToolDefinitions(auth);
+    return definitions.map((definition) => definition.name);
+  }
 
-    await expect(discoverTools("https://litellm.example.com", "sk-test")).rejects.toThrow(
-      "MCP discovery response exceeds its 5242880-byte limit",
-    );
-    expect(stderr.mock.calls.map(([message]) => String(message))).toContain(
-      "LiteLLM MCP: MCP discovery response exceeded its 5242880-byte limit.\n",
-    );
+  // Each newly allowed keyword is validated where the JSON Schema spec puts a schema, and must be
+  // rejected when that position holds a non-schema value. `patternProperties` is covered separately
+  // because it is refused outright.
+  const directKeywords = [
+    "additionalProperties",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+  ] as const;
+  const arrayKeywords = ["allOf", "anyOf", "oneOf", "prefixItems"] as const;
+  const mapKeywords = ["$defs", "definitions", "dependentSchemas", "properties"] as const;
+
+  it.each(directKeywords)("accepts a schema at the %s position and rejects a non-schema there", async (keyword) => {
+    expect(await prepare({ type: "object", properties: { x: { [keyword]: { type: "string" } } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", properties: { x: { [keyword]: 5 } } })).toEqual([]);
+  });
+
+  it.each(arrayKeywords)("accepts a schema array at the %s position and rejects a non-array there", async (keyword) => {
+    expect(await prepare({ type: "object", properties: { x: { [keyword]: [{ type: "string" }] } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", properties: { x: { [keyword]: { type: "string" } } } })).toEqual([]);
+    expect(await prepare({ type: "object", properties: { x: { [keyword]: [5] } } })).toEqual([]);
+  });
+
+  it.each(mapKeywords)(
+    "accepts a schema map at the %s position and rejects a non-schema value there",
+    async (keyword) => {
+      expect(await prepare({ type: "object", properties: { x: { [keyword]: { k: { type: "string" } } } } })).toEqual([
+        "mcp_srv_probe",
+      ]);
+      expect(await prepare({ type: "object", properties: { x: { [keyword]: 5 } } })).toEqual([]);
+      expect(await prepare({ type: "object", properties: { x: { [keyword]: { k: 5 } } } })).toEqual([]);
+    },
+  );
+
+  it("accepts boolean subschemas and both items forms", async () => {
+    expect(await prepare({ type: "object", properties: { x: { additionalProperties: false } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", properties: { x: { items: { type: "string" } } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", properties: { x: { items: [{ type: "string" }, true] } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", properties: { x: { items: 5 } } })).toEqual([]);
+  });
+
+  it("rejects a non-string-array required at any schema position", async () => {
+    expect(await prepare({ type: "object", required: ["a"], properties: { a: { type: "string" } } })).toEqual([
+      "mcp_srv_probe",
+    ]);
+    expect(await prepare({ type: "object", required: "a" })).toEqual([]);
+    expect(await prepare({ type: "object", properties: { x: { type: "object", required: [5] } } })).toEqual([]);
+  });
+
+  it("does not validate keyword names that appear at data positions", async () => {
+    // These are argument names, not constraints, so they must survive untouched.
+    const dataPositions = {
+      type: "object",
+      properties: {
+        if: { type: "string" },
+        not: { type: "string" },
+        required: { type: "string" },
+        properties: { type: "string" },
+        allOf: { type: "string" },
+        pattern: { type: "string" },
+        patternProperties: { type: "string" },
+      },
+    };
+    expect(await prepare(dataPositions)).toEqual(["mcp_srv_probe"]);
   });
 });
 
@@ -1069,5 +1137,31 @@ describe("bounded untrusted display strings", () => {
       apiKey: "sk-test",
     }));
     expect(definition?.label).toBe("brave: search");
+  });
+});
+
+describe("body cap diagnostics under a failing cancel", () => {
+  it("still emits the diagnostic and the cap error when reader.cancel() rejects", async () => {
+    vi.resetModules();
+    const { discoverMcpTools: discoverTools } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    // A body that breaches the cap and whose cancel() rejects, which is what an errored stream does.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(5 * 1024 * 1024 + 1));
+      },
+      cancel() {
+        return Promise.reject(new Error("upstream reset"));
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+
+    await expect(discoverTools("https://litellm.example.com", "sk-test")).rejects.toThrow(
+      "MCP discovery response exceeds its 5242880-byte limit",
+    );
+    expect(stderr.mock.calls.map(([message]) => String(message))).toContain(
+      "LiteLLM MCP: MCP discovery response exceeded its 5242880-byte limit.\n",
+    );
   });
 });
