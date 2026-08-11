@@ -827,3 +827,29 @@ describe("createMcpToolDefinitions", () => {
     });
   });
 });
+
+describe("body cap diagnostics under a failing cancel", () => {
+  it("still emits the diagnostic and the cap error when reader.cancel() rejects", async () => {
+    vi.resetModules();
+    const { discoverMcpTools: discoverTools } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    // A body that breaches the cap and whose cancel() rejects, which is what an errored stream does.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(5 * 1024 * 1024 + 1));
+      },
+      cancel() {
+        return Promise.reject(new Error("upstream reset"));
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+
+    await expect(discoverTools("https://litellm.example.com", "sk-test")).rejects.toThrow(
+      "MCP discovery response exceeds its 5242880-byte limit",
+    );
+    expect(stderr.mock.calls.map(([message]) => String(message))).toContain(
+      "LiteLLM MCP: MCP discovery response exceeded its 5242880-byte limit.\n",
+    );
+  });
+});

@@ -83,9 +83,12 @@ async function readBoundedText(response: Response, limit: number, surface: strin
       if (done) break;
       size += value.byteLength;
       if (size > limit) {
-        await reader.cancel();
+        // Build the diagnostic and the error before cancelling: `cancel()` rejects with the stream's
+        // stored error if the body errored concurrently, which would otherwise discard both.
         emitSafetyDiagnostic(`${surface}-body-cap`, `${surface} response exceeded its ${limit}-byte limit.`);
-        throw new Error(`${surface} response exceeds its ${limit}-byte limit`);
+        const capError = new Error(`${surface} response exceeds its ${limit}-byte limit`);
+        await reader.cancel().catch(() => undefined);
+        throw capError;
       }
       chunks.push(value);
     }
