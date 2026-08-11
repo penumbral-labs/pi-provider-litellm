@@ -21,7 +21,7 @@ const catalog = new Map<string, CatalogResolution>([
       provider: "anthropic",
       semanticFamily: "claude",
       backendIdentity: { semanticFamily: "claude" },
-      adaptiveThinking: true,
+      messagesCompat: { forceAdaptiveThinking: true, supportsStrictTools: true },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -35,7 +35,7 @@ const catalog = new Map<string, CatalogResolution>([
       provider: "amazon-bedrock",
       semanticFamily: "claude",
       backendIdentity: { semanticFamily: "claude" },
-      adaptiveThinking: true,
+      messagesCompat: { forceAdaptiveThinking: true, supportsStrictTools: true },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -49,7 +49,7 @@ const catalog = new Map<string, CatalogResolution>([
       provider: "anthropic",
       semanticFamily: "claude",
       backendIdentity: { semanticFamily: "claude" },
-      adaptiveThinking: false,
+      messagesCompat: { supportsStrictTools: true },
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -181,7 +181,7 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([responses, responses], resolveCatalog)?.api).toBe("openai-responses");
   });
 
-  it("persists adaptive thinking only when every deployment has the same positive evidence", () => {
+  it("persists backend Messages compatibility only when every deployment agrees", () => {
     const anthropic = row({ model_info: { id: "anthropic" } });
     const bedrock = row({
       model_info: { id: "bedrock" },
@@ -199,11 +199,12 @@ describe("reduceModelGroup", () => {
     for (const order of permutations([anthropic, bedrock])) {
       expect(reduceModelGroup(order, resolveCatalog)).toMatchObject({
         api: "anthropic-messages",
-        adaptiveThinking: true,
+        messagesCompat: { forceAdaptiveThinking: true, supportsStrictTools: true },
       });
     }
-    expect(reduceModelGroup([anthropic, budgetThinking], resolveCatalog)).not.toHaveProperty("adaptiveThinking");
-    expect(reduceModelGroup([anthropic, unknown], resolveCatalog)).not.toHaveProperty("adaptiveThinking");
+    // Disagreeing adaptive policy and unknown backends both fail closed to no carried compat.
+    expect(reduceModelGroup([anthropic, budgetThinking], resolveCatalog)).not.toHaveProperty("messagesCompat");
+    expect(reduceModelGroup([anthropic, unknown], resolveCatalog)).not.toHaveProperty("messagesCompat");
   });
 
   it("lets unsupported transport evidence force Chat without affecting metadata", () => {

@@ -542,29 +542,99 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
-    ["anthropic/claude-opus-4-6", true],
-    ["anthropic/claude-sonnet-4-6", true],
-    ["anthropic/claude-fable-5", true],
-    ["anthropic/claude-opus-4-5", false],
-    ["anthropic/claude-sonnet-4-5", false],
-    ["anthropic/claude-haiku-4-5", false],
-  ])("derives adaptive-thinking evidence from catalog backend %s", (backend, adaptiveThinking) => {
+    ["anthropic/claude-opus-4-6", { forceAdaptiveThinking: true, supportsStrictTools: true }],
+    ["anthropic/claude-sonnet-4-6", { forceAdaptiveThinking: true, supportsStrictTools: true }],
+    ["anthropic/claude-fable-5", { forceAdaptiveThinking: true, supportsStrictTools: true }],
+    [
+      "anthropic/claude-opus-4-7",
+      { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
+    ],
+    ["anthropic/claude-opus-4-5", { supportsStrictTools: true }],
+    ["anthropic/claude-sonnet-4-5", { supportsStrictTools: true }],
+    ["anthropic/claude-haiku-4-5", { supportsStrictTools: true }],
+  ])("carries Messages compatibility from catalog backend %s", (backend, messagesCompat) => {
     expect(
       resolveModelInfoCatalog({
         model_name: "public-name-does-not-convey-generation",
         litellm_params: { model: backend },
         model_info: { litellm_provider: "anthropic" },
       }),
-    ).toMatchObject({ adaptiveThinking });
+    ).toMatchObject({ messagesCompat });
   });
 
-  it("does not classify adaptive thinking from public model_name alone", () => {
+  // A deployment can be identifiable enough to require adaptive thinking while its
+  // decorated routing id is absent from the catalog. Compat must survive; provider
+  // identity, pricing, and limits must not be inferred from it.
+  it.each([
+    ["anthropic", "anthropic/claude-opus-4-7-20260415"],
+    ["bedrock", "bedrock/us.anthropic.claude-opus-4-7-v1:0"],
+    ["bedrock_converse", "bedrock/converse/us.anthropic.claude-opus-4-7-v1:0"],
+    ["vertex_ai", "vertex_ai/claude-opus-4-7@20260101"],
+    ["bedrock", "bedrock/eu.anthropic.claude-opus-4-7-v1:0"],
+  ])("carries Messages compatibility for catalog-unresolvable backend %s %s", (adapter, backend) => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "public-name-does-not-convey-generation",
+      litellm_params: { model: backend },
+      model_info: { litellm_provider: adapter },
+    });
+
+    expect(resolved).toEqual({
+      semanticFamily: "claude",
+      backendIdentity: { semanticFamily: "claude" },
+      messagesCompat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
+    });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("contextWindow");
+    expect(resolved).not.toHaveProperty("cost");
+  });
+
+  it.each([
+    ["bedrock", "bedrock/apac.anthropic.claude-opus-4-6-v1:0"],
+    ["bedrock", "bedrock/us-gov.anthropic.claude-opus-4-6-v1:0"],
+  ])("canonicalizes cross-partition inference profiles %s %s", (adapter, backend) => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-name-does-not-convey-generation",
+        litellm_params: { model: backend },
+        model_info: { litellm_provider: adapter },
+      }),
+    ).toMatchObject({ messagesCompat: { forceAdaptiveThinking: true, supportsStrictTools: true } });
+  });
+
+  it.each([
+    ["bedrock/us.anthropic.claude-invented-9-9-v1:0"],
+    ["anthropic/claude-opus-4-7-preview"],
+    ["anthropic/claude-3-5-sonnet-20241022"],
+  ])("leaves Messages compatibility unknown for unrecognized Claude backend %s", (backend) => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "public-name-does-not-convey-generation",
+      litellm_params: { model: backend },
+      model_info: { litellm_provider: "bedrock" },
+    });
+
+    expect(resolved).toMatchObject({ backendIdentity: { semanticFamily: "claude" } });
+    expect(resolved).not.toHaveProperty("messagesCompat");
+  });
+
+  it("does not classify Messages compatibility from public model_name alone", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "claude-opus-5",
         model_info: { litellm_provider: "anthropic" },
       }),
     ).toBeUndefined();
+  });
+
+  it("does not let a contradictory base model supply metadata or adaptive policy", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "public-route",
+      litellm_params: { model: "anthropic/claude-opus-4-7-preview" },
+      model_info: { litellm_provider: "anthropic", base_model: "openai/gpt-4o" },
+    });
+
+    expect(resolved).toEqual({ semanticFamily: "claude", backendIdentity: { semanticFamily: "claude" } });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
@@ -708,7 +778,11 @@ describe("discoverModels native Messages selection", () => {
     expect(result.models[0]).toMatchObject({
       id: "claude-opus-5",
       api: "anthropic-messages",
-      compat: { forceAdaptiveThinking: true },
+    });
+    expect(result.models[0]?.compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsStrictTools: true,
     });
   });
 
@@ -938,7 +1012,7 @@ describe("discoverModels native Messages selection", () => {
       ["mixed-claude-nova-forward", "openai-completions"],
       ["mixed-claude-nova-reverse", "openai-completions"],
     ]);
-    expect(result.models[0]?.compat).toEqual({ forceAdaptiveThinking: true });
+    expect(result.models[0]?.compat).toEqual({ forceAdaptiveThinking: true, supportsStrictTools: true });
   });
 });
 

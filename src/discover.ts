@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   effectiveDeploymentCount,
+  type MessagesBackendCompat,
   reduceModelGroup,
   type SemanticFamily,
 } from "./model-groups.js";
@@ -195,19 +196,37 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
-function usesAdaptiveThinking(model: Model<Api>): boolean {
-  if (model.api !== "anthropic-messages") return false;
-  return (model as Model<"anthropic-messages">).compat?.forceAdaptiveThinking === true;
+function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined {
+  if (model.api !== "anthropic-messages") return undefined;
+  const compat = (model as Model<"anthropic-messages">).compat;
+  const carried: MessagesBackendCompat = {};
+  if (compat?.forceAdaptiveThinking !== undefined) carried.forceAdaptiveThinking = compat.forceAdaptiveThinking;
+  if (compat?.supportsTemperature !== undefined) carried.supportsTemperature = compat.supportsTemperature;
+  if (compat?.supportsStrictTools !== undefined) carried.supportsStrictTools = compat.supportsStrictTools;
+  return carried;
 }
 
-function adaptiveThinkingFromBackend(id: string): boolean | undefined {
-  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
-  const canonicalId = unprefixed
-    .toLowerCase()
-    .replace(/^(?:(?:[a-z]{2}|global)\.)?anthropic[./]/, "")
-    .replace(/-v\d+(?::\d+)?$/, "");
-  const model = findCatalogModelInProvider("anthropic", [canonicalId]);
-  return model ? usesAdaptiveThinking(model) : undefined;
+// Backend routing ids carry deployment decoration the Anthropic catalog does not:
+// an adapter path (`bedrock/converse/...`), a Bedrock cross-region or cross-partition
+// inference profile (`us.`, `eu.`, `apac.`, `us-gov.`, `global.`), a Bedrock model
+// version (`-v1:0`), a Vertex serving suffix (`@20260101`), or a dated release
+// snapshot. Try the most specific form first so an id the catalog knows exactly
+// wins over its undecorated family.
+function anthropicBackendLookupIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const base = routed.replace(/^(?:[a-z0-9-]+\.)*anthropic[./]/, "");
+  const undecorated = base.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
+  return [...new Set([base, undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean))];
+}
+
+/**
+ * Anthropic compatibility for a LiteLLM backend routing id, derived only from the
+ * backend identity LiteLLM reports. `undefined` means the backend model is unknown
+ * to the catalog; `{}` means it is known and carries no special requirements.
+ */
+function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefined {
+  const model = findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(id));
+  return model ? messagesCompatOf(model) : undefined;
 }
 
 function semanticFamily(id: string): SemanticFamily | undefined {
@@ -274,18 +293,31 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     conflictingFamilies ? undefined : baseModel,
   );
   const resolvedFamily = family ?? (backendIdentity ? "claude" : undefined);
+  // A candidate that disagrees with the group's resolved family must not supply either
+  // catalog metadata or Anthropic compatibility policy for it.
+  const agreeing = candidates.filter((candidate) => {
+    const candidateFamily = semanticFamily(candidate);
+    return candidateFamily === undefined || resolvedFamily === undefined || candidateFamily === resolvedFamily;
+  });
+  const messagesCompat = agreeing.reduce<MessagesBackendCompat | undefined>(
+    (carried, candidate) => carried ?? messagesCompatFromBackend(candidate),
+    undefined,
+  );
 
-  for (const candidate of candidates) {
+  for (const candidate of agreeing) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved) {
       return {
         ...catalogResolution(resolved.provider, resolvedFamily, resolved.model),
         backendIdentity,
-        adaptiveThinking: adaptiveThinkingFromBackend(candidate) ?? usesAdaptiveThinking(resolved.model),
+        messagesCompat: messagesCompat ?? messagesCompatOf(resolved.model),
       };
     }
   }
-  if (resolvedFamily) return { semanticFamily: resolvedFamily, backendIdentity };
+  // Identifiable backend, opaque metadata: carry compatibility without granting the
+  // catalog authority over provider identity, pricing, or limits.
+  if (resolvedFamily)
+    return { semanticFamily: resolvedFamily, backendIdentity, ...(messagesCompat && { messagesCompat }) };
   return undefined;
 }
 
@@ -512,21 +544,32 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
   if (!reduced) return undefined;
   const incompleteMetadataName =
     deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
-  return {
+  const shared = {
     id: reduced.id,
     name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
-    input: reduced.vision ? ["text", "image"] : ["text"],
+    input: (reduced.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
-    api: reduced.api,
-    compat:
-      reduced.api === "anthropic-messages" && reduced.adaptiveThinking
-        ? { forceAdaptiveThinking: true }
-        : buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
   };
+  if (reduced.api === "anthropic-messages") {
+    return { ...shared, api: "anthropic-messages", compat: carriedMessagesCompat(reduced.messagesCompat) };
+  }
+  if (reduced.api === "openai-responses") {
+    return { ...shared, api: "openai-responses", compat: buildCompat(reduced.id, "openai-responses") };
+  }
+  return {
+    ...shared,
+    api: "openai-completions",
+    compat: buildCompat(reduced.id, "openai-completions", reduced.semanticFamily),
+  };
+}
+
+/** An empty carried compat is indistinguishable from "no requirements", so omit it. */
+function carriedMessagesCompat(compat: MessagesBackendCompat | undefined): MessagesBackendCompat | undefined {
+  return compat && Object.keys(compat).length > 0 ? compat : undefined;
 }
 
 function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
@@ -535,8 +578,10 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   const model = mapFromModelInfo(entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId });
-  // `/health` detail lookups are per deployment, not complete route groups, so they can never select Messages.
   if (!model) return undefined;
+  // A `/health` detail row is one deployment, not a complete route group, so it is not
+  // sufficient evidence to route natively. Downgrade to Chat Completions and rebuild
+  // compat for that transport, dropping every Messages-only field.
   if (!entry.model_name) delete model.thinkingLevelMap;
   if (model.api === "openai-completions") return model;
   const sourceApi = model.api;

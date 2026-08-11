@@ -25,6 +25,26 @@ const budgetThinkingRoute = {
   litellm_params: { model: "anthropic/claude-sonnet-4-5" },
 };
 
+// Decorated backend ids the Anthropic catalog does not list verbatim: a dated release,
+// a Bedrock cross-region inference profile, and a Vertex serving suffix. All three are
+// Opus 4.7, which requires adaptive thinking and rejects temperature.
+const decoratedAdaptiveRoutes = [
+  ["dated release", "anthropic", "anthropic/claude-opus-4-7-20260415"],
+  ["bedrock inference profile", "bedrock", "bedrock/us.anthropic.claude-opus-4-7-v1:0"],
+  ["bedrock converse path", "bedrock_converse", "bedrock/converse/us.anthropic.claude-opus-4-7-v1:0"],
+  ["vertex serving suffix", "vertex_ai", "vertex_ai/claude-opus-4-7@20260101"],
+] as const;
+
+function claudeRoute(adapter: string, backend: string) {
+  return {
+    model_name: "team-claude",
+    model_info: { mode: "chat", litellm_provider: adapter, supports_reasoning: true },
+    litellm_params: { model: backend },
+  };
+}
+
+const unknownBackendRoute = claudeRoute("bedrock", "bedrock/us.anthropic.claude-invented-9-9-v1:0");
+
 describe("Anthropic Messages wire compatibility", () => {
   it("streams Anthropic SSE text from the exact Messages endpoint", async () => {
     const { models, model, requestHeaders, requestUrls, requests, respond } = await createCompatibilityHarness(
@@ -119,6 +139,58 @@ describe("Anthropic Messages wire compatibility", () => {
     await models.streamSimple(model, { messages: [user("Think carefully")] }, { reasoning: "high" }).result();
 
     expect(model).toMatchObject({ api: "anthropic-messages" });
+    expect(model.compat).toEqual({ supportsStrictTools: true });
+    expect(requests[0]).toMatchObject({ thinking: { type: "enabled", budget_tokens: expect.any(Number) } });
+    expect(requests[0]).not.toHaveProperty("output_config");
+  });
+
+  it.each(decoratedAdaptiveRoutes)(
+    "sends adaptive thinking for a %s backend the catalog does not list verbatim",
+    async (_label, adapter, backend) => {
+      const { models, model, requests, respond } = await createCompatibilityHarness(claudeRoute(adapter, backend));
+      respond(...anthropicTextResponse("ready"));
+
+      await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+      expect(model.api).toBe("anthropic-messages");
+      expect(model.compat).toEqual({
+        forceAdaptiveThinking: true,
+        supportsTemperature: false,
+        supportsStrictTools: true,
+      });
+      // Bounded authority: an unlisted routing id must not inherit catalog pricing or limits.
+      expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
+      expect(requests[0]).not.toHaveProperty("budget_tokens");
+    },
+  );
+
+  it("omits temperature for a decorated Opus backend that rejects it", async () => {
+    const [, adapter, backend] = decoratedAdaptiveRoutes[1];
+    const { models, model, requests, respond } = await createCompatibilityHarness(claudeRoute(adapter, backend));
+    respond(...anthropicTextResponse("ready"));
+
+    await models.streamSimple(model, { messages: [user("Hello")] }, { temperature: 0.7 }).result();
+
+    expect(requests[0]).not.toHaveProperty("temperature");
+  });
+
+  it("keeps temperature for a native Claude backend that accepts it", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness(budgetThinkingRoute);
+    respond(...anthropicTextResponse("ready"));
+
+    await models.streamSimple(model, { messages: [user("Hello")] }, { temperature: 0.7 }).result();
+
+    expect(requests[0]).toMatchObject({ temperature: 0.7 });
+  });
+
+  it("falls back to budget thinking for an unrecognized Claude backend", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness(unknownBackendRoute);
+    respond(...anthropicTextResponse("ready"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(model.api).toBe("anthropic-messages");
     expect(model.compat).toBeUndefined();
     expect(requests[0]).toMatchObject({ thinking: { type: "enabled", budget_tokens: expect.any(Number) } });
     expect(requests[0]).not.toHaveProperty("output_config");

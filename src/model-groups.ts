@@ -10,11 +10,23 @@ export interface BackendIdentityEvidence {
   semanticFamily: "claude";
 }
 
+/**
+ * The Anthropic compatibility fields this extension is willing to carry from the
+ * bundled catalog onto a LiteLLM-routed native Messages model. Discovered `compat`
+ * is the only channel through which per-model Anthropic behavior reaches pi-ai's
+ * serializer, so these travel as a unit rather than field by field.
+ */
+export type MessagesBackendCompat = Pick<
+  NonNullable<Model<"anthropic-messages">["compat"]>,
+  "forceAdaptiveThinking" | "supportsTemperature" | "supportsStrictTools"
+>;
+
 export interface CatalogResolution {
   provider?: string;
   semanticFamily?: SemanticFamily;
   backendIdentity?: BackendIdentityEvidence;
-  adaptiveThinking?: boolean;
+  /** Absent means the backend model is unknown to the catalog, not that it has no requirements. */
+  messagesCompat?: MessagesBackendCompat;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -38,7 +50,7 @@ export interface ReducedModelGroup {
   hasCompleteCost: boolean;
   catalogProvider?: string;
   semanticFamily?: SemanticFamily;
-  adaptiveThinking?: boolean;
+  messagesCompat?: MessagesBackendCompat;
   acceptedOpenAIParams: string[];
 }
 
@@ -163,7 +175,10 @@ export function reduceModelGroup(
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
-  const adaptiveThinking = unanimous(catalogs.map((catalog) => catalog?.adaptiveThinking));
+  // Backend compatibility is not gated on `catalogProvider`: a deployment can be
+  // identifiable enough to require adaptive thinking while remaining too opaque to
+  // borrow pricing or context metadata from.
+  const messagesCompat = unanimous(catalogs.map((catalog) => JSON.stringify(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
@@ -221,7 +236,7 @@ export function reduceModelGroup(
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
-    ...(adaptiveThinking !== undefined ? { adaptiveThinking } : {}),
+    ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
     acceptedOpenAIParams: intersectParams(deployments),
   };
 }
