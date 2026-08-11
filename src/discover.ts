@@ -257,18 +257,18 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     routingModel,
     conflictingFamilies ? undefined : baseModel,
   );
-  const semanticFamily = family ?? (backendIdentity ? "claude" : undefined);
+  const resolvedFamily = family ?? (backendIdentity ? "claude" : undefined);
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved) {
       return {
-        ...catalogResolution(resolved.provider, semanticFamily, resolved.model),
+        ...catalogResolution(resolved.provider, resolvedFamily, resolved.model),
         backendIdentity,
       };
     }
   }
-  if (semanticFamily) return { semanticFamily, backendIdentity };
+  if (resolvedFamily) return { semanticFamily: resolvedFamily, backendIdentity };
   return undefined;
 }
 
