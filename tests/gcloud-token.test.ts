@@ -6,15 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCommand, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { importSpecifiers } from "./import-specifiers.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-function importSpecifiers(source: string): string[] {
-  return [...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g)].map(
-    (match) => match[1],
-  );
-}
 
 const ORIGINAL_ENV = {
   APPDATA: process.env.APPDATA,

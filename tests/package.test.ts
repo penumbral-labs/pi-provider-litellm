@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { importSpecifiers } from "./import-specifiers.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,12 +28,6 @@ async function expectedPackageFiles(): Promise<string[]> {
     .filter((file) => file.endsWith(".ts"))
     .map((file) => `package/src/${file}`);
   return ["package/LICENSE", "package/README.md", "package/package.json", ...sourceFiles].sort();
-}
-
-function importSpecifiers(source: string): string[] {
-  return [...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g)].map(
-    (match) => match[1],
-  );
 }
 
 async function loadExtension(entrypoint: string, cwd: string): Promise<LoadResult> {
