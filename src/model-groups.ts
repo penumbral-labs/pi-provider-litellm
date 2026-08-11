@@ -139,80 +139,89 @@ const ONLY_HIGH = {
 function buildReasoningPolicy(
   semanticModel: SemanticModel | undefined,
   acceptedOpenAIParams: readonly string[],
+  reducedReasoning: boolean,
+  explicitlyUnsupported: boolean,
 ): ReasoningPolicy {
   const acceptsThinking = acceptedOpenAIParams.includes("thinking");
   const acceptsEffort = acceptedOpenAIParams.includes("reasoning_effort");
-  if (semanticModel === "kimi-k2.5-k2.6" && acceptsThinking) {
+  const hasAcceptedControl = acceptsThinking || acceptsEffort;
+  const reasoning =
+    !explicitlyUnsupported && (reducedReasoning || hasAcceptedControl || semanticModel === "kimi-k2.7-code");
+  if (semanticModel === "kimi-k2.5-k2.6" && acceptsThinking && reasoning) {
     return {
-      reasoning: true,
+      reasoning,
       thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
       compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
     };
   }
   if (semanticModel === "kimi-k2.7-code") {
     return {
-      reasoning: true,
-      thinkingLevelMap: ONLY_HIGH,
+      reasoning,
+      ...(reasoning ? { thinkingLevelMap: ONLY_HIGH } : {}),
       compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
     };
   }
-  if (semanticModel === "kimi-k3" && acceptsEffort) {
-    return {
-      reasoning: true,
-      thinkingLevelMap: {
-        off: null,
-        minimal: null,
-        low: "low",
-        medium: null,
-        high: "high",
-        xhigh: null,
-        max: "max",
-      },
-      compat: {
-        thinkingFormat: "openai",
-        supportsReasoningEffort: true,
-        requiresReasoningContentOnAssistantMessages: true,
-      },
-    };
+  if (semanticModel === "kimi-k3") {
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
+      };
+    }
+    return { reasoning, compat: replay };
   }
-  if (semanticModel === "deepseek-v4" && acceptsThinking && acceptsEffort) {
-    return {
-      reasoning: true,
-      thinkingLevelMap: {
-        off: "off",
-        minimal: null,
-        low: null,
-        medium: null,
-        high: "high",
-        xhigh: null,
-        max: "max",
-      },
-      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
-    };
+  if (semanticModel === "deepseek-v4") {
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsThinking && acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: true },
+      };
+    }
+    if (acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
+      };
+    }
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
+    return { reasoning, compat: replay };
   }
-  if (semanticModel === "deepseek-v4" && acceptsEffort) {
-    return {
-      reasoning: true,
-      thinkingLevelMap: {
-        off: null,
-        minimal: null,
-        low: null,
-        medium: null,
-        high: "high",
-        xhigh: null,
-        max: "max",
-      },
-      compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
-    };
-  }
-  if (semanticModel === "deepseek-v4" && acceptsThinking) {
-    return {
-      reasoning: true,
-      thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
-      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
-    };
-  }
-  return { reasoning: false };
+  return { reasoning: semanticModel ? reasoning : false };
 }
 
 function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefined {
@@ -264,6 +273,7 @@ export function reduceModelGroup(
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
   );
+  const explicitlyUnsupported = deployments.every((entry) => entry.model_info?.supports_reasoning === false);
   const vision = deployments.every(
     (entry, index) => entry.model_info?.supports_vision ?? catalogAuthority[index]?.vision ?? false,
   );
@@ -314,7 +324,7 @@ export function reduceModelGroup(
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
     acceptedOpenAIParams,
-    reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams),
+    reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };
 }
 

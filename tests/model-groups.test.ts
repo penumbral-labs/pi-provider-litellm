@@ -361,7 +361,15 @@ describe("reduceModelGroup", () => {
       params: ["thinking"],
       expected: {
         reasoning: true,
-        thinkingLevelMap: { off: "off", high: "high" },
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
         compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
       },
     },
@@ -371,7 +379,15 @@ describe("reduceModelGroup", () => {
       params: ["thinking"],
       expected: {
         reasoning: true,
-        thinkingLevelMap: { off: null, low: null, medium: null, xhigh: null, max: null },
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
         compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
       },
     },
@@ -381,7 +397,15 @@ describe("reduceModelGroup", () => {
       params: ["reasoning_effort"],
       expected: {
         reasoning: true,
-        thinkingLevelMap: { off: null, minimal: null, medium: null, xhigh: null },
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
         compat: {
           thinkingFormat: "openai",
           supportsReasoningEffort: true,
@@ -395,8 +419,20 @@ describe("reduceModelGroup", () => {
       params: ["thinking", "reasoning_effort"],
       expected: {
         reasoning: true,
-        thinkingLevelMap: { low: null, medium: null, xhigh: null },
-        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "deepseek",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
       },
     },
     {
@@ -405,8 +441,20 @@ describe("reduceModelGroup", () => {
       params: ["reasoning_effort"],
       expected: {
         reasoning: true,
-        thinkingLevelMap: { off: null, low: null, medium: null, xhigh: null },
-        compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
       },
     },
   ])("derives $name policy from semantic and accepted-control evidence", ({ semanticModel, params, expected }) => {
@@ -420,7 +468,48 @@ describe("reduceModelGroup", () => {
       () => ({ semanticFamily: semanticModel.startsWith("kimi") ? "kimi" : "deepseek", semanticModel }),
     );
 
-    expect(result?.reasoningPolicy).toMatchObject(expected);
+    expect(result?.reasoningPolicy).toEqual(expected);
+  });
+
+  it.each([
+    {
+      name: "Kimi K3",
+      semanticModel: "kimi-k3" as const,
+      family: "kimi" as const,
+    },
+    {
+      name: "DeepSeek V4",
+      semanticModel: "deepseek-v4" as const,
+      family: "deepseek" as const,
+    },
+  ])("preserves $name capability and replay without accepted-control evidence", ({ semanticModel, family }) => {
+    const result = reduceModelGroup(
+      [row({ model_info: { supports_reasoning: true }, litellm_params: { model: `internal/${semanticModel}` } })],
+      () => ({ semanticFamily: family, semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: true,
+      compat: { requiresReasoningContentOnAssistantMessages: true },
+    });
+  });
+
+  it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.7-code" },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi", semanticModel: "kimi-k2.7-code", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: false,
+      compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+    });
   });
 
   it("fails closed for mixed semantic generations and accepted controls", () => {

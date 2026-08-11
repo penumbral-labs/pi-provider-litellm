@@ -451,6 +451,16 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it("collects semantic generation from base_model after catalog resolution", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route",
+        litellm_params: { model: "moonshot/kimi-k2-0905-preview" },
+        model_info: { litellm_provider: "moonshot", base_model: "kimi-k3" },
+      }),
+    ).toMatchObject({ provider: "moonshotai", semanticFamily: "kimi", semanticModel: "kimi-k3" });
+  });
+
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
     expect(
       resolveModelInfoCatalog({
@@ -564,7 +574,78 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({ reasoning: true });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
-    expect(result.models[0]?.compat).not.toMatchObject({ thinkingFormat: "deepseek" });
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false });
+    expect(result.models[0]).not.toHaveProperty("litellmPolicy");
+  });
+
+  it("preserves route-text Kimi strict repair only when deployment evidence is absent", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { data: [{ model_name: "kimi-k2.6", model_info: { mode: "chat" } }] }),
+    );
+
+    const evidenceFree = await discoverModels("https://litellm.example.com", "sk-test", {});
+    expect(evidenceFree.models[0]?.litellmPolicy).toEqual({ normalizeStrictToolMessages: true });
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-k2.6",
+            litellm_params: { model: "openai/internal-route" },
+            model_info: { mode: "chat", litellm_provider: "openai" },
+          },
+        ],
+      }),
+    );
+
+    const misleadingAlias = await discoverModels("https://litellm.example.com", "sk-test", {});
+    expect(misleadingAlias.models[0]).not.toHaveProperty("litellmPolicy");
+  });
+
+  it("preserves explicit reasoning capability without speculative controls", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "k3-route",
+            litellm_params: { model: "moonshot/kimi-k3" },
+            model_info: { mode: "chat", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      reasoning: true,
+      compat: {
+        supportsReasoningEffort: false,
+        requiresReasoningContentOnAssistantMessages: true,
+      },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
+  });
+
+  it("honors explicit K2.7 Code reasoning denial", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "code-route",
+            litellm_params: { model: "moonshot/kimi-k2.7-code" },
+            model_info: { mode: "chat", supports_reasoning: false, supported_openai_params: ["thinking"] },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.reasoning).toBe(false);
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
@@ -753,7 +834,11 @@ describe("discoverModels fallback to /v1/models", () => {
     expect(result.models).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: "gpt-4o", name: "gpt-4o (no metadata)" }),
-        expect.objectContaining({ id: "kimi-k2.6", name: "kimi-k2.6 (no metadata)" }),
+        expect.objectContaining({
+          id: "kimi-k2.6",
+          name: "kimi-k2.6 (no metadata)",
+          litellmPolicy: { normalizeStrictToolMessages: true },
+        }),
         expect.objectContaining({ id: "grok-4.5", name: "grok-4.5 (no metadata)" }),
       ]),
     );

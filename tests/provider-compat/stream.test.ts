@@ -1,5 +1,5 @@
-import type { Context } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { type Context, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
@@ -86,7 +86,7 @@ describe("native provider stream compatibility", () => {
       params: ["thinking"],
       reasoning: "high" as const,
       expected: { thinking: { type: "enabled" } },
-      absent: ["reasoning_effort"],
+      absent: ["reasoning_effort", "include_reasoning", "reasoning_content", "merge_reasoning_content_in_choices"],
     },
     {
       name: "Kimi K3 effort",
@@ -102,7 +102,7 @@ describe("native provider stream compatibility", () => {
       params: ["thinking", "reasoning_effort"],
       reasoning: "max" as const,
       expected: { thinking: { type: "enabled" }, reasoning_effort: "max" },
-      absent: [],
+      absent: ["include_reasoning", "reasoning_content", "merge_reasoning_content_in_choices"],
     },
     {
       name: "Azure Foundry DeepSeek effort only",
@@ -110,7 +110,7 @@ describe("native provider stream compatibility", () => {
       params: ["reasoning_effort"],
       reasoning: "high" as const,
       expected: { reasoning_effort: "high" },
-      absent: ["thinking"],
+      absent: ["thinking", "include_reasoning", "reasoning_content", "merge_reasoning_content_in_choices"],
     },
   ])("serializes $name from discovered policy", async ({ backend, params, reasoning, expected, absent }) => {
     const { models, model, requests, respond } = await createCompatibilityHarness([
@@ -158,6 +158,140 @@ describe("native provider stream compatibility", () => {
 
     expect(requests[0]).not.toHaveProperty("thinking");
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
+    expect(requests[0]).not.toHaveProperty("include_reasoning");
+    expect(requests[0]).not.toHaveProperty("reasoning_content");
+    expect(requests[0]).not.toHaveProperty("merge_reasoning_content_in_choices");
+  });
+
+  it.each([
+    { source: "/model/info", rows: [{ model_name: "kimi-k3", model_info: { mode: "chat" } }] },
+    { source: "/model/info fallback", rows: [{ model_name: "moonshotai/kimi-k2", model_info: { mode: "chat" } }] },
+  ])("applies discovery-driven strict repair from $source for evidence-free Kimi routes", async ({ rows }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness(rows);
+    respond(...successfulResponse("ok"));
+
+    await models
+      .streamSimple(model, {
+        messages: [
+          user("Call a tool"),
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "call_1", name: "lookup", arguments: {} }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "result" }],
+            isError: false,
+            timestamp: 3,
+          },
+        ],
+      })
+      .result();
+
+    expect(model).toMatchObject({ litellmPolicy: { normalizeStrictToolMessages: true } });
+    expect(requests[0]?.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "" }));
+  });
+
+  it.each([
+    { name: "Kimi K3", backend: "moonshot/kimi-k3", params: ["reasoning_effort"] },
+    { name: "Kimi K2.7 Code", backend: "moonshot/kimi-k2.7-code", params: ["thinking"] },
+    {
+      name: "DeepSeek V4",
+      backend: "deepseek/deepseek-v4",
+      params: ["thinking", "reasoning_effort"],
+    },
+  ])("replays required reasoning content for $name", async ({ backend, params }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "replay-route",
+        litellm_params: { model: backend },
+        model_info: { mode: "chat", supported_openai_params: params },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models
+      .streamSimple(model, {
+        messages: [
+          user("First"),
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Answer" }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: 2,
+          },
+          user("Continue"),
+        ],
+      })
+      .result();
+
+    expect(requests[0]?.messages).toContainEqual(expect.objectContaining({ role: "assistant", reasoning_content: "" }));
+  });
+
+  it.each([
+    {
+      name: "Kimi K3",
+      backend: "moonshot/kimi-k3",
+      params: ["reasoning_effort"],
+      expected: { reasoning_effort: "max" },
+      absent: ["thinking"],
+    },
+    {
+      name: "DeepSeek V4",
+      backend: "deepseek/deepseek-v4",
+      params: ["thinking", "reasoning_effort"],
+      expected: { thinking: { type: "enabled" }, reasoning_effort: "max" },
+      absent: [],
+    },
+  ])("rehydrates exact $name policy and wire behavior offline", async ({ backend, params, expected, absent }) => {
+    const modelsStore = new InMemoryModelsStore();
+    const rows = [
+      {
+        model_name: "cached-reasoning-route",
+        litellm_params: { model: backend },
+        model_info: { mode: "chat", supported_openai_params: params },
+      },
+    ];
+    const online = await createCompatibilityHarness(rows, { modelsStore });
+    online.respond(...successfulResponse("online"));
+    await online.models.streamSimple(online.model, { messages: [user("Think")] }, { reasoning: "max" }).result();
+
+    vi.restoreAllMocks();
+    vi.resetModules();
+    const offline = await createCompatibilityHarness(rows, { modelsStore, allowNetwork: false });
+    offline.respond(...successfulResponse("offline"));
+    await offline.models.streamSimple(offline.model, { messages: [user("Think")] }, { reasoning: "max" }).result();
+
+    expect(offline.model).toEqual(online.model);
+    expect(offline.requests[0]).toEqual(online.requests[0]);
+    expect(offline.requests[0]).toMatchObject(expected);
+    for (const field of absent) expect(offline.requests[0]).not.toHaveProperty(field);
   });
 
   it("handles thinking and a tool result across turns", async () => {

@@ -2,6 +2,7 @@ import type { Api, AssistantMessage, AuthContext, Model, Models, Provider, Strea
 import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { afterEach, vi } from "vitest";
+import type { ModelInfoEntry } from "../../src/types.js";
 
 export const RED_CIRCLE_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nLkAAAAASUVORK5CYII=";
@@ -53,7 +54,10 @@ export function successfulResponse(text: string): Chunk[] {
   ];
 }
 
-export async function createCompatibilityHarness(discoveryRows?: unknown[]): Promise<{
+export async function createCompatibilityHarness(
+  discoveryRows?: readonly ModelInfoEntry[],
+  options: { modelsStore?: InMemoryModelsStore; allowNetwork?: boolean } = {},
+): Promise<{
   provider: Provider;
   models: Models;
   model: Model<Api>;
@@ -172,15 +176,19 @@ export async function createCompatibilityHarness(discoveryRows?: unknown[]): Pro
     env: async (name) => process.env[name],
     fileExists: async () => false,
   };
-  const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+  const models = createModels({
+    credentials,
+    modelsStore: options.modelsStore ?? new InMemoryModelsStore(),
+    authContext,
+  });
   const beforeRequestHandlers = handlers.get("before_provider_request") ?? [];
   const composePayloadHook =
     (original: StreamOptions["onPayload"]): StreamOptions["onPayload"] =>
     async (payload, payloadModel) => {
       let current = (await original?.(payload, payloadModel)) ?? payload;
       for (const handler of beforeRequestHandlers) {
-        const next = await handler({ payload: current }, { model: payloadModel });
-        current = (next as { payload?: unknown } | undefined)?.payload ?? next ?? current;
+        const next = await handler({ type: "before_provider_request", payload: current }, { model: payloadModel });
+        current = next ?? current;
       }
       return current;
     };
@@ -218,10 +226,10 @@ export async function createCompatibilityHarness(discoveryRows?: unknown[]): Pro
       api: openAICompletionsApi(),
     }),
   );
-  const refresh = await models.refresh({ allowNetwork: true });
+  const refresh = await models.refresh({ allowNetwork: options.allowNetwork ?? true });
   const refreshError = refresh.errors.get(provider.id);
   if (refreshError) throw refreshError;
-  const discoveredId = (discoveryRows?.[0] as { model_name?: string } | undefined)?.model_name ?? "local-model";
+  const discoveredId = discoveryRows?.[0]?.model_name ?? "local-model";
   const model = models.getModel(provider.id, discoveredId);
   if (!model) throw new Error("LiteLLM model was not discovered");
 

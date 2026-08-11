@@ -830,7 +830,16 @@ describe("feature parity", () => {
       { role: "tool", tool_call_id: "call_1", content: "tool output" },
     ];
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.({ payload: { messages } }, { model: { provider: "litellm", id: "kimi-k3" } });
+    const updated = beforeRequest?.(
+      { payload: { messages } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: { normalizeStrictToolMessages: true },
+        },
+      },
+    );
 
     expect(updated).toBeUndefined();
   });

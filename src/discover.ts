@@ -242,11 +242,9 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  let family: SemanticFamily | undefined;
-  let model: SemanticModel | undefined;
+  const family = candidates.map(semanticFamily).find((candidate) => candidate !== undefined);
+  const model = candidates.map(semanticModel).find((candidate) => candidate !== undefined);
   for (const candidate of candidates) {
-    family ??= semanticFamily(candidate);
-    model ??= semanticModel(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved)
       return {
@@ -498,7 +496,9 @@ function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredMo
       reduced.api === "openai-completions"
         ? { ...buildCompat(reduced.id, reduced.api, reduced.semanticFamily), ...reasoningPolicy?.compat }
         : buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
-    ...(reduced.semanticFamily === "kimi" ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
+    ...(reduced.semanticFamily === "kimi" || (reduced.semanticFamily === undefined && isMoonshotModel(reduced.id))
+      ? { litellmPolicy: { normalizeStrictToolMessages: true } }
+      : {}),
   };
 }
 
