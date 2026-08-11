@@ -477,6 +477,41 @@ describe("feature parity", () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["an invalid base URL", "localhost:4000", /invalid LiteLLM model URL/i],
+    ["the placeholder host", "https://litellm.example.com", /placeholder host/i],
+  ])("starts a turn normally when LiteLLM is configured with %s", async (_label, baseUrl, diagnostic) => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = baseUrl;
+    process.env.LITELLM_API_KEY = "sk-test";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+    const ctx = {
+      modelRegistry: {
+        getProviderAuth: async () => ({ auth: { apiKey: "sk-test", baseUrl: `${baseUrl}/v1` } }),
+        getProvider: () => pi.providers[0],
+      },
+    };
+
+    // A LiteLLM misconfiguration must not fail a turn that may target another provider.
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, ctx)).resolves.toBeUndefined();
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, ctx)).resolves.toBeUndefined();
+
+    // The reason stays visible, once, and no request is attempted against a bad host.
+    const diagnostics = stderrSpy.mock.calls.filter(([line]) => diagnostic.test(String(line)));
+    expect(diagnostics).toHaveLength(1);
+    expect(String(diagnostics[0]?.[0])).toContain("LiteLLM (litellm):");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A LiteLLM-scoped caller still gets the actionable reason instead of silence.
+    const listTool = pi.tools.find((tool) => tool.name === "litellm_skill_list");
+    await expect(listTool?.execute?.("call-1", {}, undefined, undefined, ctx)).rejects.toThrow(diagnostic);
+  });
+
   it("disables LiteLLM skills through settings", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     await writeFile(

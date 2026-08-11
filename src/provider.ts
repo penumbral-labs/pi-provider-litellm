@@ -8,8 +8,9 @@ import {
   type ProviderAuth,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
-import { createLiteLLMProtocolApis, resolveModelBaseUrl } from "./protocols.js";
+import { enrichCachedModel } from "./discover.js";
+import { activeCredentialRoot, credentialRootResult, isPlaceholderHost, refreshRequired } from "./host-policy.js";
+import { createLiteLLMProtocolApis, isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -17,7 +18,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
-  resolveCredentialRoot?: (credential?: Credential, requestBaseUrl?: string) => string | undefined;
+  resolveCredentialRoot: (credential?: Credential, requestBaseUrl?: string) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
@@ -33,47 +34,15 @@ export function toNativeModels(
   }));
 }
 
-export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
-const PLACEHOLDER_HOSTS = new Set([new URL(DEFAULT_LITELLM_BASE_URL).host]);
-
-type ModelHostResult = { host: string } | { error: Error };
-
-function refreshRequired(message: string): Error {
-  return new Error(`${message}; a network refresh with a valid LiteLLM base URL is required`);
-}
-
-function rootHost(baseUrl: string, subject: string): string {
-  try {
-    const url = new URL(normalizeBaseUrl(baseUrl));
-    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
-    return url.host.toLowerCase();
-  } catch {
-    throw refreshRequired(`${subject} has an invalid LiteLLM model URL`);
-  }
-}
-
-function modelHost(model: Model<LiteLLMApi>): ModelHostResult {
-  try {
-    return { host: rootHost(model.baseUrl, "Cached model") };
-  } catch (error) {
-    return { error: error instanceof Error ? error : refreshRequired("Cached model has an invalid LiteLLM model URL") };
-  }
-}
-
-function activeCredentialRoot(root: string): { root: string; host: string } {
-  if (root.trim() === "undefined") throw refreshRequired("Active credentials have an invalid LiteLLM model URL");
-  const normalized = normalizeBaseUrl(root);
-  const host = rootHost(normalized, "Active credentials");
-  if (PLACEHOLDER_HOSTS.has(host)) {
-    throw refreshRequired("Active credentials use a placeholder LiteLLM model host");
-  }
-  return { root: normalized, host };
-}
-
 function modelHostError(model: Model<LiteLLMApi>, activeHost: string): Error | undefined {
-  const stored = modelHost(model);
+  // A model whose api has no protocol implementation cannot be projected onto any
+  // endpoint. Reject it individually so one malformed entry cannot fail the whole list.
+  if (!isLiteLLMApi(model.api)) {
+    return refreshRequired(`Cached model uses unsupported LiteLLM transport ${String(model.api)}`);
+  }
+  const stored = credentialRootResult(model.baseUrl, "Cached model");
   if ("error" in stored) return stored.error;
-  if (PLACEHOLDER_HOSTS.has(stored.host)) {
+  if (isPlaceholderHost(stored.host)) {
     return refreshRequired("Cached model uses a placeholder LiteLLM model host");
   }
   if (stored.host !== activeHost) {
@@ -90,6 +59,7 @@ function requestModel(
 ): Model<LiteLLMApi> {
   if (!credentialRoot) throw refreshRequired("Active credentials do not identify a LiteLLM model host");
   const active = activeCredentialRoot(credentialRoot);
+  // `modelHostError` proves the api before this projection can index the protocol map.
   const error = modelHostError(model, active.host);
   if (error) throw error;
   return { ...model, provider, baseUrl: resolveModelBaseUrl(active.root, model.api) };
@@ -97,6 +67,12 @@ function requestModel(
 
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
   const reportedAvailabilityDiagnostics = new Set<string>();
+  /** Availability is re-evaluated constantly; report each distinct reason once. */
+  const reportUnavailable = (message: string): void => {
+    if (reportedAvailabilityDiagnostics.has(message)) return;
+    reportedAvailabilityDiagnostics.add(message);
+    process.stderr.write(`LiteLLM (${options.id}): ${message}\n`);
+  };
   const provider = createProvider<LiteLLMApi>({
     id: options.id,
     name: options.name,
@@ -111,28 +87,25 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     filterModels(models, credential) {
       let active: { root: string; host: string };
       try {
-        const root = options.resolveCredentialRoot?.(credential);
+        const root = options.resolveCredentialRoot(credential);
         if (!root) return [];
         active = activeCredentialRoot(root);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!reportedAvailabilityDiagnostics.has(message)) {
-          reportedAvailabilityDiagnostics.add(message);
-          process.stderr.write(`LiteLLM (${options.id}): ${message}\n`);
-        }
+        reportUnavailable(error instanceof Error ? error.message : String(error));
         return [];
       }
-      return models
-        .filter((model) => {
-          const error = modelHostError(model, active.host);
-          if (!error) return true;
-          if (!reportedAvailabilityDiagnostics.has(error.message)) {
-            reportedAvailabilityDiagnostics.add(error.message);
-            process.stderr.write(`LiteLLM (${options.id}): ${error.message}\n`);
-          }
-          return false;
-        })
-        .map((model) => ({ ...model, baseUrl: resolveModelBaseUrl(active.root, model.api) }));
+      // Every rejection is per model and inside the guard, so no single malformed
+      // entry can throw out of availability and empty every provider's model list.
+      const available: Model<LiteLLMApi>[] = [];
+      for (const model of models) {
+        const error = modelHostError(model, active.host);
+        if (error) {
+          reportUnavailable(error.message);
+          continue;
+        }
+        available.push({ ...model, baseUrl: resolveModelBaseUrl(active.root, model.api) });
+      }
+      return available;
     },
     api: createLiteLLMProtocolApis(),
   });
@@ -144,7 +117,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         requestModel(
           options.id,
           model,
-          options.resolveCredentialRoot?.(undefined, requestOptions?.env?.LITELLM_BASE_URL),
+          options.resolveCredentialRoot(undefined, requestOptions?.env?.LITELLM_BASE_URL),
         ),
         context,
         requestOptions,
@@ -154,7 +127,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         requestModel(
           options.id,
           model,
-          options.resolveCredentialRoot?.(undefined, requestOptions?.env?.LITELLM_BASE_URL),
+          options.resolveCredentialRoot(undefined, requestOptions?.env?.LITELLM_BASE_URL),
         ),
         context,
         requestOptions,

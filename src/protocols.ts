@@ -22,6 +22,15 @@ export const LITELLM_PROTOCOLS = {
   },
 } satisfies Record<LiteLLMApi, LiteLLMProtocol>;
 
+/**
+ * Whether a model's declared api has a LiteLLM protocol implementation. Models reach
+ * this provider from discovery, the on-disk cache, and user `models.json` overrides, so
+ * the transport must be proven before it is used to index {@link LITELLM_PROTOCOLS}.
+ */
+export function isLiteLLMApi(api: unknown): api is LiteLLMApi {
+  return typeof api === "string" && Object.hasOwn(LITELLM_PROTOCOLS, api);
+}
+
 export function resolveModelBaseUrl(baseUrl: string, api: LiteLLMApi): string {
   return LITELLM_PROTOCOLS[api].modelBaseUrl(normalizeBaseUrl(baseUrl));
 }

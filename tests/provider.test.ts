@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveredModel, DiscoveryResult } from "../src/types.js";
+import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ anthropic: vi.fn(), completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -149,8 +149,11 @@ describe("toNativeModels", () => {
 });
 
 describe("createLiteLLMProvider", () => {
+  let stderr: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     vi.clearAllMocks();
+    stderr = vi.fn().mockReturnValue(true);
+    vi.spyOn(process.stderr, "write").mockImplementation(stderr as never);
   });
   it("delegates native store restoration directly to createProvider", async () => {
     const modelsStore = store([native("stored")]);
@@ -334,6 +337,52 @@ describe("createLiteLLMProvider", () => {
 
     const activePlaceholder = controller({ resolveCredentialRoot: () => "https://litellm.example.com" });
     expect(activePlaceholder.filterModels?.([native("stored")], credential)).toEqual([]);
+  });
+
+  it("drops a model with an unsupported transport instead of failing the whole list", () => {
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    const usable = native("usable");
+    // pi composes models.json overrides into the provider's list, where `api` is only
+    // validated as a non-empty string, so an unknown transport can reach filterModels.
+    const foreign = { ...native("foreign"), api: "google-generative-ai" } as unknown as Model<Api>;
+
+    const available = value.filterModels?.([foreign, usable] as Model<LiteLLMApi>[], credential);
+
+    expect(available).toEqual([{ ...usable, baseUrl: "https://proxy.example/v1" }]);
+    expect(stderr).toHaveBeenCalledWith(
+      "LiteLLM (litellm): Cached model uses unsupported LiteLLM transport google-generative-ai; a network refresh with a valid LiteLLM base URL is required\n",
+    );
+  });
+
+  it("reports each availability reason once", () => {
+    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
+    const stale = toNativeModels("litellm", "https://stale.example", discovered("stale").models);
+
+    for (let attempt = 0; attempt < 3; attempt++) expect(value.filterModels?.(stale, credential)).toEqual([]);
+
+    const staleReports = stderr.mock.calls.filter(([line]) => String(line).includes("stale LiteLLM model host"));
+    expect(staleReports).toHaveLength(1);
+    expect(String(staleReports[0]?.[0])).toBe(
+      "LiteLLM (litellm): Cached model has stale LiteLLM model host stale.example; active credentials use active.example; a network refresh with a valid LiteLLM base URL is required\n",
+    );
+  });
+
+  it("reports and rejects everything when no credential root is available", () => {
+    const value = controller({ resolveCredentialRoot: () => undefined });
+
+    expect(value.filterModels?.([native("stored")], credential)).toEqual([]);
+    expect(() => value.stream(native("stored"), { messages: [] })).toThrow(
+      /do not identify a LiteLLM model host.*network refresh/i,
+    );
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-http credential roots", () => {
+    const value = controller({ resolveCredentialRoot: () => "file:///etc/passwd" });
+
+    expect(value.filterModels?.([native("stored")], credential)).toEqual([]);
+    expect(() => value.stream(native("stored"), { messages: [] })).toThrow(/invalid LiteLLM model URL/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
   it("retains previous models when discovery rejects", async () => {

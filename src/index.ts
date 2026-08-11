@@ -27,9 +27,10 @@ import {
   getGcloudTokenCommand,
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
+import { credentialRoot, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./host-policy.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL } from "./provider.js";
+import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -115,18 +116,11 @@ function resolveSanitizedCredentialRoot(
     cleanConfig(definition.baseUrl) ??
     (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
   if (!baseUrl) return undefined;
-  try {
-    const normalized = normalizeBaseUrl(baseUrl);
-    const parsed = new URL(normalized);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
-    return normalized;
-  } catch {
-    throw new Error("Invalid LiteLLM base URL; a network refresh with a valid URL is required");
-  }
+  return credentialRoot(baseUrl, "Stored configuration").root;
 }
 
 function requireNonPlaceholderCredentialRoot(root: string): string {
-  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+  if (isPlaceholderHost(new URL(root).host)) {
     throw new Error("LiteLLM credentials use a placeholder host; a network refresh with a real base URL is required");
   }
   return root;
@@ -966,34 +960,67 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
-  async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
+  /**
+   * Resolve runtime auth for LiteLLM-owned side channels (skills, MCP).
+   *
+   * `undefined` means LiteLLM is simply not configured. `{ unavailable }` means it is
+   * configured but unusable, which is actionable for a LiteLLM-scoped caller and must
+   * not be raised as an error on a turn that has nothing to do with this provider.
+   */
+  async function resolveRuntimeAuth(
+    ctx: ExtensionContext,
+  ): Promise<{ auth: LiteLLMRuntimeAuth } | { unavailable: string } | undefined> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
     const apiKey = auth.auth.apiKey;
-    const baseUrl = resolveSanitizedCredentialRoot(
-      definitions.find((definition) => definition.name === PROVIDER_NAME)!,
-      undefined,
-      auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? defaultRuntimeAuth?.baseUrl,
-    );
-    if (!baseUrl || !apiKey) return undefined;
-    requireNonPlaceholderCredentialRoot(baseUrl);
+    let baseUrl: string | undefined;
+    try {
+      baseUrl = resolveSanitizedCredentialRoot(
+        definitions.find((definition) => definition.name === PROVIDER_NAME)!,
+        undefined,
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? defaultRuntimeAuth?.baseUrl,
+      );
+      if (!baseUrl || !apiKey) return undefined;
+      requireNonPlaceholderCredentialRoot(baseUrl);
+    } catch (error) {
+      return { unavailable: error instanceof Error ? error.message : String(error) };
+    }
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
     return {
-      baseUrl: normalizeBaseUrl(baseUrl),
-      apiKey,
-      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      auth: {
+        baseUrl: normalizeBaseUrl(baseUrl),
+        apiKey,
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+      },
     };
+  }
+
+  const reportedRuntimeAuthDiagnostics = new Set<string>();
+
+  async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
+    const resolved = await resolveRuntimeAuth(ctx);
+    if (!resolved) return undefined;
+    if ("unavailable" in resolved) {
+      // Keep the diagnostic, but never fail a turn over a provider the user may not be using.
+      if (!reportedRuntimeAuthDiagnostics.has(resolved.unavailable)) {
+        reportedRuntimeAuthDiagnostics.add(resolved.unavailable);
+        process.stderr.write(`LiteLLM (${PROVIDER_NAME}): ${resolved.unavailable}\n`);
+      }
+      return undefined;
+    }
+    return resolved.auth;
   }
 
   async function resolveDefaultRuntimeAuth(ctx?: ExtensionContext): Promise<LiteLLMRuntimeAuth> {
     if (ctx?.modelRegistry) {
-      const auth = await getRuntimeAuth(ctx);
-      if (auth) return auth;
+      const resolved = await resolveRuntimeAuth(ctx);
+      if (resolved && "unavailable" in resolved) throw new Error(resolved.unavailable);
+      if (resolved) return resolved.auth;
       throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
     }
     if (!defaultRuntimeAuth) throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
