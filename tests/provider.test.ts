@@ -6,7 +6,8 @@ import type {
   ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { discoverModels } from "../src/discover.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult } from "../src/types.js";
 
@@ -304,5 +305,99 @@ describe("createLiteLLMProvider", () => {
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+});
+
+describe("discovery, store, and offline read parity", () => {
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  let fetchSpy: MockInstance<typeof fetch> | undefined;
+
+  function mockModelInfo(data: unknown): void {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+  }
+
+  function liveDiscovery() {
+    return controller({
+      discover: async () => discoverModels("https://proxy.example/v1", "sk-test", { modelsDev: false }),
+    });
+  }
+
+  // A reduced `/model/info` group whose catalog authority was deliberately
+  // withheld must not be re-enriched by the cache path. Rehydration has to
+  // reproduce the discovered model exactly, or offline requests would be built
+  // from metadata the proxy never provided.
+  it.each([
+    [
+      "a singleton whose backend evidence resolves no catalog identity",
+      [
+        {
+          model_name: "openai/gpt-5.5",
+          model_info: { id: "only", mode: "chat" },
+          litellm_params: { model: "openai/gpt-5.5-internal-preview" },
+        },
+      ],
+    ],
+    [
+      "a group whose deployments disagree on backend",
+      [
+        { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
+        {
+          model_name: "openai/gpt-5.5",
+          model_info: { id: "b", mode: "chat" },
+          litellm_params: { model: "internal/mystery" },
+        },
+      ],
+    ],
+    [
+      "conflicting variants of one deployment id",
+      [
+        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+      ],
+    ],
+  ])("rehydrates %s unchanged", async (_case, data) => {
+    mockModelInfo(data);
+    const modelsStore = store();
+
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    expect(discoveredModels[0]?.name).toBe("openai/gpt-5.5 (incomplete metadata)");
+    expect(modelsStore.write).toHaveBeenCalledOnce();
+
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
+  });
+
+  it("still enriches an evidence-free /v1/models fallback model from the cache", async () => {
+    // The distinction has to cut both ways: the fallback sentinel keeps working.
+    const value = controller();
+
+    await value.refreshModels?.(
+      context(
+        store([{ ...native("opus-5"), name: "opus-5 (no metadata)", reasoning: false, maxTokens: 16_384 }]),
+        false,
+      ),
+    );
+
+    expect(value.getModels()[0]).toMatchObject({ id: "opus-5", reasoning: true });
+    expect(value.getModels()[0]?.name).not.toContain("no metadata");
   });
 });

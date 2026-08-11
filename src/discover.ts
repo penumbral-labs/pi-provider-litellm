@@ -8,7 +8,6 @@ import {
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
-  effectiveDeploymentCount,
   reduceModelGroup,
   type SemanticFamily,
 } from "./model-groups.js";
@@ -134,8 +133,10 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
 }
 
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
-  // Reduced deployment groups use a distinct marker; this sentinel remains
-  // exclusive to evidence-free fallback models that may be enriched safely.
+  // This sentinel is emitted only by the evidence-free `/v1/models` fallback, so
+  // re-deriving catalog metadata from the model id here cannot re-authorize a
+  // reduced `/model/info` group whose catalog authority was withheld. Reduced
+  // groups carry the distinct ` (incomplete metadata)` marker instead.
   if (
     !model.name.endsWith(" (no metadata)") ||
     model.reasoning ||
@@ -225,13 +226,19 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  let family: SemanticFamily | undefined;
+  // Provider identity and semantic family must describe the same backend, so a
+  // resolution reports the family of the candidate that resolved it (or of the
+  // catalog model itself) rather than a family borrowed from a sibling candidate.
+  let unresolvedFamily: SemanticFamily | undefined;
   for (const candidate of candidates) {
-    family ??= semanticFamily(candidate);
+    const family = semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, family, resolved.model);
+    if (resolved) {
+      return catalogResolution(resolved.provider, family ?? semanticFamily(resolved.model.id), resolved.model);
+    }
+    unresolvedFamily ??= family;
   }
-  return family ? { semanticFamily: family } : undefined;
+  return unresolvedFamily ? { semanticFamily: unresolvedFamily } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -441,24 +448,42 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  // Exact repeats of an identified deployment are one effective deployment;
-  // anonymous rows remain distinct because LiteLLM provides no identity to dedupe.
-  const deploymentCount = effectiveDeploymentCount(entries);
-  const singleton = deploymentCount === 1;
-  const reduced = reduceModelGroup(entries, (entry) => {
+const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
+
+// Withholding catalog authority is safe but invisible: the route silently reports
+// default limits and zero cost. This is a safety-relevant degradation, so it is
+// reported once per discovery regardless of LITELLM_VERBOSE_DISCOVERY, and
+// carries only a count and bounded public route ids.
+function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
+  if (routes.length === 0) return;
+  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(
+    `LiteLLM discovery: ${routes.length} route group(s) have conflicting deployment provider identity; ` +
+      `catalog limits, pricing, and reasoning metadata are withheld: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
+function mapFromModelInfoGroup(
+  entries: readonly ModelInfoEntry[],
+  ambiguousRoutes?: string[],
+): DiscoveredModel | undefined {
+  const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved || !singleton) return resolved;
+    // Exactly one routable deployment: the public route name is the only
+    // remaining hint, and using it preserves upstream singleton behavior.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
     return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  const incompleteMetadataName =
-    deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   return {
     id: reduced.id,
-    name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
+    // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
+    // catalog re-derivation from the model id during offline cache reads.
+    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
     input: reduced.vision ? ["text", "image"] : ["text"],
@@ -582,7 +607,11 @@ export async function discoverModels(
       group.push(entry);
       groups.set(entry.model_name, group);
     }
-    let models = [...groups.values()].map(mapFromModelInfoGroup).filter((m): m is DiscoveredModel => m !== undefined);
+    const ambiguousRoutes: string[] = [];
+    let models = [...groups.values()]
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .filter((m): m is DiscoveredModel => m !== undefined);
+    reportAmbiguousCatalogAuthority(ambiguousRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in

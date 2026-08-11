@@ -10,6 +10,19 @@ import {
   shouldSuppressReasoningContent,
 } from "../src/discover.js";
 
+// Deterministic endpoint mock: only the listed suffixes are served and every
+// other URL fails loudly, so a stray fetch can never reach the network or be
+// silently satisfied by another endpoint's payload.
+function mockEndpoints(routes: Record<string, () => Response>): void {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = input instanceof URL ? input.toString() : String(input);
+    for (const [suffix, respond] of Object.entries(routes)) {
+      if (url.endsWith(suffix)) return respond();
+    }
+    throw new Error(`unexpected URL: ${url}`);
+  });
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -333,9 +346,8 @@ describe("discoverModels via /model/info", () => {
         },
       },
     ];
-    const fetchMock = vi.spyOn(globalThis, "fetch");
     for (const rows of [deployments, [...deployments].reverse()]) {
-      fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: rows }));
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
       const result = await discoverModels("https://litellm.example.com", "sk-test", {});
       expect(result.models).toEqual([
         expect.objectContaining({
@@ -456,38 +468,62 @@ describe("discoverModels via /model/info", () => {
       }),
     ).toEqual({ semanticFamily: "deepseek" });
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(200, {
-        data: [
-          {
-            model_name: "foundry-route",
-            litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
-            model_info: { mode: "chat", litellm_provider: "azure_ai" },
-          },
-        ],
-      }),
-    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "foundry-route",
+              litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+              model_info: { mode: "chat", litellm_provider: "azure_ai" },
+            },
+          ],
+        }),
+    });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
-      name: "foundry-route (no metadata)",
+      name: "foundry-route (incomplete metadata)",
       reasoning: false,
       contextWindow: 128_000,
     });
   });
 
+  it("keeps provider identity and semantic family from the same backend candidate", () => {
+    // `litellm_params.model` names a Claude-looking route that resolves nowhere;
+    // `base_model` resolves to OpenAI. The family must describe the backend that
+    // actually supplied the catalog identity, not the sibling candidate.
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "mixed-evidence",
+        litellm_params: { model: "internal/claude-magic" },
+        model_info: { mode: "chat", base_model: "openai/gpt-4o" },
+      }),
+    ).toMatchObject({ provider: "openai", semanticFamily: "openai" });
+
+    // With no family text on the resolving candidate, the family comes from the
+    // resolved catalog model itself, which is the same entity.
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "aliased",
+        litellm_params: { model: "anthropic/opus-4-7" },
+        model_info: { mode: "chat" },
+      }),
+    ).toMatchObject({ provider: "anthropic", semanticFamily: "claude" });
+  });
+
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
-    );
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
+    });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
       id: "gpt-4o",
-      name: "gpt-4o (no metadata)",
+      name: "gpt-4o (incomplete metadata)",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
