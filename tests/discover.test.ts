@@ -767,10 +767,18 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
+    const model = result.models[0];
+    expect(model?.api).toBe("openai-completions");
+    if (!model?.api) throw new Error("discovered model has no API");
     expect(
-      getSupportedThinkingLevels({ ...result.models[0]!, provider: "litellm", baseUrl: "https://litellm.example.com" }),
+      getSupportedThinkingLevels({
+        ...model,
+        api: model.api,
+        provider: "litellm",
+        baseUrl: "https://litellm.example.com",
+      }),
     ).toEqual([]);
-    expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
+    expect(model.compat).not.toHaveProperty("thinkingFormat");
   });
 
   it("preserves explicit reasoning capability without speculative controls", async () => {
@@ -795,10 +803,18 @@ describe("discoverModels via /model/info", () => {
         requiresReasoningContentOnAssistantMessages: true,
       },
     });
+    const model = result.models[0];
+    expect(model?.api).toBe("openai-completions");
+    if (!model?.api) throw new Error("discovered model has no API");
     expect(
-      getSupportedThinkingLevels({ ...result.models[0]!, provider: "litellm", baseUrl: "https://litellm.example.com" }),
+      getSupportedThinkingLevels({
+        ...model,
+        api: model.api,
+        provider: "litellm",
+        baseUrl: "https://litellm.example.com",
+      }),
     ).toEqual([]);
-    expect(result.models[0]?.compat).not.toHaveProperty("thinkingFormat");
+    expect(model.compat).not.toHaveProperty("thinkingFormat");
   });
 
   it("honors explicit K2.7 Code reasoning denial", async () => {
