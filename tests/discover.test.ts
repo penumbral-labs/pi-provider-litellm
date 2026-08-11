@@ -1,21 +1,35 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
+  moonshotPolicy,
   normalizeBaseUrl,
   resolveModelInfoCatalog,
-  shouldSuppressReasoningContent,
 } from "../src/discover.js";
+import type { DiscoveredModel } from "../src/types.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+// Discovered models become native models before pi-ai reads them, so level
+// assertions go through the same shape the runtime sees.
+function nativeModel(model: DiscoveredModel | undefined): Model<Api> {
+  if (!model) throw new Error("expected a discovered model");
+  return {
+    ...model,
+    provider: "litellm",
+    api: model.api ?? "openai-completions",
+    baseUrl: "https://x/v1",
+  } as Model<Api>;
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -136,18 +150,20 @@ describe("buildCompat", () => {
   });
 });
 
-describe("shouldSuppressReasoningContent", () => {
-  it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
-    expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+describe("moonshotPolicy", () => {
+  it("unwraps inline think tags for Kimi generations that inline them", () => {
+    expect(moonshotPolicy("kimi-k2.6")).toEqual({ normalizeStrictToolMessages: true, normalizeThinkTags: true });
+    expect(moonshotPolicy("moonshotai/kimi-k2")).toEqual({
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: true,
+    });
   });
 
-  it("does not suppress explicit forced-thinking models", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
-  });
-
-  it("does not suppress unrelated models", () => {
-    expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
+  it("leaves forced-thinking generations alone, which stream reasoning as its own field", () => {
+    expect(moonshotPolicy("kimi-k2-thinking")).toEqual({
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: false,
+    });
   });
 });
 
@@ -660,7 +676,7 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
-      name: "foundry-route (no metadata)",
+      name: "foundry-route (incomplete metadata)",
       reasoning: true,
       contextWindow: 128_000,
       thinkingLevelMap: { off: null, high: "high", max: "max" },
@@ -759,7 +775,10 @@ describe("discoverModels via /model/info", () => {
     );
 
     const evidenceFree = await discoverModels("https://litellm.example.com", "sk-test", {});
-    expect(evidenceFree.models[0]?.litellmPolicy).toEqual({ normalizeStrictToolMessages: true });
+    expect(evidenceFree.models[0]?.litellmPolicy).toEqual({
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: true,
+    });
 
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -877,8 +896,10 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
+      // Reduced groups never take the ` (no metadata)` sentinel, which is what
+      // authorizes catalog re-derivation from the id on a later cache read.
       id: "gpt-4o",
-      name: "gpt-4o (no metadata)",
+      name: "gpt-4o (incomplete metadata)",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1136,7 +1157,18 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("health");
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    // The route name is not deployment evidence, and an ABSENT map would let
+    // pi-ai offer every standard level, so each level is denied explicitly.
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
   });
 });
 
@@ -1159,7 +1191,7 @@ describe("discoverModels fallback to /v1/models", () => {
         expect.objectContaining({
           id: "kimi-k2.6",
           name: "kimi-k2.6 (no metadata)",
-          litellmPolicy: { normalizeStrictToolMessages: true },
+          litellmPolicy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
         }),
         expect.objectContaining({ id: "grok-4.5", name: "grok-4.5 (no metadata)" }),
       ]),
@@ -1885,5 +1917,155 @@ describe("discoverModels timeout", () => {
     const start = Date.now();
     await expect(discoverModels("https://litellm.example.com", "sk-test", { timeoutMs: 30 })).rejects.toBeDefined();
     expect(Date.now() - start).toBeLessThan(500);
+  });
+});
+
+// The wire-level sweep in tests/provider-compat/stream.test.ts covers the
+// `/model/info` group path. Capability degrades across the discovery fallbacks
+// because the evidence does, so this pins the same invariant on every path: a
+// reasoning model must never carry an ABSENT thinkingLevelMap together with a
+// compat that denies effort and names no format, because pi-ai reads absent as
+// "every standard level supported".
+describe("discovery paths never advertise untransmittable levels", () => {
+  const BACKENDS = [
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.7-code",
+    "moonshot/kimi-k3",
+    "moonshot/kimi-k2-thinking",
+    "moonshot/kimi-latest",
+    "deepseek/deepseek-v4",
+    "deepseek/deepseek-r1",
+    "openai/o3",
+    "internal/opaque",
+  ];
+  const ALIASES = ["kimi-k2.6", "moonshotai/kimi-k3", "deepseek/deepseek-v4-pro", "openai/gpt-5.5", "mystery-route"];
+
+  function assertTransmissible(model: DiscoveredModel | undefined, label: string): void {
+    if (!model) throw new Error(`${label}: no model discovered`);
+    const native = nativeModel(model);
+    const compat = model.compat as { supportsReasoningEffort?: boolean; thinkingFormat?: string } | undefined;
+    const carries = compat?.thinkingFormat !== undefined || compat?.supportsReasoningEffort !== false;
+    const offered = getSupportedThinkingLevels(native).filter((level) => level !== "off");
+    if (!carries) expect(offered, `${label} advertises ${JSON.stringify(offered)} it cannot transmit`).toEqual([]);
+    if (model.reasoning && !carries) expect(model.thinkingLevelMap, `${label} needs an explicit denial`).toBeDefined();
+  }
+
+  it.each(
+    BACKENDS.flatMap((backend) =>
+      [undefined, ["thinking"], ["reasoning_effort"]].map((params) => ({ backend, params })),
+    ),
+  )("/model/info $backend with $params", async ({ backend, params }) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "route",
+              litellm_params: { model: backend, ...(params ? { allowed_openai_params: params } : {}) },
+              model_info: { id: "d1", mode: "chat", supports_reasoning: true },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    assertTransmissible(result.models[0], `/model/info ${backend} ${JSON.stringify(params)}`);
+  });
+
+  it.each(ALIASES)("/v1/models alias %s", async (alias) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id: alias }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    assertTransmissible(result.models[0], `/v1/models ${alias}`);
+  });
+
+  it.each(ALIASES)("/health endpoint list %s", async (alias) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(403, {});
+      if (url.endsWith("/health")) return jsonResponse(200, { healthy_endpoints: [{ model: alias }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    assertTransmissible(result.models[0], `/health list ${alias}`);
+  });
+
+  it.each(ALIASES)("/health per-deployment detail behind alias %s", async (alias) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(403, {});
+      if (url.endsWith("/health")) return jsonResponse(200, { healthy_endpoints: [{ model: alias, model_id: "u1" }] });
+      if (url.includes("litellm_model_id=u1")) {
+        // No `model_name`: the alias is the only identifier, i.e. route text only.
+        return jsonResponse(200, { data: [{ model_info: { mode: "chat", supports_reasoning: true } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    assertTransmissible(result.models[0], `/health detail ${alias}`);
+  });
+});
+
+describe("family evidence authority", () => {
+  it.each([
+    { name: "OpenAI declared alongside an unknown backend", second: "azure_ai/mystery-deployment" },
+    { name: "OpenAI declared alongside a deployment with no routing model", second: undefined },
+  ])("withholds route-name compat when only some deployments declare a family: $name", async ({ second }) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-router",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "a", mode: "chat", litellm_provider: "openai" },
+            },
+            {
+              model_name: "claude-router",
+              ...(second ? { litellm_params: { model: second } } : {}),
+              model_info: { id: "b", mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // Partial evidence is still evidence that the route is not uniformly what
+    // its name suggests, so Anthropic cache-control must not be relayed to a
+    // group half-served by OpenAI.
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false });
+    expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
+  });
+
+  it("still trusts a family every deployment declares", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"].map((model, index) => ({
+            model_name: "claude-router",
+            litellm_params: { model },
+            model_info: { id: `d${index}`, mode: "chat", litellm_provider: "anthropic" },
+          })),
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.compat).toMatchObject({ cacheControlFormat: "anthropic" });
   });
 });

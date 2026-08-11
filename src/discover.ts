@@ -4,13 +4,14 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
 import {
+  advertisableLevels,
   type CatalogResolution,
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
-  effectiveDeploymentCount,
   type FamilyEvidence,
   isResponsesMode,
+  NO_TRANSMISSIBLE_LEVELS,
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
@@ -86,8 +87,17 @@ export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
 }
 
-export function shouldSuppressReasoningContent(modelId: string): boolean {
-  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
+// The Moonshot request/display conclusions travel together on the model so the
+// request and `message_end` hooks read the same discovered evidence instead of
+// each re-deriving a backend from the route name.
+export function moonshotPolicy(modelId: string): LiteLLMModelPolicy {
+  return {
+    normalizeStrictToolMessages: true,
+    // A route that always reasons streams reasoning content as its own field
+    // rather than inlining `<think>` in the answer, so unwrapping is limited to
+    // the generations that inline it.
+    normalizeThinkTags: !FORCED_THINKING_MODEL_PATTERN.test(modelId),
+  };
 }
 
 export function buildCompat(
@@ -120,12 +130,13 @@ function toKnownProvider(provider: string | undefined): BuiltinProvider | undefi
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
-function catalogProviderCandidates(id: string, ownedBy?: string): BuiltinProvider[] {
+// Anthropic recognition is derived from the single `catalogLookupIds` rule so a
+// second alias pattern cannot drift away from it. Every Anthropic catalog id and
+// every alias that maps onto one is canonicalized to a `claude-` lookup id,
+// including single-number names and dated snapshots.
+function catalogProviderCandidates(lookupIds: readonly string[], id: string, ownedBy?: string): BuiltinProvider[] {
   const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
-  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
-  const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
-  if (/^(?:claude-)?(?:opus|sonnet|haiku)-\d+-\d+$/.test(anthropicAlias)) candidates.push("anthropic");
-  if (anthropicAlias === "fable-5" || anthropicAlias === "opus-5") candidates.push("anthropic");
+  if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
   return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
 }
 
@@ -134,7 +145,7 @@ function resolveCatalogModel(
   ownedBy?: string,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(id, ownedBy)) {
+  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy)) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -162,7 +173,7 @@ function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
 function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
   const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
   if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
-  const restored: typeof cached = { ...cached, litellmPolicy: { normalizeStrictToolMessages: true } };
+  const restored: typeof cached = { ...cached, litellmPolicy: moonshotPolicy(model.id) };
   return restored;
 }
 
@@ -280,18 +291,24 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const model =
     (routingModel ? semanticModel(routingModel) : undefined) ?? (baseModel ? semanticModel(baseModel) : undefined);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
+  // Provider identity and semantic family must describe the same backend, so a
+  // resolution reports the family of the candidate that resolved it (or of the
+  // catalog model itself) rather than a family borrowed from a sibling candidate.
+  let unresolvedFamily: SemanticFamily | undefined;
   for (const candidate of candidates) {
+    const family = semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    // Catalog metadata and family must describe the same candidate; pairing one
-    // candidate's family with another's cost silently drops vendor compat.
-    if (resolved)
+    if (resolved) {
       return {
-        ...catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model),
+        ...catalogResolution(resolved.provider, family ?? semanticFamily(resolved.model.id), resolved.model),
         ...(model ? { semanticModel: model } : {}),
       };
+    }
+    unresolvedFamily ??= family;
   }
-  const family = routingFamily ?? baseFamily;
-  return family ? { semanticFamily: family, ...(model ? { semanticModel: model } : {}) } : undefined;
+  return unresolvedFamily
+    ? { semanticFamily: unresolvedFamily, ...(model ? { semanticModel: model } : {}) }
+    : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -501,44 +518,70 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  // Exact repeats of an identified deployment are one effective deployment;
-  // anonymous rows remain distinct because LiteLLM provides no identity to dedupe.
-  const deploymentCount = effectiveDeploymentCount(entries);
-  const singleton = deploymentCount === 1;
-  const reduced = reduceModelGroup(entries, (entry) => {
+const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
+
+// Withholding catalog authority is safe but invisible: the route silently reports
+// default limits and zero cost. This is a safety-relevant degradation, so it is
+// reported once per discovery regardless of LITELLM_VERBOSE_DISCOVERY, and
+// carries only a count and bounded public route ids.
+function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
+  if (routes.length === 0) return;
+  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(
+    `LiteLLM discovery: ${routes.length} route group(s) have conflicting deployment provider identity; ` +
+      `catalog limits, pricing, and reasoning metadata are withheld: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
+function mapFromModelInfoGroup(
+  entries: readonly ModelInfoEntry[],
+  ambiguousRoutes?: string[],
+): DiscoveredModel | undefined {
+  const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved || !singleton) return resolved;
+    // Exactly one routable deployment: the public route name is the only
+    // remaining hint, and using it preserves upstream singleton behavior.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
     return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  const incompleteMetadataName =
-    deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
+  const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
+  // The policy's compat only applies on Chat, so its level map must be gated the
+  // same way; otherwise a Responses group advertises Chat-shaped levels that the
+  // Responses wire emits as bare `reasoning.effort` values.
+  const compat =
+    reduced.api === "openai-completions"
+      ? { ...buildCompat(reduced.id, reduced.api, reduced.semanticFamily), ...reasoningPolicy?.compat }
+      : buildCompat(reduced.id, reduced.api, reduced.semanticFamily);
+  // The policy's level values are Chat-shaped (they pair with its Chat compat),
+  // so a Responses group keeps catalog levels instead: emitting `off` or `max`
+  // as a bare `reasoning.effort` value is not a Responses effort. Dropping the
+  // map entirely would be worse than either — pi-ai reads absent as all levels.
+  const candidateLevels =
+    reduced.api === "openai-completions"
+      ? (reasoningPolicy?.thinkingLevelMap ?? reduced.thinkingLevelMap)
+      : reduced.thinkingLevelMap;
+  const levels = advertisableLevels(candidateLevels, compat, reasoning);
   return {
     id: reduced.id,
-    name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
-    reasoning: reasoningPolicy?.reasoning ?? reduced.reasoning,
-    ...(reasoningPolicy
-      ? reasoningPolicy.thinkingLevelMap
-        ? { thinkingLevelMap: reasoningPolicy.thinkingLevelMap }
-        : {}
-      : reduced.thinkingLevelMap
-        ? { thinkingLevelMap: reduced.thinkingLevelMap }
-        : {}),
+    // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
+    // catalog re-derivation from the model id during offline cache reads.
+    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
+    reasoning,
+    ...(levels ? { thinkingLevelMap: levels } : {}),
     input: reduced.vision ? ["text", "image"] : ["text"],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat:
-      reduced.api === "openai-completions"
-        ? { ...buildCompat(reduced.id, reduced.api, reduced.semanticFamily), ...reasoningPolicy?.compat }
-        : buildCompat(reduced.id, reduced.api, reduced.semanticFamily),
+    compat,
     ...(reduced.semanticFamily === "kimi" || (reduced.semanticFamily === undefined && isMoonshotModel(reduced.id))
-      ? { litellmPolicy: { normalizeStrictToolMessages: true } }
+      ? { litellmPolicy: moonshotPolicy(reduced.semanticModel ?? reduced.id) }
       : {}),
   };
 }
@@ -559,7 +602,11 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
     : named;
   const model = mapFromModelInfo(chatOnly);
   if (!model) return undefined;
-  if (!entry.model_name) delete model.thinkingLevelMap;
+  // Without a deployment `model_name` the only identifier is the `/health` route
+  // text, which is not evidence for request controls. Deleting the map would
+  // hand pi-ai an absent map, i.e. every standard level; deny them explicitly.
+  if (!entry.model_name && model.reasoning) model.thinkingLevelMap = NO_TRANSMISSIBLE_LEVELS;
+  else if (!entry.model_name) delete model.thinkingLevelMap;
   return model;
 }
 
@@ -567,18 +614,22 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
+  const reasoning = catalogModel?.reasoning ?? false;
+  const compat = buildCompat(id);
   return {
     id,
     name: catalogModel?.name ?? id,
-    reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    reasoning,
+    // `/health` route text is not deployment evidence for request controls, so no
+    // thinking selector is derived from it; a reasoning route fails closed.
+    thinkingLevelMap: advertisableLevels(undefined, compat, reasoning),
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat: buildCompat(id),
-    ...(isMoonshotModel(id) ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
+    compat,
+    ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
 
@@ -590,18 +641,20 @@ function mapFromModelsList(
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
   const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
+  const reasoning = modelsDevMetadata.reasoning ?? catalogModel?.reasoning ?? false;
+  const compat = buildCompat(id);
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
-    reasoning: modelsDevMetadata.reasoning ?? catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    reasoning,
+    thinkingLevelMap: advertisableLevels(catalogModel?.thinkingLevelMap, compat, reasoning),
     input: modelsDevMetadata.input ?? catalogModel?.input ?? ["text"],
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat: buildCompat(id),
-    ...(isMoonshotModel(id) ? { litellmPolicy: { normalizeStrictToolMessages: true } } : {}),
+    compat,
+    ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
 
@@ -614,12 +667,13 @@ async function discoverFromHealth(
   progress?.("Querying /health endpoint...");
   // KNOWN LIMITATION: `/health` lists deployments, not routes, and each one is
   // mapped on its own, so deployments sharing a `model_name` are not reduced
-  // against each other the way `/model/info` groups are — `deduplicateModels`
-  // keeps whichever finished first. Reducing here means aggregating the
-  // per-deployment detail fetches by `model_name` and feeding whole groups to
-  // `mapFromModelInfoGroup`, which also changes naming and the singleton
-  // catalog fallback on this path. That belongs in its own change; see the
-  // `/health` note in AGENTS.md and README.md.
+  // against each other the way `/model/info` groups are. `Promise.all` preserves
+  // list order and `deduplicateModels` keeps the first entry, so the survivor is
+  // whichever deployment `/health` listed first — not whichever answered first.
+  // Reducing here means aggregating the per-deployment detail fetches by
+  // `model_name` and feeding whole groups to `mapFromModelInfoGroup`, which also
+  // changes naming and the singleton catalog fallback on this path. The approved
+  // PRD names that a non-goal; see the `/health` notes in AGENTS.md and README.md.
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
@@ -673,7 +727,11 @@ export async function discoverModels(
       group.push(entry);
       groups.set(entry.model_name, group);
     }
-    let models = [...groups.values()].map(mapFromModelInfoGroup).filter((m): m is DiscoveredModel => m !== undefined);
+    const ambiguousRoutes: string[] = [];
+    let models = [...groups.values()]
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .filter((m): m is DiscoveredModel => m !== undefined);
+    reportAmbiguousCatalogAuthority(ambiguousRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in

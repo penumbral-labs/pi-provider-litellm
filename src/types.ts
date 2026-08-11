@@ -12,6 +12,11 @@ export type LiteLLMRuntimeAuth = {
 
 export interface LiteLLMModelPolicy {
   normalizeStrictToolMessages: boolean;
+  // Moonshot routes can inline reasoning as `<think>` text in the visible
+  // answer. Whether to unwrap it is a per-model conclusion discovery reaches
+  // from deployment evidence, carried here so the `message_end` hook does not
+  // re-derive it from the route name.
+  normalizeThinkTags: boolean;
 }
 
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {

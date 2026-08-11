@@ -14,6 +14,20 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+// `message_end` resolves the model that produced the message through the
+// registry, so display normalization reads the conclusion discovery persisted
+// instead of re-deriving a backend from the route name.
+function messageEndCtx(modelId: string, litellmPolicy?: Record<string, boolean>): unknown {
+  return {
+    modelRegistry: {
+      find: (provider: string, id: string) =>
+        provider === "litellm" && id === modelId
+          ? { id, provider, api: "openai-completions", ...(litellmPolicy ? { litellmPolicy } : {}) }
+          : undefined,
+    },
+  };
+}
+
 async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
   const store: ProviderModelsStore = {
     read: async () => undefined,
@@ -1142,7 +1156,10 @@ describe("feature parity", () => {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
     for (const handler of pi.handlers.get("message_end") ?? []) {
-      const result = await handler({ message });
+      const result = await handler(
+        { message },
+        messageEndCtx(message.model, { normalizeStrictToolMessages: true, normalizeThinkTags: true }),
+      );
       if (result?.message) message = result.message;
     }
 
@@ -1150,6 +1167,41 @@ describe("feature parity", () => {
       { type: "thinking", thinking: "internal reasoning" },
       { type: "text", text: "DONE" },
     ]);
+  });
+
+  it.each([
+    { name: "a Kimi-shaped route carrying no display conclusion", policy: undefined, modelId: "kimi-k2.6" },
+    {
+      name: "a route whose discovered conclusion declines normalization",
+      policy: { normalizeStrictToolMessages: true, normalizeThinkTags: false },
+      modelId: "kimi-k2.6",
+    },
+  ])("leaves think tags alone for $name", async ({ policy, modelId }) => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // A Kimi-shaped id with inline think tags: only the absent/negative
+    // conclusion stops the rewrite, so this fails if the hook reads the id.
+    const message = {
+      role: "assistant",
+      provider: "litellm",
+      model: modelId,
+      content: [{ type: "text", text: "<think>internal reasoning</think>DONE" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+    const results = [];
+    for (const handler of pi.handlers.get("message_end") ?? []) {
+      results.push(await handler({ message }, messageEndCtx(modelId, policy)));
+    }
+
+    expect(results.every((result) => result?.message === undefined)).toBe(true);
+    expect(message.content).toEqual([{ type: "text", text: "<think>internal reasoning</think>DONE" }]);
   });
 
   it("keeps final Kimi text visible when a dangling think tag prefixes it", async () => {
@@ -1184,7 +1236,10 @@ describe("feature parity", () => {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
     for (const handler of pi.handlers.get("message_end") ?? []) {
-      const result = await handler({ message });
+      const result = await handler(
+        { message },
+        messageEndCtx(message.model, { normalizeStrictToolMessages: true, normalizeThinkTags: true }),
+      );
       if (result?.message) message = result.message;
     }
 

@@ -35,7 +35,10 @@ export interface CatalogResolution {
   cost?: DiscoveredModel["cost"];
 }
 
-export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | undefined;
+// `singleton` is true only when the group reduces to exactly one routable
+// deployment, which is the only case where a public route name may be used as a
+// catalog hint. Resolvers must not treat route text as evidence otherwise.
+export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => CatalogResolution | undefined;
 
 export interface ReducedModelGroup {
   id: string;
@@ -51,6 +54,9 @@ export interface ReducedModelGroup {
   catalogProvider?: string;
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
+  // Set when deployments disagreed on catalog provider identity, so catalog
+  // limits, pricing, and reasoning metadata were withheld for the whole group.
+  catalogAuthorityAmbiguous?: boolean;
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
 }
@@ -72,23 +78,27 @@ function normalizedMode(mode: string | null | undefined): "chat" | "responses" |
   return "unsupported";
 }
 
+function sortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortValue);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, sortValue(child)]),
+  );
+}
+
+// Key-order-independent identity, so logically equal catalog metadata compares
+// equal instead of silently failing unanimity because of property order.
+function stableJson(value: unknown): string | undefined {
+  return value === undefined ? undefined : JSON.stringify(sortValue(value));
+}
+
 function stableEntry(entry: ModelInfoEntry): string {
-  const sortValue = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(sortValue);
-    if (typeof value !== "object" || value === null) return value;
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, sortValue(child)]),
-    );
-  };
   return JSON.stringify(sortValue(entry));
 }
 
-function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
-  deployments: ModelInfoEntry[];
-  deploymentCount: number;
-} {
+function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
   const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];
   for (const entry of entries) {
@@ -104,7 +114,7 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
   }
   // Conflicting rows for one deployment remain in the reduction so their
   // disagreement fails closed, while exact repeats stay idempotent.
-  const deployments = [
+  return [
     ...[...identified.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .flatMap(([, variants]) =>
@@ -112,11 +122,12 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
       ),
     ...anonymous.sort((left, right) => left.signature.localeCompare(right.signature)).map(({ entry }) => entry),
   ];
-  return { deployments, deploymentCount: identified.size + anonymous.length };
 }
 
-export function effectiveDeploymentCount(entries: readonly ModelInfoEntry[]): number {
-  return uniqueDeployments(entries.filter((entry) => entry.model_name)).deploymentCount;
+// A router limit is usable only when it is a finite positive token count.
+// Without this, one deployment reporting 0 would clamp the whole group to 0.
+function explicitLimit(value: number | undefined): number | undefined {
+  return value === undefined || !Number.isFinite(value) || value <= 0 ? undefined : value;
 }
 
 function normalizeParams(params: readonly string[] | undefined): Set<string> {
@@ -148,7 +159,7 @@ const ONLY_HIGH = {
 // pi-ai reads an ABSENT thinkingLevelMap as "every standard level supported"
 // (getSupportedThinkingLevels), so a policy that cannot transmit any level has
 // to deny each one explicitly instead of omitting the map.
-const NO_TRANSMISSIBLE_LEVELS = {
+export const NO_TRANSMISSIBLE_LEVELS = {
   off: null,
   minimal: null,
   low: null,
@@ -157,6 +168,30 @@ const NO_TRANSMISSIBLE_LEVELS = {
   xhigh: null,
   max: null,
 } as const;
+
+// pi-ai serializes a thinking level either through `reasoning_effort` — which it
+// allows unless we explicitly deny it — or through an explicit `thinkingFormat`.
+// A compat that denies effort and names no format can carry nothing, so any map
+// paired with it would advertise levels that never reach the wire.
+function carriesReasoningLevels(compat: DiscoveredModel["compat"]): boolean {
+  const openAICompat = compat as OpenAICompat | undefined;
+  return openAICompat?.thinkingFormat !== undefined || openAICompat?.supportsReasoningEffort !== false;
+}
+
+// The single place where an advertised level map meets the compat that has to
+// carry it. Level advertisement and transmissibility travelled on separate
+// channels before this, which let four different paths offer levels that
+// serialized nothing. Every path that publishes a thinkingLevelMap goes through
+// here so the invariant is mechanical rather than restated per call site.
+export function advertisableLevels(
+  levels: DiscoveredModel["thinkingLevelMap"] | undefined,
+  compat: DiscoveredModel["compat"],
+  reasoning: boolean,
+): DiscoveredModel["thinkingLevelMap"] | undefined {
+  if (!reasoning) return levels;
+  if (!carriesReasoningLevels(compat)) return NO_TRANSMISSIBLE_LEVELS;
+  return levels;
+}
 
 function buildReasoningPolicy(
   semanticModel: SemanticModel | undefined,
@@ -307,31 +342,41 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
 }
 
-// Deployments that name different backend families, or a single deployment whose
-// routing and base models disagree, leave the group with contradictory rather
-// than missing evidence. Reporting that distinctly stops the caller from
-// treating the route name as a fallback signal.
+// Deployments that name different backend families, a single deployment whose
+// routing and base models disagree, or a group where only SOME deployments
+// declare a family, all leave the group with contradictory rather than missing
+// evidence. Reporting that distinctly stops the caller from treating the route
+// name as a fallback signal: partial evidence is still evidence that the route
+// is not uniformly what its name suggests.
 function reduceFamilyEvidence(values: readonly (FamilyEvidence | undefined)[]): FamilyEvidence | undefined {
-  const declared = new Set(values.filter((value): value is FamilyEvidence => value !== undefined));
-  if (declared.has("conflicting") || declared.size > 1) return "conflicting";
-  return unanimous(values);
+  const declared = values.filter((value): value is FamilyEvidence => value !== undefined);
+  if (declared.length === 0) return undefined;
+  if (declared.length !== values.length) return "conflicting";
+  const distinct = new Set(declared);
+  if (distinct.has("conflicting") || distinct.size > 1) return "conflicting";
+  return declared[0];
 }
 
 export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  const unique = uniqueDeployments(entries.filter((entry) => entry.model_name));
-  const candidates = unique.deployments;
+  const candidates = uniqueDeployments(entries.filter((entry) => entry.model_name));
   if (candidates.length === 0) return undefined;
+  // Transport votes over every candidate row, so an unsupported sibling still
+  // forces Chat; capability, limit, price, and identity evidence reduces only
+  // over routable rows so a non-chat sibling cannot corrupt them.
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
-  const catalogs = deployments.map(resolveCatalog);
+  const singleton = deployments.length === 1;
+  const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = reduceFamilyEvidence(catalogs.map((catalog) => catalog?.semanticFamily));
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
+  const catalogAuthorityAmbiguous =
+    catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
   const reasoning = deployments.every(
     (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
   );
@@ -342,12 +387,17 @@ export function reduceModelGroup(
   const contextWindow = min(
     deployments.map(
       (entry, index) =>
-        entry.model_info?.max_input_tokens ?? catalogAuthority[index]?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        explicitLimit(entry.model_info?.max_input_tokens) ??
+        explicitLimit(catalogAuthority[index]?.contextWindow) ??
+        DEFAULT_CONTEXT_WINDOW,
     ),
   );
   const maxTokens = min(
     deployments.map(
-      (entry, index) => entry.model_info?.max_output_tokens ?? catalogAuthority[index]?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      (entry, index) =>
+        explicitLimit(entry.model_info?.max_output_tokens) ??
+        explicitLimit(catalogAuthority[index]?.maxTokens) ??
+        DEFAULT_MAX_TOKENS,
     ),
   );
 
@@ -363,17 +413,17 @@ export function reduceModelGroup(
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
   if (hasCompleteCost && catalogProvider) {
-    const tiers = unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.cost?.tiers)));
-    if (tiers && tiers !== JSON.stringify(undefined)) cost.tiers = JSON.parse(tiers);
+    const tiers = unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.cost?.tiers)));
+    if (tiers) cost.tiers = JSON.parse(tiers);
   }
   const thinkingLevelMap = catalogProvider
-    ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
+    ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
     : undefined;
   const acceptedOpenAIParams = intersectParams(deployments);
 
   return {
     id: deployments[0]?.model_name as string,
-    deploymentCount: unique.deploymentCount,
+    deploymentCount: deployments.length,
     api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
@@ -385,6 +435,7 @@ export function reduceModelGroup(
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
+    ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };

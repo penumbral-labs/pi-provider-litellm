@@ -215,7 +215,7 @@ describe("createLiteLLMProvider", () => {
         supportsStrictMode: false,
         maxTokensField: "max_tokens" as const,
       },
-      policy: { normalizeStrictToolMessages: true },
+      policy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
     },
     {
       name: "a Moonshot-looking route name with generic compat evidence",
@@ -245,7 +245,7 @@ describe("createLiteLLMProvider", () => {
     const cached = {
       ...native("kimi-k2.6"),
       compat: { supportsStore: false },
-      litellmPolicy: { normalizeStrictToolMessages: true },
+      litellmPolicy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
     } as Model<Api>;
     const value = controller();
 

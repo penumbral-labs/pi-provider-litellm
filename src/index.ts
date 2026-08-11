@@ -14,7 +14,7 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -794,8 +794,9 @@ function prepareLiteLLMRequestPayload(
 function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !shouldSuppressReasoningContent(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || !modelPolicy?.normalizeThinkTags) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1073,9 +1074,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
+    // Resolve the discovered model that produced this message so the display
+    // conclusion comes from deployment evidence rather than the route name. An
+    // unresolvable model carries no conclusion and is left untouched.
+    const model = ctx.modelRegistry?.find(event.message.provider, event.message.model);
+    const modelPolicy = (model as (typeof model & { litellmPolicy?: LiteLLMModelPolicy }) | undefined)?.litellmPolicy;
+    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames, modelPolicy);
     if (!message) return;
     return { message };
   });

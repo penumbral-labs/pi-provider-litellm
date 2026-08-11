@@ -487,3 +487,73 @@ describe("native provider stream compatibility", () => {
     });
   });
 });
+
+// The branch's central invariant: pi-ai must never be handed a thinking level it
+// cannot serialize. Advertisement (thinkingLevelMap) and transmissibility
+// (compat) used to travel on separate channels, so four different paths offered
+// levels that reached the wire as nothing. This sweeps the semantic families and
+// evidence shapes against real request bodies so the invariant is enforced
+// mechanically rather than restated per model.
+describe("advertised thinking levels are transmissible", () => {
+  const BACKENDS = [
+    "moonshot/kimi-k2.5",
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.7-code",
+    "moonshot/kimi-k2.7-code-highspeed",
+    "moonshot/kimi-k3",
+    // Kimi generations with no tabled contract: the live proxies expose no
+    // reasoning controls for these, so they must fail closed rather than guess.
+    "moonshot/kimi-k2-thinking",
+    "moonshot/kimi-latest",
+    "moonshot/kimi-k2-0905-preview",
+    "deepseek/deepseek-v4",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-r1",
+    "azure_ai/deepseek-v4",
+    // Non-Kimi families must keep working through the generic effort path.
+    "openai/o3",
+    "openai/gpt-5.5",
+    "anthropic/claude-sonnet-4-6",
+    "internal/opaque-backend",
+  ];
+  const EVIDENCE = [
+    { name: "no declared params", params: undefined },
+    { name: "unrelated params", params: ["temperature"] },
+    { name: "thinking", params: ["thinking"] },
+    { name: "reasoning_effort", params: ["reasoning_effort"] },
+    { name: "both controls", params: ["thinking", "reasoning_effort"] },
+  ];
+
+  it.each(BACKENDS.flatMap((backend) => EVIDENCE.map((evidence) => ({ backend, evidence }))))(
+    "$backend with $evidence.name never advertises an untransmittable level",
+    async ({ backend, evidence }) => {
+      const { models, model, requests, respond } = await createCompatibilityHarness([
+        {
+          model_name: "sweep-route",
+          litellm_params: { model: backend, ...(evidence.params ? { allowed_openai_params: evidence.params } : {}) },
+          model_info: { id: "d1", mode: "chat", supports_reasoning: true },
+        },
+      ]);
+
+      const offered = getSupportedThinkingLevels(model).filter((level) => level !== "off");
+      for (const level of offered) {
+        respond(...successfulResponse("ok"));
+        await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: level }).result();
+        const body = requests.at(-1) ?? {};
+        const carried = Object.keys(body).filter((key) => /^(reasoning|reasoning_effort|thinking)$/.test(key));
+        // A level the picker offers must put something on the wire.
+        expect(carried, `${backend} / ${evidence.name} advertised "${level}" but sent nothing`).not.toEqual([]);
+      }
+
+      // And when nothing is transmissible the denial must be explicit: an absent
+      // map means "every standard level supported" to pi-ai.
+      if (offered.length === 0) {
+        respond(...successfulResponse("ok"));
+        await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+        expect(requests.at(-1)).not.toHaveProperty("reasoning_effort");
+        expect(requests.at(-1)).not.toHaveProperty("thinking");
+        expect(model.reasoning ? model.thinkingLevelMap : {}).toBeDefined();
+      }
+    },
+  );
+});

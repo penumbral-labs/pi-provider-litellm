@@ -9,6 +9,16 @@ function readWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/litellm-smoke.yml"), "utf8");
 }
 
+// Returns just the named step, so an assertion cannot be satisfied by identical
+// text elsewhere in the workflow (the `model_list` fixture repeats several of the
+// field names this step checks).
+function sliceStep(workflow: string, name: string): string {
+  const start = workflow.indexOf(`- name: ${name}`);
+  if (start === -1) throw new Error(`workflow step not found: ${name}`);
+  const next = workflow.indexOf("\n      - name: ", start + 1);
+  return workflow.slice(start, next === -1 ? undefined : next);
+}
+
 function readCiWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
 }
@@ -47,13 +57,23 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
     // Two rows are what makes the grouped route exercise deployment reduction.
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain("Verify deployment-group model info contract");
-    // The contract step must retry rather than fail on a cold proxy, and must
-    // check every field the reduction reads.
-    expect(workflow).toMatch(/while \(Date\.now\(\) < deadline\)/);
-    for (const field of ["model_info.id", "mode", "supported_openai_params", "allowed_openai_params"]) {
-      expect(workflow).toContain(field);
+    // Assert against the step's own body. The grouped `model_list` block above
+    // contains `mode`, `supported_openai_params` and `allowed_openai_params`
+    // too, so whole-file assertions passed even with the step deleted outright.
+    const contractStep = sliceStep(workflow, "Verify deployment-group model info contract");
+    expect(contractStep).toContain('row.model_name === "grouped-vidaimock"');
+    // Retries rather than failing the job on a cold proxy.
+    expect(contractStep).toMatch(/while \(Date\.now\(\) < deadline\)/);
+    // Guards the payload shape before indexing into it.
+    expect(contractStep).toMatch(/Array\.isArray\(payload\.data\)/);
+    // Checks every field the reduction reads, including the mode that decides
+    // whether a deployment joins the reduction at all.
+    for (const field of ["model_info?.id", "model_info.mode", "supported_openai_params", "allowed_openai_params"]) {
+      expect(contractStep).toContain(field);
     }
+    expect(contractStep).toContain('modes.join(",") !== "chat,responses"');
+    // Credential-bearing fields must not reach a public CI log.
+    expect(contractStep).toContain("litellm_params: undefined");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

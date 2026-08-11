@@ -103,6 +103,7 @@ describe("reduceModelGroup", () => {
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
       semanticFamily: "conflicting",
+      catalogAuthorityAmbiguous: true,
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },
     };
@@ -120,8 +121,11 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([repeated, repeated], resolveCatalog)).toEqual(
       reduceModelGroup([repeated], resolveCatalog),
     );
+    // Conflicting variants of one deployment id both stay in the reduction, so
+    // the count reflects the rows actually reduced rather than distinct ids.
+    // Counting them as one would re-admit the public route name as evidence.
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
-    expect(expected).toMatchObject({ deploymentCount: 1, contextWindow: 8_000 });
+    expect(expected).toMatchObject({ deploymentCount: 2, contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
     expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
   });
@@ -170,7 +174,9 @@ describe("reduceModelGroup", () => {
     );
     expect(result).toMatchObject({
       api: "openai-completions",
-      deploymentCount: 2,
+      // Only the routable deployment is reduced, so an unsupported sibling no
+      // longer inflates the count or suppresses the singleton catalog hint.
+      deploymentCount: 1,
       contextWindow: 200_000,
       maxTokens: 32_000,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
