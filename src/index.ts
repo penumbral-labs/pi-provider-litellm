@@ -28,7 +28,7 @@ import {
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions } from "./mcp-tools.js";
+import { createMcpToolDefinitions, reportMcpRegistrationFailure } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -989,7 +989,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           try {
             pi.registerTool(tool);
           } catch {
-            process.stderr.write(`LiteLLM (${PROVIDER_NAME}): An MCP tool could not be registered.\n`);
+            reportMcpRegistrationFailure();
           }
         }
         registeredMcpIdentity = identity;

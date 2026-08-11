@@ -538,6 +538,19 @@ describe("createMcpToolDefinitions", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
         { name: "valid", server_name: "schema", input_schema: { type: "object", properties: {} } },
+        {
+          name: "properties-argument",
+          server_name: "schema",
+          input_schema: {
+            type: "object",
+            properties: { properties: { type: "object", additionalProperties: { type: "string" } } },
+          },
+        },
+        {
+          name: "required-argument",
+          server_name: "schema",
+          input_schema: { type: "object", properties: { required: { type: "boolean" } } },
+        },
         { name: "array-root", server_name: "schema", input_schema: { type: "array", items: {} } },
         { name: "array-properties", server_name: "schema", input_schema: { type: "object", properties: [] } },
         {
@@ -574,7 +587,11 @@ describe("createMcpToolDefinitions", () => {
       apiKey: "sk-test",
     }));
 
-    expect(definitions.map((tool) => tool.name)).toEqual(["mcp_schema_valid"]);
+    expect(definitions.map((tool) => tool.name)).toEqual([
+      "mcp_schema_valid",
+      "mcp_schema_properties_argument",
+      "mcp_schema_required_argument",
+    ]);
   });
 
   it("accepts schemas at the depth and size boundaries", async () => {
@@ -652,17 +669,21 @@ describe("createMcpToolDefinitions", () => {
     });
   });
 
-  it("does not unwrap legitimate args properties", async () => {
+  it.each([
+    {
+      label: "object",
+      argsSchema: { type: "object", properties: { value: { type: "string" } } },
+      value: { value: "kept" },
+    },
+    { label: "array", argsSchema: { type: "array", items: { type: "string" } }, value: ["kept"] },
+  ])("does not unwrap legitimate $label-valued args properties", async ({ argsSchema, value }) => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
         jsonResponse(200, [
           {
             name: "takes-args",
             server_name: "server",
-            input_schema: {
-              type: "object",
-              properties: { args: { type: "object", properties: { value: { type: "string" } } } },
-            },
+            input_schema: { type: "object", properties: { args: argsSchema } },
           },
         ]),
       )
@@ -672,13 +693,13 @@ describe("createMcpToolDefinitions", () => {
       baseUrl: "https://litellm.example.com",
       apiKey: "sk-test",
     }));
-    await definition?.execute("call-1", { args: { value: "kept" } }, undefined, undefined, {} as never);
+    await definition?.execute("call-1", { args: value }, undefined, undefined, {} as never);
 
     expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]).toMatchObject({
       body: JSON.stringify({
         server_id: "server",
         name: "takes-args",
-        arguments: { args: { value: "kept" } },
+        arguments: { args: value },
       }),
     });
   });
@@ -698,6 +719,24 @@ describe("createMcpToolDefinitions", () => {
       body: JSON.stringify({ server_id: "server", name: "unknown-schema", arguments: { value: "unwrapped" } }),
     });
   });
+
+  it.each([{ args: "bad" }, { args: ["bad"] }, {}])(
+    "rejects malformed synthetic args without issuing a tool call",
+    async (params) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(jsonResponse(200, [{ name: "unknown-schema", server_name: "server" }]));
+      const [definition] = await createMcpToolDefinitions(async () => ({
+        baseUrl: "https://litellm.example.com",
+        apiKey: "sk-test",
+      }));
+
+      await expect(definition?.execute("call-1", params, undefined, undefined, {} as never)).rejects.toThrow(
+        "object-valued args property",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("propagates definition-level execution failures", async () => {
     vi.spyOn(globalThis, "fetch")

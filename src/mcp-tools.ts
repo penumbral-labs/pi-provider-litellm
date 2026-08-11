@@ -47,6 +47,10 @@ function emitSafetyDiagnostic(incident: string, message: string): void {
   process.stderr.write(`LiteLLM MCP: ${message}\n`);
 }
 
+export function reportMcpRegistrationFailure(): void {
+  emitSafetyDiagnostic("registration-failure", "An MCP tool could not be registered.");
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
@@ -263,26 +267,47 @@ function schemaDepth(value: unknown, depth = 0): number {
   return values.reduce((maximum, child) => Math.max(maximum, schemaDepth(child, depth + 1)), depth);
 }
 
-function hasValidSchemaShape(value: unknown): boolean {
-  if (Array.isArray(value)) return value.every(hasValidSchemaShape);
-  const record = asRecord(value);
-  if (!record) return true;
-  if (
-    "required" in record &&
-    (!Array.isArray(record.required) || !record.required.every((item) => typeof item === "string"))
-  ) {
-    return false;
-  }
-  if ("properties" in record) {
-    const properties = asRecord(record.properties);
-    if (
-      !properties ||
-      !Object.values(properties).every((property) => asRecord(property) && hasValidSchemaShape(property))
-    ) {
-      return false;
-    }
-  }
-  return Object.values(record).every(hasValidSchemaShape);
+const DIRECT_SCHEMA_KEYWORDS = [
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+] as const;
+const SCHEMA_ARRAY_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems"] as const;
+const SCHEMA_MAP_KEYWORDS = ["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"] as const;
+
+function isValidSchema(value: unknown): boolean {
+  if (typeof value === "boolean") return true;
+  const schema = asRecord(value);
+  return schema !== undefined && hasValidSchemaShape(schema);
+}
+
+function isValidSchemaMap(value: unknown): boolean {
+  const schemas = asRecord(value);
+  return schemas !== undefined && Object.values(schemas).every(isValidSchema);
+}
+
+function isValidSchemaArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isValidSchema);
+}
+
+function isValidRequired(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function hasValidSchemaShape(record: Record<string, unknown>): boolean {
+  if ("required" in record && !isValidRequired(record.required)) return false;
+  if (SCHEMA_MAP_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaMap(record[keyword]))) return false;
+  if (SCHEMA_ARRAY_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaArray(record[keyword]))) return false;
+  if (DIRECT_SCHEMA_KEYWORDS.some((keyword) => keyword in record && !isValidSchema(record[keyword]))) return false;
+  const items = record.items;
+  return !("items" in record) || isValidSchema(items) || isValidSchemaArray(items);
 }
 
 function buildParameters(
@@ -398,7 +423,8 @@ export async function createMcpToolDefinitions(
       async execute(_toolCallId, params: Static<typeof parameters>, toolSignal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
         const rawParams = params as Record<string, unknown>;
-        const args = syntheticArgsEnvelope ? (asRecord(rawParams.args) ?? {}) : rawParams;
+        const args = syntheticArgsEnvelope ? asRecord(rawParams.args) : rawParams;
+        if (!args) throw new Error("Synthetic MCP tool arguments must contain an object-valued args property");
         const text = await executeMcpTool(
           auth.baseUrl,
           auth.apiKey,

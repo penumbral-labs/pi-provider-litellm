@@ -339,7 +339,8 @@ describe("extension startup", () => {
       if (url.endsWith("/mcp-rest/tools/list")) {
         return jsonResponse(200, {
           tools: [
-            { name: "bad", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "bad-one", server_name: "server", inputSchema: { type: "object", properties: {} } },
+            { name: "bad-two", server_name: "server", inputSchema: { type: "object", properties: {} } },
             { name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } },
           ],
         });
@@ -350,7 +351,7 @@ describe("extension startup", () => {
     const pi = createPi();
     const registered: string[] = [];
     pi.registerTool = (tool) => {
-      if (tool.name === "mcp_server_bad") throw new Error("definition rejected");
+      if (tool.name.startsWith("mcp_server_bad")) throw new Error("definition rejected");
       registered.push(tool.name);
       pi.tools.push(tool);
     };
@@ -368,8 +369,12 @@ describe("extension startup", () => {
     });
 
     expect(registered).toContain("mcp_server_good");
-    expect(registered).not.toContain("mcp_server_bad");
-    expect(stderr).toHaveBeenCalledWith("LiteLLM (litellm): An MCP tool could not be registered.\n");
+    expect(registered).not.toContain("mcp_server_bad_one");
+    expect(registered).not.toContain("mcp_server_bad_two");
+    expect(stderr.mock.calls.filter(([message]) => String(message).includes("could not be registered"))).toHaveLength(
+      1,
+    );
+    expect(stderr).toHaveBeenCalledWith("LiteLLM MCP: An MCP tool could not be registered.\n");
     expect(stderr.mock.calls.flat().join("\n")).not.toContain("definition rejected");
   });
 
