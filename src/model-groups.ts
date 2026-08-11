@@ -48,18 +48,47 @@ function normalizedMode(mode: string | null | undefined): "chat" | "responses" |
   return "unsupported";
 }
 
-function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
-  const byId = new Map<string, ModelInfoEntry>();
-  const anonymous: ModelInfoEntry[] = [];
+function stableEntry(entry: ModelInfoEntry): string {
+  const sortValue = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sortValue);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, sortValue(child)]),
+    );
+  };
+  return JSON.stringify(sortValue(entry));
+}
+
+function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
+  deployments: ModelInfoEntry[];
+  deploymentCount: number;
+} {
+  const identified = new Map<string, Map<string, ModelInfoEntry>>();
+  const anonymous = new Map<string, ModelInfoEntry>();
   for (const entry of entries) {
+    const signature = stableEntry(entry);
     const id = entry.model_info?.id?.trim();
     if (id) {
-      if (!byId.has(id)) byId.set(id, entry);
+      const variants = identified.get(id) ?? new Map<string, ModelInfoEntry>();
+      variants.set(signature, entry);
+      identified.set(id, variants);
     } else {
-      anonymous.push(entry);
+      anonymous.set(signature, entry);
     }
   }
-  return [...byId.values(), ...anonymous];
+  // Conflicting rows for one deployment remain in the reduction so their
+  // disagreement fails closed, while exact repeats stay idempotent.
+  const deployments = [
+    ...[...identified.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .flatMap(([, variants]) =>
+        [...variants.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, entry]) => entry),
+      ),
+    ...[...anonymous.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, entry]) => entry),
+  ];
+  return { deployments, deploymentCount: identified.size + anonymous.size };
 }
 
 function normalizeParams(params: readonly string[] | undefined): Set<string> {
@@ -113,10 +142,13 @@ export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  const deployments = uniqueDeployments(entries).filter((entry) => entry.model_name);
+  const unique = uniqueDeployments(entries);
+  const candidates = unique.deployments.filter((entry) => entry.model_name);
+  if (candidates.length === 0) return undefined;
+  const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
+  const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
   const modes = deployments.map((entry) => normalizedMode(entry.model_info?.mode));
-  if (modes.every((mode) => mode === "unsupported")) return undefined;
 
   const catalogs = deployments.map(resolveCatalog);
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
@@ -155,14 +187,13 @@ export function reduceModelGroup(
     const tiers = unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.cost.tiers)));
     if (tiers && tiers !== JSON.stringify(undefined)) cost.tiers = JSON.parse(tiers);
   }
-  const thinkingLevelMap =
-    catalogProvider && semanticFamily
-      ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
-      : undefined;
+  const thinkingLevelMap = catalogProvider
+    ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
+    : undefined;
 
   return {
     id: deployments[0]?.model_name as string,
-    deploymentCount: deployments.length,
+    deploymentCount: unique.deploymentCount,
     api: modes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),

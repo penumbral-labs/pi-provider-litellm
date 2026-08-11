@@ -102,7 +102,7 @@ export function buildCompat(modelId: string): DiscoveredModel["compat"] {
 
 function toKnownProvider(provider: string | undefined): BuiltinProvider | undefined {
   if (!provider) return undefined;
-  const normalized = provider.toLowerCase();
+  const normalized = provider.trim().toLowerCase();
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
@@ -132,8 +132,10 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
 }
 
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
-  // ponytail: legacy cache lacks field provenance; add per-field cache provenance if strict preservation becomes necessary.
+  // Only unqualified legacy fallback aliases lack source metadata. Qualified
+  // route groups may deliberately carry this conservative shape after reduction.
   if (
+    model.id.includes("/") ||
     !model.name.endsWith(" (no metadata)") ||
     model.reasoning ||
     model.thinkingLevelMap !== undefined ||
@@ -198,30 +200,33 @@ function semanticFamily(id: string): SemanticFamily | undefined {
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
+  azure: "azure-openai-responses",
+  azure_ai: "azure-openai-responses",
   bedrock: "amazon-bedrock",
   bedrock_converse: "amazon-bedrock",
   deepseek: "deepseek",
+  fireworks_ai: "fireworks",
+  gemini: "google",
+  moonshot: "moonshotai",
+  nvidia_nim: "nvidia",
   openai: "openai",
+  together_ai: "together",
   vertex_ai: "google-vertex",
 };
 
+function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | undefined {
+  const normalized = adapter?.trim().toLowerCase();
+  return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
+}
+
 function resolveModelInfoCatalog(entry: ModelInfoEntry) {
-  const adapter = entry.model_info?.litellm_provider?.trim().toLowerCase();
-  const adapterProvider = adapter ? ADAPTER_CATALOG_PROVIDERS[adapter] : undefined;
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model].filter(
-    (candidate): candidate is string => Boolean(candidate?.trim()),
-  );
+  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
+    .map((candidate) => candidate?.trim())
+    .filter((candidate): candidate is string => Boolean(candidate));
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     if (resolved) return catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model);
-  }
-
-  const id = entry.model_name;
-  const isProviderQualified = id?.includes("/") && toKnownProvider(id.split("/")[0]) !== undefined;
-  const isBareAnthropicAlias = id != null && catalogLookupIds(id).length > 1;
-  if (id && (isProviderQualified || isBareAnthropicAlias)) {
-    const resolved = resolveCatalogModel(id);
-    if (resolved) return catalogResolution(resolved.provider, semanticFamily(resolved.model.id), resolved.model);
   }
   return undefined;
 }
@@ -434,7 +439,16 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
 }
 
 function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  const reduced = reduceModelGroup(entries, resolveModelInfoCatalog);
+  // A public route is singleton evidence only when there is exactly one
+  // deployment; multi-deployment groups must resolve each backend independently.
+  const singleton = entries.length === 1;
+  const reduced = reduceModelGroup(entries, (entry) => {
+    const resolved = resolveModelInfoCatalog(entry);
+    if (resolved || !singleton) return resolved;
+    const id = entry.model_name;
+    const catalog = id ? resolveCatalogModel(id) : undefined;
+    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
+  });
   if (!reduced) return undefined;
   return {
     id: reduced.id,
@@ -456,7 +470,10 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
-  return mapFromModelInfo({ ...entry, model_name: fallbackId });
+  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
+  // `/health` route text is not deployment evidence for request controls.
+  if (model) delete model.thinkingLevelMap;
+  return model;
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
