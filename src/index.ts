@@ -582,7 +582,6 @@ async function resolveApiKeyAuth(
   return {
     auth: {
       apiKey: creds.apiKey,
-      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
@@ -639,7 +638,6 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           }),
           toAuth: async (credential) => ({
             apiKey: credential.access,
-            baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
             headers: resolveHeaders(definition),
           }),
         }
@@ -714,6 +712,8 @@ function prepareLiteLLMRequestPayload(
   api: Api | undefined,
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
+  if (api === "anthropic-messages") return undefined;
+  const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
     if (payload[key] !== undefined) return;
@@ -721,7 +721,7 @@ function prepareLiteLLMRequestPayload(
     next[key] = value;
   };
 
-  if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && shouldSuppressReasoningContent(modelId)) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
       if (key !== "thinking") update(key, value);
     }
@@ -730,7 +730,7 @@ function prepareLiteLLMRequestPayload(
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
-    api !== "openai-responses" &&
+    openAIApi === "openai-completions" &&
     modelId &&
     isGpt55Model(modelId) &&
     Array.isArray(payload.tools) &&
@@ -760,7 +760,7 @@ function prepareLiteLLMRequestPayload(
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
   // must carry string content, and tool results must be plain text.
-  if (modelId && isMoonshotModel(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && isMoonshotModel(modelId)) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -771,7 +771,11 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
+  if (
+    (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
+    modelId &&
+    GEMINI_MODEL_PATTERN.test(modelId)
+  ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -794,7 +798,7 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (sessionId) {
+  if ((openAIApi === "openai-completions" || openAIApi === "openai-responses") && sessionId) {
     next ??= { ...payload };
     next.litellm_session_id = sessionId;
   }
@@ -900,8 +904,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (!resolved?.auth.apiKey) {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
+    const credentialBaseUrl = credential.env?.[ENV_BASE_URL];
     return {
-      baseUrl: normalizeBaseUrl(resolved.auth.baseUrl ?? requestBaseUrl(definition)),
+      baseUrl: normalizeBaseUrl(credentialBaseUrl ?? requestBaseUrl(definition)),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
@@ -923,7 +928,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
+    const baseUrl = auth.env?.[ENV_BASE_URL] ?? auth.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth.auth.apiKey;
     if (!baseUrl || !apiKey) return undefined;
     const headers = Object.fromEntries(
@@ -1008,6 +1013,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: createProviderAuth(definition),
+      credentialBaseUrl: (credential) =>
+        credential.type === "oauth" && typeof credential.baseUrl === "string"
+          ? credential.baseUrl
+          : credential.type === "api_key"
+            ? (credential.env?.[ENV_BASE_URL] ??
+              definition.baseUrl ??
+              (definition.useDefaultEnv ? process.env[ENV_BASE_URL] : undefined))
+            : undefined,
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);

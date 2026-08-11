@@ -1,6 +1,6 @@
 import { type Credential, createProvider, type Model, type Provider, type ProviderAuth } from "@earendil-works/pi-ai";
-import { openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
-import { enrichCachedModel } from "./discover.js";
+import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
+import { createLiteLLMProtocolApis, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -8,6 +8,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
+  credentialBaseUrl?: (credential: Credential) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
@@ -19,9 +20,40 @@ export function toNativeModels(
   return models.map((model) => ({
     ...model,
     provider,
-    api: model.api ?? "openai-completions",
-    baseUrl,
-  })) as Model<LiteLLMApi>[];
+    baseUrl: resolveModelBaseUrl(baseUrl, model.api),
+  }));
+}
+
+const PLACEHOLDER_HOSTS = new Set(["litellm.example.com"]);
+
+function modelHost(model: Model<LiteLLMApi>): string {
+  return new URL(normalizeBaseUrl(model.baseUrl)).host.toLowerCase();
+}
+
+function projectModelsForCredential(
+  provider: string,
+  models: readonly Model<LiteLLMApi>[],
+  credentialBaseUrl: string,
+): Model<LiteLLMApi>[] {
+  const activeRoot = normalizeBaseUrl(credentialBaseUrl);
+  const activeHost = new URL(activeRoot).host.toLowerCase();
+  if (PLACEHOLDER_HOSTS.has(activeHost)) {
+    throw new Error(
+      "Active credentials use a placeholder LiteLLM model host; a network refresh with a real host is required",
+    );
+  }
+  for (const model of models) {
+    const storedHost = modelHost(model);
+    if (PLACEHOLDER_HOSTS.has(storedHost)) {
+      throw new Error("Cached model uses a placeholder LiteLLM model host; a network refresh is required");
+    }
+    if (storedHost !== activeHost) {
+      throw new Error(
+        `Cached model has stale LiteLLM model host ${storedHost}; active credentials use ${activeHost}. A network refresh is required`,
+      );
+    }
+  }
+  return toNativeModels(provider, activeRoot, models);
 }
 
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
@@ -36,10 +68,11 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       const result = await options.discover(context.credential, context.signal);
       return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models);
     },
-    api: {
-      "openai-completions": openAICompletionsApi(),
-      "openai-responses": openAIResponsesApi(),
+    filterModels(models, credential) {
+      const baseUrl = credential && options.credentialBaseUrl?.(credential);
+      return baseUrl ? projectModelsForCredential(options.id, models, baseUrl) : models;
     },
+    api: createLiteLLMProtocolApis(),
   });
   const refreshModels = provider.refreshModels;
   if (!refreshModels) return provider;

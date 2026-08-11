@@ -89,7 +89,12 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+export function buildCompat(
+  modelId: string,
+  api: DiscoveredModel["api"] = "openai-completions",
+): DiscoveredModel["compat"] {
+  if (api === "anthropic-messages") return undefined;
+  if (api === "openai-responses") return {};
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -428,8 +433,8 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
+    api: responsesMode ? "openai-responses" : "openai-completions",
+    compat: buildCompat(id, responsesMode ? "openai-responses" : "openai-completions"),
   };
 }
 
@@ -453,6 +458,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    api: "openai-completions",
     compat: buildCompat(id),
   };
 }
@@ -474,6 +480,7 @@ function mapFromModelsList(
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    api: "openai-completions",
     compat: buildCompat(id),
   };
 }

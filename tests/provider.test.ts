@@ -6,13 +6,14 @@ import type {
   ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveryResult } from "../src/types.js";
+import type { DiscoveredModel, DiscoveryResult } from "../src/types.js";
 
-const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
+const apiSpies = vi.hoisted(() => ({ anthropic: vi.fn(), completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@earendil-works/pi-ai/compat")>()),
+  anthropicMessagesApi: () => ({ stream: apiSpies.anthropic, streamSimple: apiSpies.anthropic }),
   openAICompletionsApi: () => ({ stream: apiSpies.completions, streamSimple: apiSpies.completions }),
   openAIResponsesApi: () => ({ stream: apiSpies.responses, streamSimple: apiSpies.responses }),
 }));
@@ -33,11 +34,24 @@ const discovered = (id: string): DiscoveryResult => ({
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,
       maxTokens: 4096,
+      api: "openai-completions",
     },
   ],
 });
 
-function native(id: string): Model<"openai-completions" | "openai-responses"> {
+{
+  const invalidMessagesModel: DiscoveredModel = {
+    ...discovered("messages").models[0],
+    api: "anthropic-messages",
+    compat: {
+      // @ts-expect-error OpenAI compatibility fields are invalid for Messages models.
+      supportsStore: false,
+    },
+  };
+  expectTypeOf(invalidMessagesModel).toMatchTypeOf<DiscoveredModel>();
+}
+
+function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
 
@@ -98,18 +112,26 @@ describe("toNativeModels", () => {
     ]);
   });
 
-  it("preserves a discovered Responses API and defaults missing APIs to Completions", () => {
-    const [responses, completions] = toNativeModels("litellm", "https://proxy.example/v1", [
-      { ...discovered("responses").models[0], api: "openai-responses" },
-      discovered("completions").models[0],
+  it("derives each protocol base from one normalized proxy root", () => {
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "https://proxy.example/v1/", [
+      baseModel,
+      { ...baseModel, id: "responses", api: "openai-responses", compat: {} },
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
     ]);
 
-    expect(responses.api).toBe("openai-responses");
-    expect(completions.api).toBe("openai-completions");
+    expect(models.map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
+      { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
+      { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
+      { api: "anthropic-messages", baseUrl: "https://proxy.example" },
+    ]);
   });
 });
 
 describe("createLiteLLMProvider", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
   it("delegates native store restoration directly to createProvider", async () => {
     const modelsStore = store([native("stored")]);
     const value = controller();
@@ -231,6 +253,42 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
+  it("reprojects stored models to the matching active credential host", () => {
+    const value = controller({ credentialBaseUrl: () => "https://proxy.example/v1" });
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "https://proxy.example", [
+      baseModel,
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
+    ]);
+
+    expect(value.filterModels?.(models, credential).map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
+      { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
+      { api: "anthropic-messages", baseUrl: "https://proxy.example" },
+    ]);
+  });
+
+  it("rejects stored models from a stale credential host", () => {
+    const value = controller({ credentialBaseUrl: () => "https://active.example" });
+
+    expect(() => value.filterModels?.([native("stored")], credential)).toThrow(
+      /stale LiteLLM model host.*network refresh/i,
+    );
+  });
+
+  it("rejects placeholder hosts as cached request targets", () => {
+    const storedPlaceholder = controller({ credentialBaseUrl: () => "https://active.example" });
+    const placeholder = toNativeModels("litellm", "https://litellm.example.com", discovered("stored").models);
+
+    expect(() => storedPlaceholder.filterModels?.(placeholder, credential)).toThrow(
+      /placeholder LiteLLM model host.*network refresh/i,
+    );
+
+    const activePlaceholder = controller({ credentialBaseUrl: () => "https://litellm.example.com" });
+    expect(() => activePlaceholder.filterModels?.([native("stored")], credential)).toThrow(
+      /credentials use a placeholder LiteLLM model host.*network refresh/i,
+    );
+  });
+
   it("retains previous models when discovery rejects", async () => {
     const modelsStore = store([native("old")]);
     const discover = vi.fn(async () => {
@@ -279,7 +337,7 @@ describe("createLiteLLMProvider", () => {
   it("routes Responses models through the Responses API", async () => {
     apiSpies.responses.mockReturnValueOnce({});
     const responseModel = toNativeModels("litellm", "https://proxy.example/v1", [
-      { ...discovered("responses").models[0], api: "openai-responses" },
+      { ...discovered("responses").models[0], api: "openai-responses", compat: {} },
     ])[0];
     const value = controller();
 
@@ -287,5 +345,21 @@ describe("createLiteLLMProvider", () => {
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(apiSpies.anthropic).not.toHaveBeenCalled();
+  });
+
+  it("routes Messages models through the Anthropic API", () => {
+    apiSpies.anthropic.mockReturnValueOnce({});
+    const messagesModel = toNativeModels("litellm", "https://proxy.example/v1/", [
+      { ...discovered("messages").models[0], api: "anthropic-messages", compat: {} },
+    ])[0];
+    const value = controller();
+
+    value.stream(messagesModel, { messages: [] });
+
+    expect(messagesModel.baseUrl).toBe("https://proxy.example");
+    expect(apiSpies.anthropic).toHaveBeenCalledOnce();
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(apiSpies.responses).not.toHaveBeenCalled();
   });
 });

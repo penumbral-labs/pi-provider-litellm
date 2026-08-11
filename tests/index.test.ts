@@ -218,8 +218,9 @@ describe("extension startup", () => {
     expect(pi.providers.map((provider) => provider.id)).toEqual(["litellm"]);
   });
 
-  it("restores Pi-managed models offline without discovery", async () => {
+  it("fails closed on stale-host Pi-managed models offline", async () => {
     process.env.LITELLM_OFFLINE = "1";
+    process.env.LITELLM_BASE_URL = "https://active.example.com";
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
@@ -229,7 +230,7 @@ describe("extension startup", () => {
       name: "Stored model",
       provider: "litellm",
       api: "openai-completions",
-      baseUrl: "https://litellm.example.com/v1",
+      baseUrl: "https://stored.example.com/v1",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -243,9 +244,86 @@ describe("extension startup", () => {
       store: createModelsStore([stored]),
     });
 
-    expect(pi.providers[0]?.getModels()).toEqual([stored]);
+    expect(() =>
+      pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://active.example.com" },
+      }),
+    ).toThrow(/stale LiteLLM model host.*network refresh/i);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(pi.providers).toHaveLength(1);
+  });
+
+  it("rejects placeholder credential hosts before cached models are available", async () => {
+    process.env.LITELLM_OFFLINE = "1";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const stored = {
+      id: "stored-model",
+      name: "Stored model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://litellm.example.com/v1",
+      reasoning: false,
+      input: ["text"] as const,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4096,
+    };
+
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: false,
+      credential: { type: "api_key", key: "sk-test" },
+      store: createModelsStore([stored]),
+    });
+
+    expect(() =>
+      pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      }),
+    ).toThrow(/credentials use a placeholder LiteLLM model host.*network refresh/i);
+  });
+
+  it("restores same-host Pi-managed models offline with protocol projection", async () => {
+    process.env.LITELLM_OFFLINE = "1";
+    process.env.LITELLM_BASE_URL = "https://proxy.test/v1";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const stored = {
+      id: "stored-model",
+      name: "Stored model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://proxy.test/v1",
+      reasoning: false,
+      input: ["text"] as const,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4096,
+    };
+
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: false,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://proxy.test/v1" },
+      },
+      store: createModelsStore([stored]),
+    });
+
+    expect(
+      pi.providers[0]?.filterModels?.(pi.providers[0]!.getModels(), {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://proxy.test/v1" },
+      }),
+    ).toEqual([stored]);
   });
 
   it("ignores legacy cache files without deleting them", async () => {
@@ -441,6 +519,32 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.baseUrl).toBe("https://litellm.example.com/v1");
   });
 
+  it("leaves synthetic Messages payloads unchanged by Chat and Responses compatibility hooks", async () => {
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "test-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const payload = {
+      model: "kimi-k2.6",
+      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "call-1" }] }],
+      reasoning_effort: "HIGH",
+    };
+
+    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
+      { payload },
+      { model: { provider: "litellm", id: "kimi-k2.6", api: "anthropic-messages" } },
+    );
+
+    expect(result).toBeUndefined();
+    expect(payload).toEqual({
+      model: "kimi-k2.6",
+      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "call-1" }] }],
+      reasoning_effort: "HIGH",
+    });
+  });
+
   it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(
@@ -468,7 +572,7 @@ describe("extension startup", () => {
 
     const result = await pi.handlers.get("before_provider_request")?.[0]?.(
       { payload: { model: "kimi-k2.6" } },
-      { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
+      { model: { provider: "litellm-anthropic", id: "kimi-k2.6", api: "openai-completions" } },
     );
 
     expect(result).toMatchObject({
@@ -549,7 +653,6 @@ describe("extension startup", () => {
     ).resolves.toMatchObject({
       auth: {
         apiKey: "context-key",
-        baseUrl: "https://context.example.com/v1",
         headers: { "x-tenant": "context" },
       },
       source: "LITELLM_API_KEY",
@@ -627,7 +730,7 @@ describe("extension startup", () => {
         LITELLM_API_KEY: "context-default-key",
       }),
     ).resolves.toMatchObject({
-      auth: { apiKey: "context-configured-key", baseUrl: "https://context.example.com/v1" },
+      auth: { apiKey: "context-configured-key" },
       source: "$CUSTOM_LITELLM_KEY",
     });
     expect(await readHelperCount(agentDir)).toBe(0);
@@ -863,7 +966,6 @@ describe("extension startup", () => {
     });
     await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
       apiKey: "sk-virtual-abc",
-      baseUrl: "https://litellm.example.com/v1",
     });
     expect(seenRequests).toContainEqual(
       expect.objectContaining({
