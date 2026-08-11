@@ -1080,27 +1080,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   for (const definition of definitions) {
-    // An OAuth credential carries its host on the credential itself, so the request
-    // path — which never sees the credential — needs the root from the most recent
-    // resolution. Pi resolves auth immediately before every request, so remembering
-    // which credential kind produced the root keeps it from outliving that credential:
-    // an API-key resolution invalidates it, and key B can never reach OAuth host A.
-    let rememberedRoot: { credentialType: "oauth"; root: string } | undefined;
+    // Request paths get no Credential, so the host an OAuth login resolved has to be
+    // remembered here. It is bound to that login's access token and only reused when
+    // the request presents the same token: an unscoped root would outlive /logout and
+    // pin later api-key requests, potentially sending a new key to the old host.
+    // Matching on identity rather than invalidating on other resolutions also keeps
+    // interleaved OAuth and api-key resolutions from stealing each other's root.
+    let oauthRuntimeRoot: { apiKey: string; root: string } | undefined;
     const providerAuth = createProviderAuth(definition);
-    const oauthToAuth = providerAuth.oauth?.toAuth;
-    if (oauthToAuth) {
-      providerAuth.oauth!.toAuth = async (credential) => {
+    const oauth = providerAuth.oauth;
+    if (oauth) {
+      const oauthToAuth = oauth.toAuth;
+      oauth.toAuth = async (credential) => {
         const auth = await oauthToAuth(credential);
         const root = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
-        rememberedRoot = root ? { credentialType: "oauth", root } : undefined;
+        oauthRuntimeRoot = root && auth.apiKey ? { apiKey: auth.apiKey, root } : undefined;
         return auth;
-      };
-    }
-    const apiKeyResolve = providerAuth.apiKey?.resolve;
-    if (apiKeyResolve) {
-      providerAuth.apiKey!.resolve = async (context) => {
-        rememberedRoot = undefined;
-        return apiKeyResolve(context);
       };
     }
     const provider = createLiteLLMProvider({
@@ -1108,12 +1103,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: providerAuth,
-      resolveCredentialRoot: (credential, requestBaseUrl) =>
-        // An explicit credential is always authoritative over anything remembered.
+      resolveCredentialRoot: ({ credential, requestBaseUrl, apiKey }) =>
         resolveSanitizedCredentialRoot(
           definition,
           credential,
-          (credential ? undefined : rememberedRoot?.root) ?? requestBaseUrl,
+          (apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined) ?? requestBaseUrl,
         ),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
