@@ -16,8 +16,11 @@ const MAX_SCHEMA_DEPTH = 16;
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_TOOL_NAME_LENGTH = 64;
 const TOOL_NAME_HASH_LENGTH = 10;
+const MAX_LABEL_BYTES = 256;
+const MAX_DETAIL_BYTES = 256;
 const TRUNCATION_MARKER = "\n[truncated by pi-provider-litellm]";
 const DESCRIPTION_TRUNCATION_MARKER = "… [truncated]";
+const SHORT_TRUNCATION_MARKER = "…";
 
 interface RawLiteLLMMcpTool {
   name?: unknown;
@@ -416,9 +419,14 @@ export async function createMcpToolDefinitions(
       DESCRIPTION_TRUNCATION_MARKER,
     );
 
+    // `label` and the `details` fields below are proxy-supplied, so they are bounded like every other
+    // untrusted string that reaches Pi's UI or the model.
+    const label = truncateUtf8(`${mcpTool.server_name}: ${mcpTool.name}`, MAX_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
+    const detail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
+
     return defineTool({
       name,
-      label: `${mcpTool.server_name}: ${mcpTool.name}`,
+      label,
       description,
       promptSnippet,
       executionMode: "parallel",
@@ -439,7 +447,11 @@ export async function createMcpToolDefinitions(
         );
         return {
           content: [{ type: "text", text }],
-          details: { server: mcpTool.server_name, serverId: mcpTool.server_id, tool: mcpTool.name },
+          details: {
+            server: detail(mcpTool.server_name),
+            serverId: mcpTool.server_id === undefined ? undefined : detail(mcpTool.server_id),
+            tool: detail(mcpTool.name),
+          },
         };
       },
     });

@@ -853,3 +853,47 @@ describe("body cap diagnostics under a failing cancel", () => {
     );
   });
 });
+
+describe("bounded untrusted display strings", () => {
+  it("truncates oversized label and details values with a marker", async () => {
+    const hugeServer = "s".repeat(4096);
+    const hugeTool = "t".repeat(4096);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [{ name: hugeTool, server_name: hugeServer, server_id: "i".repeat(4096), input_schema: {} }]),
+    );
+
+    const [definition] = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definition).toBeDefined();
+    expect(Buffer.byteLength(definition?.label ?? "", "utf8")).toBeLessThanOrEqual(256);
+    expect(definition?.label).toMatch(/…$/);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "ok" }));
+    const result = await definition?.execute?.(
+      "call-1",
+      { args: {} } as never,
+      undefined as never,
+      () => {},
+      {} as never,
+    );
+    const details = (result as { details: Record<string, string> }).details;
+    for (const value of Object.values(details)) {
+      expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(256);
+      expect(value).toMatch(/…$/);
+    }
+  });
+
+  it("leaves label and details untouched when they are already short", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [{ name: "search", server_name: "brave", server_id: "brave-id", input_schema: {} }]),
+    );
+    const [definition] = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+    expect(definition?.label).toBe("brave: search");
+  });
+});
