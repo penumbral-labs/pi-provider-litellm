@@ -102,6 +102,7 @@ describe("reduceModelGroup", () => {
       maxTokens: 16_000,
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
+      semanticFamily: "conflicting",
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },
     };
@@ -332,7 +333,9 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result).not.toHaveProperty("catalogProvider");
-    expect(result).not.toHaveProperty("semanticFamily");
+    // Reported as contradictory rather than absent, so callers cannot treat the
+    // route name as a remaining source of family evidence.
+    expect(result?.semanticFamily).toBe("conflicting");
     expect(result?.thinkingLevelMap).toBeUndefined();
   });
 
@@ -374,7 +377,9 @@ describe("reduceModelGroup", () => {
       },
     },
     {
-      name: "Kimi K2.7 Code without a required control",
+      // K2.7 Code cannot be switched off, so `off` stays denied while `high`
+      // rides the accepted `thinking` param.
+      name: "Kimi K2.7 Code with accepted thinking",
       semanticModel: "kimi-k2.7-code" as const,
       params: ["thinking"],
       expected: {
@@ -388,7 +393,47 @@ describe("reduceModelGroup", () => {
           xhigh: null,
           max: null,
         },
+        compat: {
+          supportsReasoningEffort: false,
+          requiresReasoningContentOnAssistantMessages: true,
+          thinkingFormat: "deepseek",
+        },
+      },
+    },
+    {
+      name: "Kimi K2.7 Code without accepted controls",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
         compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      },
+    },
+    {
+      name: "Kimi K2.6 without accepted controls",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
+        compat: { supportsReasoningEffort: false },
       },
     },
     {
@@ -490,7 +535,7 @@ describe("reduceModelGroup", () => {
 
     expect(result?.reasoningPolicy).toEqual({
       reasoning: true,
-      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null },
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
       compat: {
         requiresReasoningContentOnAssistantMessages: true,
         supportsReasoningEffort: false,
@@ -514,7 +559,7 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result?.reasoning).toBe(false);
-    expect(result?.reasoningPolicy).toEqual({ reasoning: false });
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false, compat: { supportsReasoningEffort: false } });
   });
 
   it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {

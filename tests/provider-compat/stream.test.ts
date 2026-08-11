@@ -166,7 +166,7 @@ describe("native provider stream compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
   });
 
-  it("omits unsupported controls for Kimi K2.7 Code", async () => {
+  it("transmits the Kimi K2.7 Code level it advertises and never invents off", async () => {
     const { models, model, requests, respond } = await createCompatibilityHarness([
       {
         model_name: "code-route",
@@ -174,15 +174,48 @@ describe("native provider stream compatibility", () => {
         model_info: { id: "deployment", mode: "chat", supported_openai_params: ["thinking"] },
       },
     ]);
+    respond(...successfulResponse("ok"), ...successfulResponse("ok"));
+
+    // `high` is the only offered level and it must reach the wire.
+    expect(getSupportedThinkingLevels(model)).toEqual(["high"]);
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({ thinking: { type: "enabled" } });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+    expect(requests[0]).not.toHaveProperty("include_reasoning");
+    expect(requests[0]).not.toHaveProperty("reasoning_content");
+    expect(requests[0]).not.toHaveProperty("merge_reasoning_content_in_choices");
+
+    // K2.7 Code cannot stop reasoning, so no disable request is fabricated.
+    await models.streamSimple(model, { messages: [user("Think")] }).result();
+
+    expect(requests[1]).not.toHaveProperty("thinking");
+    expect(requests[1]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it.each([
+    { name: "Kimi K2.7 Code", backend: "moonshot/kimi-k2.7-code" },
+    { name: "Kimi K2.6", backend: "moonshot/kimi-k2.6" },
+  ])("advertises no $name level it cannot transmit without control evidence", async ({ backend }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "evidence-absent-kimi",
+        litellm_params: { model: backend },
+        model_info: { id: "deployment", mode: "chat", supports_reasoning: true },
+      },
+    ]);
     respond(...successfulResponse("ok"));
+
+    // An absent map would let pi-ai offer every standard level, none of which
+    // this deployment can carry, so each level is denied explicitly instead.
+    expect(model.reasoning).toBe(true);
+    expect(getSupportedThinkingLevels(model)).toEqual([]);
 
     await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
 
     expect(requests[0]).not.toHaveProperty("thinking");
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
-    expect(requests[0]).not.toHaveProperty("include_reasoning");
-    expect(requests[0]).not.toHaveProperty("reasoning_content");
-    expect(requests[0]).not.toHaveProperty("merge_reasoning_content_in_choices");
   });
 
   it.each([

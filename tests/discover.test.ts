@@ -549,21 +549,54 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "moonshotai", semanticFamily: "kimi", semanticModel: "kimi-k3" });
   });
 
-  it("keeps routing model semantic evidence ahead of a contradictory base_model", () => {
+  it("reports a contradictory routing model and base_model as conflicting evidence", () => {
+    const conflicting = resolveModelInfoCatalog({
+      model_name: "public-route",
+      litellm_params: { model: "openai/gpt-proxy" },
+      model_info: { litellm_provider: "openai", base_model: "kimi-k3" },
+    });
+
+    // Neither candidate is authoritative for a deployment that names two
+    // different backend families, so nothing is resolved from either one.
+    expect(conflicting).toEqual({ semanticFamily: "conflicting" });
+  });
+
+  it("pairs catalog metadata with the family of the candidate that resolved it", () => {
+    // The routing model resolves nothing, so `base_model` supplies both the
+    // catalog metadata and the family; taking the family from the other
+    // candidate would silently drop Anthropic cache-control support.
     expect(
       resolveModelInfoCatalog({
-        model_name: "public-route",
-        litellm_params: { model: "openai/gpt-proxy" },
-        model_info: { litellm_provider: "openai", base_model: "kimi-k3" },
+        model_name: "gateway-route",
+        litellm_params: { model: "gateway/claude-router-prod" },
+        model_info: { litellm_provider: "anthropic", base_model: "claude-sonnet-4-6" },
       }),
-    ).toMatchObject({ semanticFamily: "openai" });
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "public-route",
-        litellm_params: { model: "openai/gpt-proxy" },
-        model_info: { litellm_provider: "openai", base_model: "kimi-k3" },
+    ).toMatchObject({ provider: "anthropic", semanticFamily: "claude" });
+  });
+
+  it("refuses route-name family inference when deployments disagree about the backend", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-looking-route",
+            litellm_params: { model: "moonshot/kimi-k3" },
+            model_info: { id: "kimi", mode: "chat" },
+          },
+          {
+            model_name: "kimi-looking-route",
+            litellm_params: { model: "openai/gpt-4o" },
+            model_info: { id: "openai", mode: "chat" },
+          },
+        ],
       }),
-    ).not.toHaveProperty("semanticModel");
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false });
+    expect(result.models[0]).not.toHaveProperty("litellmPolicy");
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
   it("uses base_model semantic evidence when the routing model is absent", () => {

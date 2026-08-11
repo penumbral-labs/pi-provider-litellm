@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   effectiveDeploymentCount,
+  type FamilyEvidence,
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
@@ -90,9 +91,12 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
 export function buildCompat(
   modelId: string,
   api: DiscoveredModel["api"] = "openai-completions",
-  semantic?: SemanticFamily,
+  semantic?: FamilyEvidence,
 ): DiscoveredModel["compat"] {
   if (api === "openai-responses") return {};
+  // Contradictory deployment evidence is not an invitation to guess from the
+  // route name; such a group only gets vendor-neutral compatibility.
+  if (semantic === "conflicting") return { supportsStore: false };
   if (semantic === "kimi" || (semantic === undefined && isMoonshotModel(modelId))) {
     return {
       supportsStore: false,
@@ -243,20 +247,26 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const baseModel = entry.model_info?.base_model?.trim() || undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
-  const conflictingFamilies = routingFamily !== undefined && baseFamily !== undefined && routingFamily !== baseFamily;
-  const family = routingFamily ?? baseFamily;
+  // A routing model and a declared base model that name different families
+  // describe different backends. Neither one is trustworthy metadata authority
+  // for this deployment, so report the contradiction and resolve nothing.
+  if (routingFamily !== undefined && baseFamily !== undefined && routingFamily !== baseFamily) {
+    return { semanticFamily: "conflicting" };
+  }
   const model =
-    (routingModel ? semanticModel(routingModel) : undefined) ??
-    (!conflictingFamilies && baseModel ? semanticModel(baseModel) : undefined);
+    (routingModel ? semanticModel(routingModel) : undefined) ?? (baseModel ? semanticModel(baseModel) : undefined);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
+    // Catalog metadata and family must describe the same candidate; pairing one
+    // candidate's family with another's cost silently drops vendor compat.
     if (resolved)
       return {
-        ...catalogResolution(resolved.provider, family, resolved.model),
+        ...catalogResolution(resolved.provider, semanticFamily(candidate), resolved.model),
         ...(model ? { semanticModel: model } : {}),
       };
   }
+  const family = routingFamily ?? baseFamily;
   return family ? { semanticFamily: family, ...(model ? { semanticModel: model } : {}) } : undefined;
 }
 

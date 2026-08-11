@@ -7,6 +7,11 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" | "kimi-k3";
 
+// Deployment rows can disagree about which backend family serves a route. That
+// disagreement is evidence in its own right and must not decay into "no
+// evidence", which would re-enable route-name inference.
+export type FamilyEvidence = SemanticFamily | "conflicting";
+
 type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
 
 export interface ReasoningPolicy {
@@ -20,7 +25,7 @@ export interface ReasoningPolicy {
 
 export interface CatalogResolution {
   provider?: string;
-  semanticFamily?: SemanticFamily;
+  semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
@@ -44,7 +49,7 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
-  semanticFamily?: SemanticFamily;
+  semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
@@ -136,6 +141,19 @@ const ONLY_HIGH = {
   max: null,
 } as const;
 
+// pi-ai reads an ABSENT thinkingLevelMap as "every standard level supported"
+// (getSupportedThinkingLevels), so a policy that cannot transmit any level has
+// to deny each one explicitly instead of omitting the map.
+const NO_TRANSMISSIBLE_LEVELS = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: null,
+  xhigh: null,
+  max: null,
+} as const;
+
 function buildReasoningPolicy(
   semanticModel: SemanticModel | undefined,
   acceptedOpenAIParams: readonly string[],
@@ -147,18 +165,38 @@ function buildReasoningPolicy(
   const hasAcceptedControl = acceptsThinking || acceptsEffort;
   const reasoning =
     !explicitlyUnsupported && (reducedReasoning || hasAcceptedControl || semanticModel === "kimi-k2.7-code");
-  if (semanticModel === "kimi-k2.5-k2.6" && acceptsThinking && reasoning) {
+  if (semanticModel === "kimi-k2.5-k2.6") {
+    // Binary thinking rides the `thinking` param, so without that accepted
+    // param there is no wire mechanism and every level must be denied.
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
     return {
       reasoning,
-      thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
-      compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      ...(reasoning ? { thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS } : {}),
+      compat: { supportsReasoningEffort: false },
     };
   }
   if (semanticModel === "kimi-k2.7-code") {
+    // K2.7 Code always reasons and cannot be switched off, so `off` stays
+    // denied rather than inventing a disable control. The `high` level only
+    // exists when a deployment accepts `thinking` to carry it.
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: ONLY_HIGH,
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
     return {
       reasoning,
-      ...(reasoning ? { thinkingLevelMap: ONLY_HIGH } : {}),
-      compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      ...(reasoning ? { thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS } : {}),
+      compat: { ...replay, supportsReasoningEffort: false },
     };
   }
   if (semanticModel === "kimi-k3") {
@@ -180,7 +218,7 @@ function buildReasoningPolicy(
     }
     return {
       reasoning,
-      thinkingLevelMap: reasoning ? { off: null, minimal: null, low: null, medium: null, high: null } : undefined,
+      ...(reasoning ? { thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS } : {}),
       compat: { ...replay, supportsReasoningEffort: false },
     };
   }
@@ -225,11 +263,13 @@ function buildReasoningPolicy(
     }
     return {
       reasoning,
-      thinkingLevelMap: reasoning ? { off: null, minimal: null, low: null, medium: null, high: null } : undefined,
+      ...(reasoning ? { thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS } : {}),
       compat: { ...replay, supportsReasoningEffort: false },
     };
   }
-  return { reasoning: semanticModel ? reasoning : false };
+  // No identified semantic model means no known reasoning contract; the caller
+  // ignores this policy entirely and keeps the reduced/catalog metadata.
+  return { reasoning: false };
 }
 
 function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefined {
@@ -263,6 +303,16 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
 }
 
+// Deployments that name different backend families, or a single deployment whose
+// routing and base models disagree, leave the group with contradictory rather
+// than missing evidence. Reporting that distinctly stops the caller from
+// treating the route name as a fallback signal.
+function reduceFamilyEvidence(values: readonly (FamilyEvidence | undefined)[]): FamilyEvidence | undefined {
+  const declared = new Set(values.filter((value): value is FamilyEvidence => value !== undefined));
+  if (declared.has("conflicting") || declared.size > 1) return "conflicting";
+  return unanimous(values);
+}
+
 export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
@@ -275,7 +325,7 @@ export function reduceModelGroup(
   if (deployments.length === 0) return undefined;
   const catalogs = deployments.map(resolveCatalog);
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
-  const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
+  const semanticFamily = reduceFamilyEvidence(catalogs.map((catalog) => catalog?.semanticFamily));
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const reasoning = deployments.every(
@@ -338,7 +388,7 @@ export function reduceModelGroup(
 
 export function catalogResolution(
   provider: string,
-  semanticFamily: SemanticFamily | undefined,
+  semanticFamily: FamilyEvidence | undefined,
   model: Model<Api>,
 ): CatalogResolution {
   return {
