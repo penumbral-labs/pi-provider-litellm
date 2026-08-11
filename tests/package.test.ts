@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -85,6 +85,10 @@ describe("pi package compatibility", () => {
     }
   }, 30_000);
 
+  // Installs the packed tarball by materialising it under `node_modules` and linking
+  // the repository's already-installed Pi peers. This keeps the real pack -> install ->
+  // load path under test while staying offline and deterministic; `npm install` here
+  // would resolve the peers' transitive dependencies from the registry on every run.
   it("packs, installs, and loads the source package without TypeScript stripping in node_modules", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
     try {
@@ -101,20 +105,11 @@ describe("pi package compatibility", () => {
       const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as PackageManifest;
       const entrypoint = resolve(packageRoot, manifest.pi.extensions[0]);
       const result = await loadExtension(entrypoint, packageRoot);
-      await execFileAsync("npm", ["init", "--yes"], { cwd: fixture });
-      await execFileAsync(
-        "npm",
-        [
-          "install",
-          "--ignore-scripts",
-          "--no-save",
-          "--install-links",
-          tarballPath,
-          resolve(repoRoot, "node_modules/@earendil-works/pi-ai"),
-          resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent"),
-        ],
-        { cwd: fixture, env: { ...process.env, npm_config_cache: join(fixture, ".npm-cache") } },
-      );
+
+      const nodeModules = join(fixture, "node_modules");
+      await mkdir(nodeModules, { recursive: true });
+      await cp(packageRoot, join(nodeModules, "pi-provider-litellm"), { recursive: true });
+      await symlink(resolve(repoRoot, "node_modules/@earendil-works"), join(nodeModules, "@earendil-works"), "dir");
       const installedEntrypoint = resolve(fixture, "node_modules/pi-provider-litellm", manifest.pi.extensions[0]);
       const installedResult = await loadExtension(installedEntrypoint, fixture);
 
