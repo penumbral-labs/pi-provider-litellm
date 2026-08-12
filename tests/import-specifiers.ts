@@ -21,6 +21,47 @@ const FORBIDDEN_RESOLVERS = [
   /\bimport\.meta\.resolve\s*\(/,
 ];
 
+// Replaces the contents of comments and string/template literals with spaces, preserving
+// length, so a regex scan sees only executable text.
+function blankNonCode(source: string): string {
+  let out = "";
+  let index = 0;
+
+  while (index < source.length) {
+    const two = source.slice(index, index + 2);
+
+    if (two === "//" || two === "/*") {
+      const end = two === "//" ? source.indexOf("\n", index) : source.indexOf("*/", index + 2);
+      const stop = end === -1 ? source.length : two === "//" ? end : end + 2;
+      out += source.slice(index, stop).replace(/[^\n]/g, " ");
+      index = stop;
+      continue;
+    }
+
+    const quote = source[index];
+    if (quote === '"' || quote === "'" || quote === "`") {
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === "\\") {
+          cursor += 2;
+          continue;
+        }
+        if (source[cursor] === quote) break;
+        cursor += 1;
+      }
+      const stop = Math.min(cursor + 1, source.length);
+      out += source.slice(index, stop).replace(/[^\n]/g, " ");
+      index = stop;
+      continue;
+    }
+
+    out += source[index];
+    index += 1;
+  }
+
+  return out;
+}
+
 let ready: Promise<void> | undefined;
 
 // es-module-lexer compiles a WASM module on first use.
@@ -33,11 +74,12 @@ export function importSpecifiers(source: string, filename = "source.ts"): string
   const [imports] = parse(source, filename);
   const specifiers = imports.map((entry) => entry.n ?? UNVERIFIABLE_SPECIFIER);
 
-  // Strip comments before the resolver scan so a mention in prose is not a violation. String
-  // contents are left alone: a resolver call cannot hide inside a string and still execute.
-  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  // Blank comment and literal bodies before the resolver scan. Only executable text counts:
+  // a doc comment or a message string mentioning `require()` is not a resolver call, and
+  // flagging one would fail the package contract for prose.
+  const executable = blankNonCode(source);
   for (const pattern of FORBIDDEN_RESOLVERS) {
-    if (pattern.test(withoutComments)) specifiers.push(FORBIDDEN_RESOLVER);
+    if (pattern.test(executable)) specifiers.push(FORBIDDEN_RESOLVER);
   }
 
   return specifiers;

@@ -61,8 +61,18 @@ describe("importSpecifiers", () => {
     expect(importSpecifiers(source)).toContain(FORBIDDEN_RESOLVER);
   });
 
-  it("does not treat a comment mentioning require as a forbidden resolver", () => {
-    expect(importSpecifiers("// we never call require() here\n")).toEqual([]);
+  // Only executable text counts. Flagging prose would fail the package contract for a doc
+  // comment or an error message, which is worse than the bypass it would be guarding.
+  it.for([
+    ["a line comment", "// we never call require() here\n"],
+    ["a block comment", "/* eval() is forbidden in this package */"],
+    ["a double-quoted message", 'const hint = "do not call require() directly";'],
+    ["a single-quoted message", "const hint = 'createRequire() is not allowed';"],
+    ["a template message", "const hint = `new Function() is rejected`;"],
+    ["an error string", 'throw new Error("import.meta.resolve() is unsupported here");'],
+    ["an identifier that merely contains the word", "const requiredFields = [1];\nconst evaluate = () => 1;"],
+  ] as const)("does not read %s as a forbidden resolver", ([, source]) => {
+    expect(importSpecifiers(source)).toEqual([]);
   });
 
   it("finds a lazy import inside a function that is never called", () => {
