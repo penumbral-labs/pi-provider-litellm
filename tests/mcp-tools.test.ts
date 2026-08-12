@@ -1673,3 +1673,94 @@ describe("bounded diagnostic labels", () => {
     expect(line).toContain("…");
   });
 });
+
+describe("regex keywords are refused regardless of value type", () => {
+  it("degrades a non-string pattern so its text never reaches the registered schema", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "arraypattern",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { type: "string", pattern: ["^(a+)+$"] } } },
+          },
+          {
+            name: "objpattern",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { pattern: { regex: "^(a+)+$" } } } },
+          },
+        ],
+      }),
+    );
+    const { definitions, report } = await createMcpToolDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions).toHaveLength(2);
+    expect(report.enveloped).toBe(2);
+    expect(report.degraded).toEqual([{ reason: "schema-envelope", tools: expect.any(Array) }]);
+    // This TypeBox would not compile either, but the expression must not be forwarded regardless.
+    expect(JSON.stringify(definitions.map((definition) => definition.parameters))).not.toContain("(a+)+");
+  });
+
+  it("drops a structurally invalid patternProperties before the hazard scan sees it", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          { name: "arr", server_name: "srv", inputSchema: { type: "object", patternProperties: [{ "^a+$": {} }] } },
+        ],
+      }),
+    );
+    const { definitions, report } = await createMcpToolDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+    // An array-valued schema map is not valid JSON Schema, so it is a loss rather than a degradation.
+    expect(definitions).toEqual([]);
+    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 1 });
+  });
+
+  it("still leaves a property literally named pattern alone", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        properties: { pattern: { type: "string" }, patternProperties: { type: "number" } },
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("upstream assumption: TypeBox escapes proxy-supplied property names", () => {
+  // Property names reach `new RegExp` via additionalProperties, and are safe only because TypeBox
+  // escapes them. Nothing in this repo controls that, so pin the assumption: if a future TypeBox
+  // stops escaping, this fails here rather than becoming an unbounded regex at runtime.
+  it("does not treat a regex-metacharacter property name as an expression", async () => {
+    const { Compile } = await import("typebox/compile");
+    const schema = {
+      type: "object",
+      properties: { "(a+)+$": { type: "string" } },
+      additionalProperties: false,
+    };
+    const compiled: string[] = [];
+    const NativeRegExp = globalThis.RegExp;
+    class RecordingRegExp extends NativeRegExp {
+      constructor(source: string | RegExp, flags?: string) {
+        compiled.push(String(source));
+        super(source as never, flags);
+      }
+    }
+    globalThis.RegExp = RecordingRegExp as never;
+    let validator: { Check: (value: unknown) => boolean };
+    try {
+      validator = Compile(schema as never) as never;
+      // A name that would match the unescaped expression must not be accepted as that property.
+      expect(validator.Check({ aaaa: "x" })).toBe(false);
+      expect(validator.Check({ "(a+)+$": "x" })).toBe(true);
+    } finally {
+      globalThis.RegExp = NativeRegExp;
+    }
+    // Every compiled source must contain the escaped literal, never the raw quantifier group.
+    for (const source of compiled) expect(source).not.toContain("(a+)+$");
+  });
+});

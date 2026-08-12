@@ -549,10 +549,13 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
 
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       if (!keysAreNames) {
-        // A regex only matters where the validator would compile one: `pattern` holding a string,
-        // or `patternProperties` holding a map whose keys are expressions.
-        if (key === UNSAFE_REGEX_KEY && typeof child === "string") return "regex";
-        if (key === UNSAFE_REGEX_MAP_KEY && asRecord(child) !== undefined) return "regex";
+        // Any `pattern` or `patternProperties` at a keyword position, whatever its value type. This
+        // TypeBox only compiles a string-valued `pattern`, so a non-string one is not a CPU risk —
+        // but the expression text would still land in the schema Pi holds and forward to the
+        // provider, so refusing to vouch for it keeps the stated invariant literally true and does
+        // not depend on an upstream type guard staying as it is. A key that is an argument *name*
+        // is excluded by `keysAreNames` before reaching here.
+        if (key === UNSAFE_REGEX_KEY || key === UNSAFE_REGEX_MAP_KEY) return "regex";
         // A pointer outside the supplied document cannot be inspected at all. A local one is only
         // safe if it also resolves to something the validator can use as a schema.
         if (key === "$ref" && typeof child === "string") {

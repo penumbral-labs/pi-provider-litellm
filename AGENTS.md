@@ -36,6 +36,7 @@
 ## LiteLLM MCP Tools
 
 - Everything a LiteLLM MCP server returns is untrusted input: tool names, server names, descriptions, schemas, and results.
+- Refuse `pattern`/`patternProperties` at a keyword position regardless of value type. The current TypeBox only compiles a string-valued `pattern`, but the expression text would still reach Pi and the provider, and the guard should not rest on an upstream type check.
 - The safety invariant is that **no proxy-supplied regular expression, and no reference the validator cannot safely resolve, reaches Pi or TypeBox**. `pattern` and `patternProperties` keys are compiled into backtracking regexes with no time limit; `$ref` is resolved as an arbitrary JSON pointer and whatever it lands on is then treated as a schema.
 - Do not implement that check by enumerating the schema positions where a subschema may appear. A `$ref` resolves an arbitrary JSON pointer, so a regex can hide under any key, including data-only ones like `default` and `examples`. `findSchemaHazard()` in `src/mcp-tools.ts` walks the entire supplied graph instead, bounded by depth, a node budget, and identity-based cycle detection; an incomplete walk is a hazard, not a pass.
 - Covering the graph is necessary but not sufficient for references: a local pointer must also *resolve* to a usable subschema, and the reference chain must be proven acyclic. Object identity cannot see a pointer cycle, because each hop is a different object.
