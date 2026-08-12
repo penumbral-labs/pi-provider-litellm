@@ -214,7 +214,7 @@ npm run supply-chain:guard
 npm pack --dry-run
 ```
 
-The published npm package contains only `src`, `README.md`, and `LICENSE`. Pi loads the TypeScript source entrypoint for both npm and Git installs.
+The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs.
 
 ## Release
 
