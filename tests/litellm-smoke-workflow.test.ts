@@ -9,6 +9,48 @@ function readWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/litellm-smoke.yml"), "utf8");
 }
 
+interface WorkflowStep {
+  name?: string;
+  keys: string[];
+  body: string;
+}
+
+// Minimal structural reader for the one shape this file needs: the ordered step
+// list of a job. Deliberately not a general YAML parser and deliberately not a new
+// dependency — string assertions cannot tell a live step from commented-out text,
+// which is the only property worth asserting here.
+function parseJobSteps(workflow: string, job: string): WorkflowStep[] {
+  const lines = workflow.split("\n");
+  const jobLine = lines.findIndex((line) => line.trimEnd() === `  ${job}:`);
+  if (jobLine === -1) throw new Error(`job not found: ${job}`);
+  const stepsLine = lines.findIndex((line, index) => index > jobLine && line.trimEnd() === "    steps:");
+  if (stepsLine === -1) throw new Error(`steps not found for job: ${job}`);
+
+  const steps: WorkflowStep[] = [];
+  for (let index = stepsLine + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.trim() === "") continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent < 6) break; // dedented out of the steps list
+    if (line.startsWith("      - ")) {
+      steps.push({ keys: [], body: "" });
+      const first = line.slice("      - ".length);
+      const key = /^([A-Za-z_-]+):/.exec(first);
+      if (key) steps[steps.length - 1].keys.push(key[1]);
+      if (key?.[1] === "name") steps[steps.length - 1].name = first.slice(key[0].length).trim();
+    }
+    const current = steps[steps.length - 1];
+    if (!current) continue;
+    current.body += `${line}\n`;
+    if (indent === 8) {
+      const key = /^([A-Za-z_-]+):/.exec(line.trimStart());
+      if (key && !current.keys.includes(key[1])) current.keys.push(key[1]);
+      if (key?.[1] === "name") current.name = line.trimStart().slice(key[0].length).trim();
+    }
+  }
+  return steps;
+}
+
 function readCiWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
 }
@@ -46,7 +88,6 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain("Verify deployment-group reduction");
     expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
     expect(workflow).toContain("AbortSignal.timeout(3000)");
     // The mixed-transport fixture only exercises reduction while the proxy keeps
@@ -56,9 +97,45 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('=== "chat,responses"');
     expect(workflow).toContain('=== "reasoning_effort,temperature"');
     expect(workflow).toContain('=== "reasoning_effort,temperature,thinking"');
+
+    // Structural: the verification step must actually exist in the job's step list,
+    // be enabled, run after the build that produces dist/, and assert the reduced
+    // outcome. Deleting or disabling the step fails here; commenting it out cannot
+    // satisfy these assertions the way a substring match would.
+    const steps = parseJobSteps(workflow, "smoke");
+    const names = steps.map((step) => step.name);
+    const verifyIndex = names.indexOf("Verify deployment-group reduction");
+    const buildIndex = steps.findIndex((step) => step.body.includes("run: npm run build"));
+    const configIndex = names.indexOf("Write LiteLLM smoke config");
+
+    expect(verifyIndex).toBeGreaterThan(-1);
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(configIndex).toBeGreaterThan(-1);
+    expect(verifyIndex).toBeGreaterThan(buildIndex);
+    expect(verifyIndex).toBeGreaterThan(configIndex);
+
+    const verify = steps[verifyIndex];
+    expect(verify.keys).toContain("run");
+    expect(verify.keys).toContain("shell");
+    // An `if:` would let the gate be silently skipped.
+    expect(verify.keys).not.toContain("if");
+    expect(verify.body).toContain("node --input-type=module -");
+    expect(verify.body).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
+    expect(verify.body).toContain('grouped[0].api === "openai-completions"');
+
+    // The fixture must keep the two properties that make the gate meaningful: two
+    // distinct deployment ids' worth of rows, in the two intended transport modes,
+    // over backends that disagree so catalog authority is genuinely withheld.
+    const config = steps[configIndex].body;
+    const grouped = config.split("- model_name: grouped-vidaimock").slice(1);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]).toContain("mode: chat");
+    expect(grouped[1]).toContain("mode: responses");
+    expect(grouped[0]).toContain("model: openai/gpt-4o-mini");
+    expect(grouped[1]).toContain("model: anthropic/claude-3-5-sonnet");
     // Reduction outcome, not just wire shape.
     expect(workflow).toContain('grouped[0].api === "openai-completions"');
-    expect(workflow).toContain('!grouped[0].name.endsWith(" (no metadata)")');
+    expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
     // Stdin ESM is explicit rather than inferred from top-level await.
     expect(workflow).toContain("node --input-type=module -");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");

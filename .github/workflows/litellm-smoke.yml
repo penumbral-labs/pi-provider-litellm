@@ -158,8 +158,8 @@ jobs:
                 mode: responses
                 supported_openai_params: [temperature, thinking]
               litellm_params:
-                model: openai/gpt-4o-mini
-                api_base: http://host.docker.internal:8100/v1
+                model: anthropic/claude-3-5-sonnet
+                api_base: http://host.docker.internal:8100
                 api_key: sk-vidaimock
                 allowed_openai_params: [thinking, reasoning_effort]
           general_settings:
@@ -251,9 +251,11 @@ jobs:
             `responses deployment accepted set drifted: ${summary[1].accepted.join(",")}`,
           );
 
-          // Assert the reduced outcome, not just the wire shape: a mixed-transport
-          // group must fall back to Chat, reduce to one model, and never carry the
-          // fallback-only sentinel that authorizes cache re-enrichment.
+          // Assert the reduced outcome, not just the wire shape. The two deployments
+          // disagree on backend provider, so catalog authority must be withheld: the
+          // group falls back to Chat, reports unknown cost, and carries the permanent
+          // marker rather than the `/v1/models` sentinel that authorizes cache
+          // re-enrichment. Every assertion below fails if reduction regresses.
           const { pathToFileURL } = await import("node:url");
           const { discoverModels } = await import(pathToFileURL("dist/discover.js").href);
           const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY, {
@@ -267,9 +269,14 @@ jobs:
             `mixed-transport group must reduce to Chat, received ${grouped[0].api}`,
           );
           assert(
-            !grouped[0].name.endsWith(" (no metadata)"),
-            `reduced group must not use the fallback sentinel: ${grouped[0].name}`,
+            grouped[0].name === "grouped-vidaimock (incomplete metadata)",
+            `withheld-authority group must carry the permanent marker, received ${grouped[0].name}`,
           );
+          assert(
+            grouped[0].cost.input === 0 && grouped[0].cost.output === 0,
+            `withheld-authority group must report unknown cost, received ${JSON.stringify(grouped[0].cost)}`,
+          );
+          assert(grouped[0].contextWindow === 128000, `expected the conservative default context window`);
           NODE
 
       - name: Run provider smoke
