@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -67,10 +67,12 @@ describe("pi package compatibility", () => {
   it("loads a production-only Git archive from its manifest entrypoint", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-git-package-"));
     try {
+      // Archive HEAD, not the working tree: a Git install materialises the committed
+      // tree, `git stash create` writes objects into an object store shared with sibling
+      // worktrees, and its output silently omits untracked files. Working-tree fidelity
+      // is owned by the `npm pack` test below, which is filesystem-based.
       const archivePath = join(fixture, "git-package.tar");
-      const { stdout: worktreeCommit } = await execFileAsync("git", ["stash", "create"], { cwd: repoRoot });
-      const revision = worktreeCommit.trim() || "HEAD";
-      await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, revision], { cwd: repoRoot });
+      await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, "HEAD"], { cwd: repoRoot });
       await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
       await rm(archivePath);
       const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as PackageManifest;
@@ -126,6 +128,56 @@ describe("pi package compatibility", () => {
       await rm(fixture, { force: true, recursive: true });
     }
   }, 30_000);
+
+  // The in-process loader tests hand `loadExtensions` an absolute file path, so they skip
+  // the manifest resolution that `pi -e <dir>` and `pi install` actually perform. This
+  // drives the real CLI against a Git-install-shaped tree instead. A malformed
+  // LITELLM_HEADERS value is used as the load detector because the extension writes a
+  // distinctive line while registering the provider -- `--list-models` alone is not
+  // discriminating, since it also reports models from a cached store. The agent dir is
+  // redirected at an empty directory so no globally installed copy can satisfy the probe.
+  it("loads through the Pi CLI from a Git-install-shaped tree", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-cli-"));
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-agent-"));
+    const detector = "failed to parse custom headers";
+    const piBin = resolve(repoRoot, "node_modules/.bin/pi");
+
+    const listModels = async (cwd: string): Promise<string> => {
+      const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
+        cwd,
+        env: {
+          ...process.env,
+          PI_CODING_AGENT_DIR: agentDir,
+          LITELLM_HEADERS: "{bad json",
+          LITELLM_OFFLINE: "1",
+          LITELLM_BASE_URL: "https://proxy.invalid",
+          LITELLM_API_KEY: "sk-not-a-real-key",
+        },
+      });
+      return `${stdout}${stderr}`;
+    };
+
+    try {
+      const archivePath = join(fixture, "git-package.tar");
+      await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, "HEAD"], { cwd: repoRoot });
+      await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
+      await rm(archivePath);
+
+      expect(await listModels(fixture)).toContain(detector);
+
+      // Negative control: a manifest entrypoint that does not exist is skipped silently by
+      // the loader, so without this the assertion above could pass on a stale global copy.
+      const manifestPath = join(fixture, "package.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest;
+      manifest.pi.extensions = ["./src/does-not-exist.ts"];
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      expect(await listModels(fixture)).not.toContain(detector);
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+      await rm(agentDir, { force: true, recursive: true });
+    }
+  }, 60_000);
 
   it("keeps source runtime imports loader-provided or built-in", async () => {
     const sourceDir = join(repoRoot, "src");
