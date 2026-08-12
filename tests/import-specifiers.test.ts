@@ -47,7 +47,21 @@ describe("importSpecifiers", () => {
     expect(importSpecifiers(source)).toEqual(["pkg"]);
   });
 
-  it("does not treat a string containing import syntax as an import", () => {
-    expect(importSpecifiers('const doc = "import x from \\"pkg\\"";')).toEqual([]);
+  it.for([
+    ["escaped quotes", 'const doc = "import x from \\"pkg\\"";'],
+    ["single quotes inside double", `const msg = "resolved from 'pkg'";`],
+    ["double quotes inside single", `const msg = 'alias from "pkg" is unknown';`],
+    ["a template literal", 'const msg = `alias from "pkg" is unknown`;'],
+    ["an error message quoting a dynamic import", `throw new Error("use import('./x.js') instead");`],
+  ] as const)("does not read %s as an import", ([, source]) => {
+    expect(importSpecifiers(source)).toEqual([]);
+  });
+
+  // The sentinel is asserted literally here so renaming the constant cannot silently
+  // turn every unverifiable specifier into an allowlisted one.
+  it("uses a sentinel no allowlist would accept", () => {
+    expect(UNVERIFIABLE_SPECIFIER).toBe("<unverifiable-dynamic-specifier>");
+    expect(UNVERIFIABLE_SPECIFIER.startsWith("node:")).toBe(false);
+    expect(UNVERIFIABLE_SPECIFIER.startsWith("./")).toBe(false);
   });
 });

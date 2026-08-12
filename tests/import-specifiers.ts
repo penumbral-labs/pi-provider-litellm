@@ -7,8 +7,10 @@
 // than silently ignored.
 export const UNVERIFIABLE_SPECIFIER = "<unverifiable-dynamic-specifier>";
 
-// Replaces comment bodies with spaces, preserving offsets, and skips over string and
-// template literals so their contents are never mistaken for import syntax.
+// Replaces comment bodies with spaces, preserving offsets. String and template literals
+// are kept, because import specifiers live inside them, but a literal is only treated as
+// a specifier when an import token immediately precedes it -- so an ordinary message
+// string that happens to contain `from "pkg"` is not read as an import.
 function stripCommentsAndLiterals(source: string): string {
   let out = "";
   let index = 0;
@@ -57,7 +59,9 @@ function stripCommentsAndLiterals(source: string): string {
   return out;
 }
 
-// `from "x"` and `import "x"` -- static forms, always a plain literal.
+// `from "x"` and `import "x"` -- static forms, always a plain literal. The import token
+// must not itself sit inside a literal, which is what distinguishes a real import from a
+// message string quoting one.
 const STATIC_SPECIFIER = /(?:\bfrom\s*|\bimport\s+)(["'`])([^"'`]*)\1/g;
 // The call forms, whose argument may be an arbitrary expression.
 const CALL_START = /\b(?:import|require)\s*\(/g;
@@ -74,11 +78,40 @@ function literalArgument(argument: string): string | undefined {
   return undefined;
 }
 
+// Offsets of every character that sits inside a string or template literal body.
+function literalBodyOffsets(source: string): Set<number> {
+  const inside = new Set<number>();
+  let index = 0;
+  while (index < source.length) {
+    const quote = source[index];
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
+      index += 1;
+      continue;
+    }
+    let cursor = index + 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (source[cursor] === quote) break;
+      inside.add(cursor);
+      cursor += 1;
+    }
+    index = Math.min(cursor + 1, source.length);
+  }
+  return inside;
+}
+
 export function importSpecifiers(source: string): string[] {
   const scanned = stripCommentsAndLiterals(source);
-  const specifiers = [...scanned.matchAll(STATIC_SPECIFIER)].map((match) => match[2]);
+  const insideLiteral = literalBodyOffsets(scanned);
+  const specifiers = [...scanned.matchAll(STATIC_SPECIFIER)]
+    .filter((match) => !insideLiteral.has(match.index ?? 0))
+    .map((match) => match[2]);
 
   for (const call of scanned.matchAll(CALL_START)) {
+    if (insideLiteral.has(call.index ?? 0)) continue;
     const open = (call.index ?? 0) + call[0].length;
     const close = scanned.indexOf(")", open);
     const argument = scanned.slice(open, close === -1 ? scanned.length : close);
