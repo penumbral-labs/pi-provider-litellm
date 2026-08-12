@@ -46,21 +46,36 @@ const CHAT_STYLE_MODE_PATTERN = /^chat$/i;
 const COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 type CostField = (typeof COST_FIELDS)[number];
 
-function normalizedMode(mode: string | null | undefined): "chat" | "responses" | "unknown" | "unsupported" {
+// `/model/info` is parsed JSON from operator-authored proxy config, so a field
+// declared as a string can arrive as a number. Reading it as one must withhold
+// that row's evidence, not throw and lose every model in the response.
+function wireString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
-  const value = mode.trim();
+  const value = wireString(mode)?.trim();
+  if (value === undefined) return "unsupported";
   if (RESPONSES_MODE_PATTERN.test(value)) return "responses";
   if (CHAT_STYLE_MODE_PATTERN.test(value)) return "chat";
   return "unsupported";
 }
 
-function sortValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortValue);
+// Deployment rows nest only a couple of levels, but the payload is untrusted, so
+// canonicalization is depth-bounded. Beyond the cap the raw value is stringified,
+// which stays deterministic while refusing to recurse without limit. JSON.parse
+// cannot produce a cycle, so no cycle handling is warranted.
+const MAX_CANONICAL_DEPTH = 12;
+
+function sortValue(value: unknown, depth = 0): unknown {
+  if (depth >= MAX_CANONICAL_DEPTH) return JSON.stringify(value);
+  if (Array.isArray(value)) return value.map((child) => sortValue(child, depth + 1));
   if (typeof value !== "object" || value === null) return value;
   return Object.fromEntries(
     Object.entries(value)
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => [key, sortValue(child)]),
+      .map(([key, child]) => [key, sortValue(child, depth + 1)]),
   );
 }
 
@@ -74,12 +89,15 @@ function stableEntry(entry: ModelInfoEntry): string {
   return JSON.stringify(sortValue(entry));
 }
 
+// Collapses only EXACT DUPLICATE ROWS, not merely rows repeating a deployment id.
+// Two rows sharing `model_info.id` but differing anywhere else are kept as separate
+// reduction candidates so their disagreement fails closed.
 function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
   const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];
   for (const entry of entries) {
     const signature = stableEntry(entry);
-    const id = entry.model_info?.id?.trim();
+    const id = wireString(entry.model_info?.id)?.trim();
     if (id) {
       const variants = identified.get(id) ?? new Map<string, ModelInfoEntry>();
       variants.set(signature, entry);
@@ -88,8 +106,6 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[]
       anonymous.push({ signature, entry });
     }
   }
-  // Conflicting rows for one deployment remain in the reduction so their
-  // disagreement fails closed, while exact repeats stay idempotent.
   return [
     ...[...identified.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -106,8 +122,10 @@ function explicitLimit(value: number | undefined): number | undefined {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? undefined : value;
 }
 
-function normalizeParams(params: readonly string[] | undefined): Set<string> {
-  return new Set(params?.map((param) => param.trim()).filter(Boolean));
+function normalizeParams(params: unknown): Set<string> {
+  if (!Array.isArray(params)) return new Set();
+  const named = params.map((param) => wireString(param)?.trim()).filter((param) => Boolean(param));
+  return new Set(named as string[]);
 }
 
 function acceptedParams(entry: ModelInfoEntry): Set<string> {
@@ -159,9 +177,10 @@ export function reduceModelGroup(
 ): ReducedModelGroup | undefined {
   const candidates = uniqueDeployments(entries.filter((entry) => entry.model_name));
   if (candidates.length === 0) return undefined;
-  // Transport votes over every candidate row, so an unsupported sibling still
-  // forces Chat; capability, limit, price, and identity evidence reduces only
-  // over routable rows so a non-chat sibling cannot corrupt them.
+  // Transport votes over every candidate row, so a row this reduction will not
+  // otherwise use — an embedding sibling, say — can still force Chat. Capability,
+  // limit, price, and identity evidence reduces only over routable rows, so such a
+  // row cannot corrupt them or make the group look larger than it is.
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
