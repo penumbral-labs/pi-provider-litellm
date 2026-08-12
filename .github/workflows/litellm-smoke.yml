@@ -52,7 +52,6 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
-      - run: npm run build
 
       - name: Install VidaiMock
         shell: bash
