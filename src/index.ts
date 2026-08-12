@@ -21,7 +21,7 @@ import {
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
-import { getGcloudToken, hasUsableGcloudAdc, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
+import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
@@ -346,9 +346,9 @@ async function resolveCredentials(
   const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
   const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
   const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
-  // Evidence that ADC can actually mint a token, resolved even when helpers are not
-  // executed so `apiKey.check` can report availability truthfully.
-  const hasGcloudAdc = useGcloudToken ? await hasUsableGcloudAdc() : false;
+  // Whether a complete authorized_user ADC file exists, resolved even when helpers are
+  // not executed so `apiKey.check` can report availability without a network call.
+  const hasGcloudAdc = useGcloudToken ? await hasGcloudAdcCredentials() : false;
   const gcloudKey = executeHelpers && hasGcloudAdc ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
   // higher-precedence credential (saved auth, gcloud token) already won.
@@ -598,26 +598,31 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
+
+        // Credentials `resolve` would fall back to if ADC cannot mint a token.
+        const fallbackSource = async (): Promise<string | undefined> => {
+          if (definition.apiKeyConfig) {
+            const configuredKey = definition.apiKeyConfig.startsWith("!")
+              ? definition.apiKeyConfig
+              : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
+            if (configuredKey) return definition.apiKeyConfig;
+          }
+          if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER))) return ENV_API_KEY_HELPER;
+          if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))) return ENV_API_KEY;
+          return undefined;
+        };
+
         const configured = await resolveCredentials(
           { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
           { executeHelpers: false },
         );
-        if (configured.apiKey || configured.apiKeyConfig || configured.hasGcloudAdc)
-          return {
-            type: "api_key",
-            source: configured.hasGcloudAdc ? GCLOUD_ADC_SOURCE : (configured.apiKeyConfig ?? ENV_API_KEY),
-          };
-        if (definition.apiKeyConfig) {
-          const configuredKey = definition.apiKeyConfig.startsWith("!")
-            ? definition.apiKeyConfig
-            : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
-          if (configuredKey) return { type: "api_key", source: definition.apiKeyConfig };
-        }
-        if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER)))
-          return { type: "api_key", source: ENV_API_KEY_HELPER };
-        return definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))
-          ? { type: "api_key", source: ENV_API_KEY }
-          : undefined;
+        const fallback = await fallbackSource();
+        // ADC outranks the fallback in `resolveCredentials`, but only when it actually
+        // mints, which cannot be known without a network call. Naming ADC while a
+        // usable fallback exists would promise a credential that may never be used, so
+        // the guaranteed one is reported instead.
+        if (configured.hasGcloudAdc && !fallback) return { type: "api_key", source: GCLOUD_ADC_SOURCE };
+        return fallback ? { type: "api_key", source: fallback } : undefined;
       },
       resolve: ({ ctx, credential }) => resolveApiKeyAuth(definition, ctx, credential),
     },
