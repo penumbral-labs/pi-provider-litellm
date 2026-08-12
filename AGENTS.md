@@ -48,6 +48,9 @@
 - Diagnostics dedupe on full membership, not on the printed sample, and a class that stops occurring is cleared. Never interpolate proxy-supplied text or credentials into stderr; generated names and counts only.
 - `pi.registerTool` is a synchronous replace-by-name whose only failure is a never-reset staleness check, so a refusal is fatal for the pass and for that extension instance. Do not model it as a per-tool rejection or add retry; a reload provides a clean instance.
 - `POST /mcp-rest/tools/call` is side-effecting and must stay exactly-once, and cancellation must preserve the caller's original abort reason. Keep the tests that assert call counts and reason identity.
+- Two upstream behaviors keep passthrough schemas safe and are not controlled here. Both are pinned by tests in `tests/mcp-tools.test.ts`; if a dependency bump breaks either, fix it there before shipping.
+  - `typebox`'s `value/convert/from_object.mjs` turns `properties` keys into `new RegExp(`^${key}$`)` with **no escaping**, and `pi-ai` calls `Value.Convert` on tool parameters. That is only harmless because `Convert` walks recognised TypeBox types and no-ops on a raw JSON Schema, so a proxy-supplied property name never reaches it. If that changed, a property named `(a+)+$` would become an executable backtracking regex tested against model-supplied argument keys.
+  - `format` is live on passthrough schemas: it is a proxy-chosen selector of `typebox`'s own regexes, executed against model-supplied strings. The shipped formats are well-anchored, so this is a residual dependency on upstream regex quality, not a hole. Do not assume `format` is ignored.
 - Do not write timing-based tests for any of this. Assert the registered `parameters` and the absence of the exact proxy-supplied regex or ref, and keep the schema-position test lists independent of the implementation's own tables.
 
 ## Compatibility Rules

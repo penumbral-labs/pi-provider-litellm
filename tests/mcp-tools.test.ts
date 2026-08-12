@@ -1764,3 +1764,99 @@ describe("upstream assumption: TypeBox escapes proxy-supplied property names", (
     for (const source of compiled) expect(source).not.toContain("(a+)+$");
   });
 });
+
+// Two upstream behaviors keep proxy-supplied schemas safe that this repo does not control. Pin them
+// so a dependency bump that changes either one fails here rather than at runtime.
+describe("upstream assumptions the guard depends on", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+
+  async function registeredParametersFor(inputSchema: unknown): Promise<unknown> {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, { tools: [{ name: "probe", server_name: "srv", inputSchema }] }),
+    );
+    const definitions = await createMcpToolDefinitions(auth);
+    expect(definitions).toHaveLength(1);
+    return definitions[0]?.parameters;
+  }
+
+  it("builds no regex from a passthrough schema's property names", async () => {
+    // typebox's value/convert/from_object.mjs turns `properties` keys into `new RegExp(`^${key}$`)`
+    // with NO escaping, and pi-ai calls Value.Convert on tool parameters. That is only harmless
+    // because Convert walks recognized TypeBox types and no-ops on a raw JSON Schema, so a
+    // proxy-supplied property name never reaches it. If that changes, a name like `(a+)+$` becomes
+    // an executable backtracking regex tested against model-supplied argument keys.
+    const parameters = await registeredParametersFor({
+      type: "object",
+      properties: { "(a+)+$": { type: "string" }, "(x+x+)+y": { type: "string" } },
+    });
+    // Not a public export, so reached by file path: the point is to exercise the real consumer.
+    const { validateToolArguments } = await import("../node_modules/@earendil-works/pi-ai/dist/utils/validation.js");
+
+    const built: string[] = [];
+    const NativeRegExp = globalThis.RegExp;
+    class RecordingRegExp extends NativeRegExp {
+      constructor(source: string | RegExp, flags?: string) {
+        built.push(String(source));
+        super(source as never, flags);
+      }
+    }
+    globalThis.RegExp = RecordingRegExp as never;
+    try {
+      // Long non-matching argument keys: the shape that would backtrack if a regex were built.
+      const args = { [`${"a".repeat(30)}!`]: "v", [`${"x".repeat(30)}!`]: "v" };
+      expect(() =>
+        validateToolArguments({ name: "probe", parameters } as never, { name: "probe", arguments: args } as never),
+      ).not.toThrow();
+    } finally {
+      globalThis.RegExp = NativeRegExp;
+    }
+
+    for (const source of built) {
+      expect(source).not.toContain("(a+)+");
+      expect(source).not.toContain("(x+x+)+y");
+    }
+
+    // The assertion above is only meaningful if the recorder actually captures constructions, so
+    // prove it on a path that is known to build them: our own envelope is a real TypeBox type, and
+    // Convert does walk it.
+    const envelopeParameters = await registeredParametersFor({});
+    const envelopeBuilt: string[] = [];
+    class RecordingEnvelopeRegExp extends NativeRegExp {
+      constructor(source: string | RegExp, flags?: string) {
+        envelopeBuilt.push(String(source));
+        super(source as never, flags);
+      }
+    }
+    globalThis.RegExp = RecordingEnvelopeRegExp as never;
+    try {
+      validateToolArguments(
+        { name: "probe", parameters: envelopeParameters } as never,
+        { name: "probe", arguments: { args: { k: 1 } } } as never,
+      );
+    } finally {
+      globalThis.RegExp = NativeRegExp;
+    }
+    expect(envelopeBuilt).toContain("^args$");
+  });
+
+  it("evaluates `format` on a passthrough schema, so its regexes are library-supplied and not inert", async () => {
+    // Recorded deliberately: `format` is a proxy-chosen selector of typebox's own regexes, executed
+    // against model-supplied strings. The shipped formats are well-anchored, so this is a residual
+    // dependency on upstream regex quality rather than a hole — but it is live, not ignored, and
+    // anyone assuming otherwise would mis-assess it.
+    const parameters = await registeredParametersFor({
+      type: "object",
+      properties: { s: { type: "string", format: "email" } },
+      required: ["s"],
+    });
+    const { validateToolArguments } = await import("../node_modules/@earendil-works/pi-ai/dist/utils/validation.js");
+    const call = (value: string) =>
+      validateToolArguments(
+        { name: "probe", parameters } as never,
+        { name: "probe", arguments: { s: value } } as never,
+      );
+
+    expect(() => call("definitely not an email")).toThrow();
+    expect(() => call("a@b.co")).not.toThrow();
+  });
+});
