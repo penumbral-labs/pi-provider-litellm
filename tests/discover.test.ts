@@ -607,8 +607,17 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.compat).toEqual({ supportsStore: false });
-    expect(result.models[0]).not.toHaveProperty("litellmPolicy");
+    // Catalog authority is withheld and no reasoning selector is invented, but
+    // one deployment really is Moonshot-backed, so its restrictions still apply:
+    // dropping them would make requests to that deployment more aggressive, and
+    // they are a no-op against the OpenAI sibling.
+    expect(result.models[0]?.compat).toMatchObject({
+      maxTokensField: "max_tokens",
+      supportsStrictMode: false,
+      supportsReasoningEffort: false,
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
+    expect(result.models[0]?.litellmPolicy).toEqual(moonshotPolicy("kimi-looking-route"));
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
@@ -2186,5 +2195,105 @@ describe("cache-read and Responses paths honour the transmissibility gate", () =
     expect(reports[0]).toContain("(+1 more)");
     // Only public route ids, never credentials or litellm_params.
     expect(reports[0]).not.toMatch(/sk-|api_key/);
+  });
+});
+
+describe("more evidence never produces a less safe request", () => {
+  const kimiGroup = (backends: string[]) =>
+    backends.map((model, index) => ({
+      model_name: "kimi-k2.6",
+      litellm_params: { model },
+      model_info: { id: `d${index}`, mode: "chat", supports_reasoning: true },
+    }));
+
+  it.each([
+    { name: "every deployment identifies Moonshot", backends: ["azure_ai/kimi-k2.6-east", "azure_ai/kimi-k2.6-west"] },
+    { name: "only one deployment identifies Moonshot", backends: ["azure_ai/kimi-k2.6-east", "azure_ai/k26-prod"] },
+    { name: "no deployment identifies anything", backends: ["azure_ai/k26-prod-east", "azure_ai/k26-prod-west"] },
+  ])("keeps Moonshot constraints when $name", async ({ backends }) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: kimiGroup(backends) }));
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // Withholding catalog authority on contradictory evidence is conservative;
+    // withholding a vendor's restrictions is not, because it makes the request
+    // more aggressive. Partial evidence must not be the least safe case.
+    expect(result.models[0]?.compat).toMatchObject({ maxTokensField: "max_tokens", supportsStrictMode: false });
+    expect(result.models[0]?.litellmPolicy).toEqual(moonshotPolicy("kimi-k2.6"));
+    expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
+  });
+
+  it("still withholds additive vendor features when families disagree", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "claude-router",
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            model_info: { id: "a", mode: "chat", litellm_provider: "anthropic" },
+          },
+          {
+            model_name: "claude-router",
+            litellm_params: { model: "openai/gpt-4o" },
+            model_info: { id: "b", mode: "chat", litellm_provider: "openai" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // cache_control on an OpenAI-served deployment breaks the request, so an
+    // additive feature still needs unanimity.
+    expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
+  });
+
+  it("gates a level map stored by a release that predates the gate", () => {
+    // Exactly what base published for a `/model/info` Kimi route: a catalog level
+    // map beside a compat that denies effort and names no format.
+    const stored = {
+      id: "kimi-k3",
+      name: "kimi-k3",
+      api: "openai-completions",
+      provider: "litellm",
+      baseUrl: "https://litellm.example.com/v1",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+      compat: buildCompat("kimi-k3"),
+    } as Model<Api>;
+
+    expect(getSupportedThinkingLevels(enrichCachedModel(stored))).toEqual([]);
+  });
+
+  it("publishes the same levels for one route id on both fallback paths", async () => {
+    const id = "anthropic/claude-sonnet-4-6";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const listed = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(403, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(403, {});
+      if (url.endsWith("/health")) return jsonResponse(200, { healthy_endpoints: [{ model: id }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const health = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // Both fallbacks have the same evidence quality — a route name — so neither
+    // may offer a level the other denies.
+    expect(getSupportedThinkingLevels(nativeModel(health.models[0]))).toEqual(
+      getSupportedThinkingLevels(nativeModel(listed.models[0])),
+    );
+    expect(getSupportedThinkingLevels(nativeModel(health.models[0]))).not.toEqual([]);
   });
 });

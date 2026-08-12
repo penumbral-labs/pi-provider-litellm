@@ -57,6 +57,11 @@ export interface ReducedModelGroup {
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
+  // Every family any deployment identified, even when they disagreed. Catalog
+  // authority and additive vendor features need unanimity, but a vendor's
+  // RESTRICTIONS must apply as soon as one deployment evidences that vendor:
+  // withholding a restriction makes the request more aggressive, not safer.
+  declaredFamilies: SemanticFamily[];
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
 }
@@ -436,6 +441,13 @@ export function reduceModelGroup(
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
+    declaredFamilies: [
+      ...new Set(
+        catalogs
+          .map((catalog) => catalog?.semanticFamily)
+          .filter((family): family is SemanticFamily => family !== undefined && family !== "conflicting"),
+      ),
+    ].sort(),
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };

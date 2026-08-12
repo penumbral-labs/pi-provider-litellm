@@ -104,6 +104,9 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: true,
       semanticFamily: "conflicting",
       catalogAuthorityAmbiguous: true,
+      // Sorted, deduplicated, and excludes the "conflicting" marker: the caller
+      // needs to know which vendors' restrictions to keep, not that they clashed.
+      declaredFamilies: ["claude", "openai"],
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },
     };
