@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { checkSupplyChain } from "../scripts/supply-chain-guard.js";
-import { importSpecifiers } from "./import-specifiers.js";
+import { importSpecifiers, initImportSpecifiers } from "./import-specifiers.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -180,10 +180,13 @@ describe("pi package compatibility", () => {
   }, 60_000);
 
   it("keeps source runtime imports loader-provided or built-in", async () => {
+    await initImportSpecifiers();
     const sourceDir = join(repoRoot, "src");
     const sourceFiles = (await readdir(sourceDir, { recursive: true })).filter((file) => file.endsWith(".ts"));
     const imports = await Promise.all(
-      sourceFiles.map(async (file) => [file, importSpecifiers(await readFile(join(sourceDir, file), "utf8"))] as const),
+      sourceFiles.map(
+        async (file) => [file, importSpecifiers(await readFile(join(sourceDir, file), "utf8"), file)] as const,
+      ),
     );
 
     // A scanner bug that returned nothing would make `every` vacuously true, so require
@@ -200,8 +203,9 @@ describe("pi package compatibility", () => {
     ]);
     for (const [file, specifiers] of imports) {
       for (const specifier of specifiers) {
-        // UNVERIFIABLE_SPECIFIER lands here too: a computed `import()` cannot be shown to
-        // resolve to something the loader provides, so it fails the contract by default.
+        // UNVERIFIABLE_SPECIFIER and FORBIDDEN_RESOLVER land here too: a computed `import()`
+        // cannot be shown to resolve to something the loader provides, and a CommonJS or
+        // dynamic-evaluation resolver bypasses the loader entirely. Both fail by default.
         expect(
           specifier.startsWith("node:") || specifier.startsWith("./") || allowed.has(specifier),
           `${file}: ${specifier}`,
