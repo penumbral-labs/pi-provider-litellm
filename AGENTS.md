@@ -24,7 +24,10 @@
 - The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Cache data is stored as `litellm-models.json` under the Pi agent dir with a keyed API-key fingerprint and a 24-hour stale refresh window.
+- Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
+- The only agent-dir file this extension writes is `litellm-models-dev.json`, a models.dev metadata cache with a 28-day TTL.
+- Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, blank fields are rejected, and service accounts warn and fail closed.
+- `apiKey.check` performs no network call, so it reports credential shape, not mintability. It must not name a credential that `resolve` would not use.
 
 ## LiteLLM Request Hooks
 
@@ -45,7 +48,8 @@
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
-- Pi CLI smoke tests load the package root so they exercise the shipped `./src/index.ts` entrypoint.
+- The non-interactive Pi CLI smoke loads the package root (`-e .`) so it exercises `pi.extensions` resolution; the interactive terminal smoke loads `src/index.ts` by path.
+- `--list-models` alone does not prove an extension loaded, because Pi also reports models from its own store. Assert a load-specific side effect instead.
 
 ## Release And Packaging
 
