@@ -445,6 +445,33 @@ describe("discovery, store, and offline read parity", () => {
     expect(single[0]).toMatchObject({ reasoning: true, contextWindow: 272_000 });
   });
 
+  it("rehydrates an evidence-free /health route unchanged", async () => {
+    // `/health` route text is not authorized for later re-enrichment, so its marker
+    // must be the permanent one and a store round trip must be a no-op.
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.endsWith("/model/info") || url.endsWith("/v1/models")) return new Response(null, { status: 404 });
+      if (url.endsWith("/health")) return json({ healthy_endpoints: [{ model: "totally-unknown-route" }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const modelsStore = store();
+
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    expect(discoveredModels[0]?.name).toBe("totally-unknown-route (incomplete metadata)");
+    expect(discoveredModels[0]?.name).not.toContain(" (no metadata)");
+
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
+  });
+
   it("still enriches an evidence-free /v1/models fallback model from the cache", async () => {
     // The distinction has to cut both ways: the fallback sentinel keeps working.
     const value = controller();

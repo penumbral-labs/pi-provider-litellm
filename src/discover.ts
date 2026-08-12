@@ -503,7 +503,8 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // `/health` route text is not deployment evidence for request controls.
+  // A thinking-level map is a per-generation control, and `/health` supplies only
+  // route text for it. Other catalog metadata on this path is unchanged.
   if (model) delete model.thinkingLevelMap;
   return model;
 }
@@ -514,10 +515,13 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
   const catalogModel = findCatalogModel(id);
   return {
     id,
-    name: catalogModel?.name ?? id,
+    // `/health` route text is never authorized for later cache re-enrichment, so
+    // an unresolved route is marked permanently rather than borrowing the
+    // `/v1/models` sentinel or presenting unknown cost as free.
+    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
     reasoning: catalogModel?.reasoning ?? false,
-    // `/health` route text is not deployment evidence for request controls, so
-    // no thinking/reasoning selector is derived from it on this path either.
+    // A thinking-level map is a per-generation control, and route text is the only
+    // input here, so no map is derived. Other catalog metadata is unchanged.
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,

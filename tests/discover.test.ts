@@ -1602,11 +1602,59 @@ describe("discoverModels fallback to /health", () => {
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
     expect(result.models[1]).toMatchObject({
-      name: "anthropic/claude-3-5-sonnet",
+      // Neither route resolves in the Pi catalog, so both are evidence-free and
+      // must say so rather than presenting default limits and zero cost as fact.
+      name: "anthropic/claude-3-5-sonnet (incomplete metadata)",
       contextWindow: 128000,
       maxTokens: 16384,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
+    expect(result.models[0]?.name).toBe("azure/gpt-35-turbo (incomplete metadata)");
+  });
+
+  it("marks evidence-free health routes and leaves catalog-resolved ones plain", async () => {
+    // `/health` route text is never authorized for later cache re-enrichment, so an
+    // unresolved route carries the permanent marker rather than the `/v1/models`
+    // sentinel. A route the catalog resolves has real metadata and stays plain.
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [{ model: "totally-unknown-route" }, { model: "anthropic/claude-opus-4-7" }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    const [unresolved, resolved] = result.models;
+    expect(unresolved).toMatchObject({
+      id: "totally-unknown-route",
+      name: "totally-unknown-route (incomplete metadata)",
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+    expect(unresolved?.name).not.toContain(" (no metadata)");
+    expect(resolved?.name).toBe("Claude Opus 4.7");
+    expect(resolved?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("marks an unresolved health route reached through per-endpoint /model/info", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-1": () => jsonResponse(200, { data: [{ model_info: { mode: "chat" } }] }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, { healthy_endpoints: [{ model: "vertex/claude-sonnet", model_id: "uuid-1" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]?.name).toBe("vertex/claude-sonnet (incomplete metadata)");
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 });
 
