@@ -8,7 +8,7 @@ import type {
   ProviderModelsStore,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
 
 const ENV_KEYS = [
@@ -138,6 +138,12 @@ async function loginOAuth(
     ),
   );
 }
+
+// Clear before as well as restore after: an afterEach-only policy leaves the
+// first test in the file reading the developer's ambient environment.
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
+});
 
 afterEach(() => {
   for (const key of ENV_KEYS) {

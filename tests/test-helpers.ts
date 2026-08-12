@@ -1,6 +1,42 @@
 import { readFileSync } from "node:fs";
 import type { Provider } from "@earendil-works/pi-ai";
-import { vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+
+// Every environment variable src/ reads. Tests that assert credential or discovery
+// behavior must start from a known-empty environment, not from the developer's
+// shell, and must not leak into the next test.
+export const MANAGED_ENV_VARS = [
+  "LITELLM_API_KEY",
+  "LITELLM_API_KEY_HELPER",
+  "LITELLM_BASE_URL",
+  "LITELLM_HEADERS",
+  "LITELLM_MODELS_DEV",
+  "LITELLM_OFFLINE",
+  "LITELLM_DISCOVERY_TIMEOUT_MS",
+  "LITELLM_VERBOSE_DISCOVERY",
+  "LITELLM_GCLOUD_TOKEN_AUTH",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "APPDATA",
+] as const;
+
+// Snapshots and clears the managed variables before each test and restores the
+// original values afterwards, so a result never depends on ambient environment or
+// on which test ran first in the file.
+export function useHermeticEnv(): void {
+  let saved: Array<[string, string | undefined]> = [];
+
+  beforeEach(() => {
+    saved = MANAGED_ENV_VARS.map((name) => [name, process.env[name]]);
+    for (const name of MANAGED_ENV_VARS) delete process.env[name];
+  });
+
+  afterEach(() => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+}
 
 type TestCommandContext = {
   ui: {
