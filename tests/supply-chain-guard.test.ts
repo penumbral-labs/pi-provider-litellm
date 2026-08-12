@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,6 +153,71 @@ describe("supply-chain guard", () => {
       expect(result.ok).toBe(false);
       expect(result.errors).toContain("npm package: unexpected published file dist/index.js");
       expect(result.errors).toContain("npm package: unexpected published file dist/index.d.ts");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it.for([
+    ["an empty files list", [] as string[]],
+    ["a misspelled files entry", ["scr", "README.md", "LICENSE"]],
+  ] as const)("rejects %s that ships no source", async ([, files]) => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-nosrc-"));
+
+    try {
+      await writeFixturePackage(fixture, [...files], [{ path: "src/index.ts" }]);
+
+      const result = await checkSupplyChain(fixture);
+
+      expect(result.ok).toBe(false);
+      expect(result.errors).toContain("npm package: required published file src/index.ts is missing");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it.for(["prepack", "postpack", "prepublish", "prepare", "postinstall"] as const)(
+    "rejects an automatic %s lifecycle hook",
+    async (hook) => {
+      const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-hook-"));
+
+      try {
+        await writeFixturePackage(
+          fixture,
+          ["src", "README.md", "LICENSE"],
+          allowedSourceModules.map((module) => ({ path: `src/${module}.ts` })),
+        );
+        const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as Record<string, unknown>;
+        manifest.scripts = { [hook]: "node inject.js" };
+        await writeFile(join(fixture, "package.json"), JSON.stringify(manifest, null, 2));
+
+        const result = await checkSupplyChain(fixture);
+
+        expect(result.ok).toBe(false);
+        expect(result.errors).toContain(`package.json: scripts.${hook} runs during package installation`);
+      } finally {
+        await rm(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("accepts prepublishOnly as an explicit verification command", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-verify-"));
+
+    try {
+      await writeFixturePackage(
+        fixture,
+        ["src", "README.md", "LICENSE"],
+        allowedSourceModules.map((module) => ({ path: `src/${module}.ts` })),
+      );
+      const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as Record<string, unknown>;
+      manifest.scripts = { prepublishOnly: "npm run check" };
+      await writeFile(join(fixture, "package.json"), JSON.stringify(manifest, null, 2));
+
+      const result = await checkSupplyChain(fixture);
+
+      expect(result.errors).toEqual([]);
+      expect(result.ok).toBe(true);
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }

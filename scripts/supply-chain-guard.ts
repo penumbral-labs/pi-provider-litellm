@@ -7,7 +7,20 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const installLifecycleScripts = new Set(["preinstall", "install", "postinstall", "prepare"]);
+// Hooks npm runs automatically during install or packing. Any of these can mutate the
+// tarball or the consumer's machine without the guard observing it, because the guard
+// inspects `npm pack --dry-run --ignore-scripts`. `prepublishOnly` is deliberately
+// absent: it runs only on an explicit publish and is this package's verification
+// command, not a packaging mutation hook.
+const installLifecycleScripts = new Set([
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepare",
+  "prepack",
+  "postpack",
+  "prepublish",
+]);
 const runtimeDependencySections = new Set([
   "dependencies",
   "optionalDependencies",
@@ -185,7 +198,18 @@ async function listPackageFiles(root: string, errors: string[]): Promise<string[
   }
 }
 
+// The allowlist bounds what may ship; this bounds what must. Without it a `files` typo
+// publishes a package with no source at all and the guard reports success, because it
+// only ever inspects files that are present.
+function checkRequiredPackageFiles(files: string[], errors: string[]): void {
+  const present = new Set(files);
+  for (const required of ["package.json", "README.md", "LICENSE", ...allowedSourceModules.map((m) => `src/${m}.ts`)]) {
+    if (!present.has(required)) errors.push(`npm package: required published file ${required} is missing`);
+  }
+}
+
 function checkPackageFiles(files: string[], errors: string[]): void {
+  checkRequiredPackageFiles(files, errors);
   for (const file of files) {
     if (!allowedPackageFiles.some((pattern) => pattern.test(file))) {
       errors.push(`npm package: unexpected published file ${file}`);
