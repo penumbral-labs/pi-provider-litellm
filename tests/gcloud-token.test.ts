@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CACHE_TTL_MS, getGcloudToken, hasGcloudAdcCredentials, resetGcloudTokenCache } from "../src/gcloud-token.js";
 
 const ORIGINAL_ENV = {
@@ -23,6 +23,12 @@ async function writeAdcFile(body: unknown): Promise<string> {
   await writeFile(path, JSON.stringify(body), "utf8");
   return path;
 }
+
+// Clear before as well as restore after: the first test in the file would otherwise read
+// the developer's real ADC location through GOOGLE_APPLICATION_CREDENTIALS or HOME.
+beforeEach(() => {
+  for (const key of Object.keys(ORIGINAL_ENV)) delete process.env[key];
+});
 
 afterEach(() => {
   for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
