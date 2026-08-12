@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCacheKey, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { CACHE_TTL_MS, getGcloudToken, hasGcloudAdcCredentials, resetGcloudTokenCache } from "../src/gcloud-token.js";
 
 const ORIGINAL_ENV = {
   APPDATA: process.env.APPDATA,
@@ -43,8 +43,25 @@ describe("getGcloudToken", () => {
     });
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    await expect(getGcloudTokenCacheKey()).resolves.toContain("gcloud-adc:authorized_user:client-id");
+    await expect(hasGcloudAdcCredentials()).resolves.toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.for([
+    ["blank client_id", { client_id: "", client_secret: "secret", refresh_token: "refresh" }],
+    ["blank client_secret", { client_id: "id", client_secret: "", refresh_token: "refresh" }],
+    ["blank refresh_token", { client_id: "id", client_secret: "secret", refresh_token: "" }],
+  ] as const)("rejects an authorized_user ADC file with a %s", async ([, fields]) => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({ type: "authorized_user", ...fields });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(hasGcloudAdcCredentials()).resolves.toBe(false);
+    await expect(getGcloudToken()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "LiteLLM gcloud auth: authorized_user ADC file is missing client_id, client_secret, or refresh_token.",
+    );
   });
 
   it("exchanges authorized_user ADC credentials for an access token", async () => {

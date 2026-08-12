@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -25,12 +26,19 @@ interface ServiceAccountCredentials {
 
 type GoogleCredentials = AuthorizedUserCredentials | ServiceAccountCredentials | { type?: string };
 
+// Empty strings are rejected: an ADC file whose fields are present but blank parses
+// cleanly, cannot mint a token, and must not be reported as a usable credential.
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 function isAuthorizedUserCredentials(credentials: GoogleCredentials): credentials is AuthorizedUserCredentials {
+  const candidate = credentials as Partial<AuthorizedUserCredentials>;
   return (
     credentials.type === "authorized_user" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_id === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_secret === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).refresh_token === "string"
+    isNonEmptyString(candidate.client_id) &&
+    isNonEmptyString(candidate.client_secret) &&
+    isNonEmptyString(candidate.refresh_token)
   );
 }
 
@@ -49,11 +57,16 @@ function getAdcPath(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
-function getCredentialsCacheKey(credentials: GoogleCredentials): string | null {
-  if (isAuthorizedUserCredentials(credentials)) {
-    return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${credentials.client_id}:${credentials.refresh_token}`;
-  }
-  return null;
+// Identifies the credential without retaining it. The refresh token participates so
+// that re-running `gcloud auth application-default login` invalidates the cached
+// access token, but it is hashed so no caller and no heap-resident cache entry holds
+// reversible credential material.
+function getCredentialsCacheKey(credentials: AuthorizedUserCredentials): string {
+  const fingerprint = createHash("sha256")
+    .update(`${credentials.client_id}\u0000${credentials.refresh_token}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${fingerprint}`;
 }
 
 async function readCredentials(path: string): Promise<GoogleCredentials | null> {
@@ -99,15 +112,11 @@ async function resolveAuthorizedUserAdc(): Promise<AuthorizedUserCredentials | n
   return null;
 }
 
-export async function getGcloudTokenCacheKey(): Promise<string | null> {
-  const credentials = await resolveAuthorizedUserAdc();
-  return credentials ? getCredentialsCacheKey(credentials) : null;
-}
-
-// Availability predicate for callers that must not handle the refresh-token-bearing
-// cache key. Emits the same diagnostics as the token path, so a rejected credential
-// is never silently reported as configured.
-export async function hasUsableGcloudAdc(): Promise<boolean> {
+// Reports whether a complete `authorized_user` ADC file is present, emitting the same
+// diagnostics as the token path. This is a check on credential *shape*: whether the
+// refresh token is still honored by Google is only knowable at mint time, and
+// `apiKey.check` deliberately performs no network call.
+export async function hasGcloudAdcCredentials(): Promise<boolean> {
   return (await resolveAuthorizedUserAdc()) !== null;
 }
 
@@ -147,8 +156,7 @@ export async function getGcloudToken(): Promise<string | null> {
   if (!credentials) return null;
 
   const cacheKey = getCredentialsCacheKey(credentials);
-  if (cacheKey && cachedToken && cachedTokenKey === cacheKey && Date.now() - cachedAt < CACHE_TTL_MS)
-    return cachedToken;
+  if (cachedToken && cachedTokenKey === cacheKey && Date.now() - cachedAt < CACHE_TTL_MS) return cachedToken;
 
   const token = await exchangeRefreshToken(credentials);
   if (token) {
