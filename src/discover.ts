@@ -90,9 +90,19 @@ export function isGpt55Model(modelId: string): boolean {
 // The Moonshot request/display conclusions travel together on the model so the
 // request and `message_end` hooks read the same discovered evidence instead of
 // each re-deriving a backend from the route name.
-export function moonshotPolicy(modelId: string): LiteLLMModelPolicy {
+// The two repairs are decided separately because they are not equally safe.
+//
+// `normalizeThinkTags` runs in `message_end`, after the response, and provably
+// cannot alter any outbound field, so it may apply on any Moonshot evidence.
+//
+// `normalizeStrictToolMessages` rewrites outbound assistant and tool messages
+// (`content: null` becomes `""`, tool-result arrays become plain strings). Those
+// are substitutions, not removals, and compatibility with a candidate that has
+// not been identified is unproven — so it needs unanimous evidence of the need,
+// and is otherwise withheld with a diagnostic rather than assumed safe.
+export function moonshotPolicy(modelId: string, strictToolRepair = true): LiteLLMModelPolicy {
   return {
-    normalizeStrictToolMessages: true,
+    normalizeStrictToolMessages: strictToolRepair,
     // A route that always reasons streams reasoning content as its own field
     // rather than inlining `<think>` in the answer, so unwrapping is limited to
     // the generations that inline it.
@@ -559,9 +569,26 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   );
 }
 
+// Withholding a repair a Moonshot deployment demonstrably needs is the safe
+// choice for its unidentified sibling, but it is not a free one: tool calls to
+// the Moonshot deployment can fail. Say so rather than letting the group look
+// fully supported.
+function reportWithheldToolRepair(routes: readonly string[]): void {
+  if (routes.length === 0) return;
+  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(
+    `LiteLLM discovery: ${routes.length} route group(s) look Moonshot-backed but not every deployment evidences ` +
+      `it; strict tool-message repair is withheld because it rewrites outbound messages and is unproven for a ` +
+      `deployment that has not identified its backend. Moonshot tool calls on these routes may fail until every ` +
+      `deployment declares its backend: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
+  withheldRepairRoutes?: string[],
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
@@ -586,6 +613,15 @@ function mapFromModelInfoGroup(
   // block, so the common case is unchanged. Route text is consulted only when no
   // deployment identified a family at all.
   const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
+  // Every routable deployment evidences Moonshot: the outbound rewrite is needed
+  // by all of them, so there is no candidate it could be wrong for.
+  const unanimousMoonshot =
+    reduced.deploymentFamilies.length > 0 && reduced.deploymentFamilies.every((family) => family === "kimi");
+  const moonshotEvidence = reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id));
+  // Withheld whenever the need is not unanimous — including a group where no
+  // deployment identifies a backend at all, where the route name alone is not
+  // explicit need for an outbound rewrite.
+  if (moonshotEvidence && !unanimousMoonshot) withheldRepairRoutes?.push(reduced.id);
   const vendorCompat = unlabeled
     ? buildCompat(reduced.id, reduced.semanticFamily)
     : meetVendorCompat(
@@ -620,13 +656,11 @@ function mapFromModelInfoGroup(
     // check is a route-id pattern, and no semantic label can ever match it, so
     // passing a label made the exemption unreachable and split the display
     // conclusion by discovery source for one route.
-    // Tool-message repair and `<think>` unwrapping are message-shape repairs that
-    // are no-ops against a non-Moonshot backend, so a deployment evidencing
-    // Moonshot keeps them even when a sibling is unlabeled. Route text is evidence
-    // only when no deployment identified a family.
-    ...(reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id))
-      ? { litellmPolicy: moonshotPolicy(reduced.id) }
-      : {}),
+    // The two repairs are decided separately. `<think>` unwrapping is response-only
+    // and cannot change the request, so any Moonshot evidence is enough. Strict
+    // tool-message repair rewrites outbound messages, so it needs every routable
+    // deployment to evidence the need; a mixed group withholds it and says so.
+    ...(moonshotEvidence ? { litellmPolicy: moonshotPolicy(reduced.id, unanimousMoonshot) } : {}),
   };
 }
 
@@ -782,10 +816,12 @@ export async function discoverModels(
       groups.set(entry.model_name, group);
     }
     const ambiguousRoutes: string[] = [];
+    const withheldRepairRoutes: string[] = [];
     let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes, withheldRepairRoutes))
       .filter((m): m is DiscoveredModel => m !== undefined);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
+    reportWithheldToolRepair(withheldRepairRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in

@@ -224,10 +224,41 @@ describe("native provider stream compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
   });
 
+  // Strict tool-message repair rewrites outbound messages, so it is applied only
+  // when every routable deployment evidences the Moonshot need. These cases prove
+  // the wire is left untouched otherwise — a route name or a single Moonshot
+  // sibling is not proof that an unidentified deployment tolerates the rewrite.
   it.each([
-    { source: "/model/info", rows: [{ model_name: "kimi-k3", model_info: { mode: "chat" } }] },
-    { source: "/model/info fallback", rows: [{ model_name: "moonshotai/kimi-k2", model_info: { mode: "chat" } }] },
-  ])("applies discovery-driven strict repair from $source for evidence-free Kimi routes", async ({ rows }) => {
+    {
+      source: "route text only",
+      rows: [{ model_name: "kimi-k3", model_info: { mode: "chat" } }],
+      repaired: false,
+    },
+    {
+      source: "a Moonshot deployment beside an unidentified one",
+      rows: [
+        { model_name: "mixed", litellm_params: { model: "moonshot/kimi-k2.6" }, model_info: { id: "a", mode: "chat" } },
+        { model_name: "mixed", litellm_params: { model: "azure_ai/opaque" }, model_info: { id: "b", mode: "chat" } },
+      ],
+      repaired: false,
+    },
+    {
+      source: "every deployment evidencing Moonshot",
+      rows: [
+        {
+          model_name: "unanimous",
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+          model_info: { id: "a", mode: "chat" },
+        },
+        {
+          model_name: "unanimous",
+          litellm_params: { model: "moonshot/kimi-k3" },
+          model_info: { id: "b", mode: "chat" },
+        },
+      ],
+      repaired: true,
+    },
+  ])("repairs strict tool messages only with $source", async ({ rows, repaired }) => {
     const { models, model, requests, respond } = await createCompatibilityHarness(rows);
     respond(...successfulResponse("ok"));
 
@@ -264,8 +295,14 @@ describe("native provider stream compatibility", () => {
       })
       .result();
 
-    expect(model).toMatchObject({ litellmPolicy: { normalizeStrictToolMessages: true } });
-    expect(requests[0]?.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "" }));
+    expect(model).toMatchObject({ litellmPolicy: { normalizeStrictToolMessages: repaired } });
+    const assistant = requests[0]?.messages?.find((message) => message.role === "assistant");
+    const toolResult = requests[0]?.messages?.find((message) => message.role === "tool");
+    // Measured: the repair's only outbound effect is the assistant `content`
+    // field. pi-ai already flattens tool-result arrays to a string on its own, so
+    // that half of the repair is a wire no-op and is unaffected either way.
+    expect(toolResult).toMatchObject({ content: "result" });
+    expect(assistant?.content).toBe(repaired ? "" : null);
   });
 
   it.each([
@@ -632,5 +669,73 @@ describe("advertised levels serialize on both APIs", () => {
       // standard level upstream.
       expect(model.reasoning ? model.thinkingLevelMap : {}).toBeDefined();
     }
+  });
+});
+
+// Decision 1 is pinned from both directions so it cannot be inverted silently.
+// `supportsDeveloperRole` is a substitution, not a removal, and withholding it is
+// NOT neutral: pi-ai's litellm detection emits `developer`, which an evidenced
+// Moonshot deployment rejects. Applying `false` selects the broadly compatible
+// `system` role. Both arms are asserted on the real wire.
+describe("developer-role decision is pinned in both directions", () => {
+  const systemPromptContext = { messages: [user("hi")], systemPrompt: "sys" } as never;
+
+  it("sends system when a deployment evidences Moonshot", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "kimi-route",
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+        model_info: { id: "d1", mode: "chat" },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, systemPromptContext).result();
+
+    expect(model.compat).toMatchObject({ supportsDeveloperRole: false });
+    expect(requests[0]?.messages?.[0]).toMatchObject({ role: "system" });
+    expect(requests[0]?.messages?.map((message) => message.role)).not.toContain("developer");
+  });
+
+  it("still sends system when only one deployment evidences Moonshot", async () => {
+    // The discriminating arm. A single-deployment route is unanimous, so it cannot
+    // tell apply-if-any from unanimity-required; only a mixed group can. Demoting
+    // this field to unanimity would emit `developer` to the Moonshot deployment.
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "mixed-role-route",
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+        model_info: { id: "a", mode: "chat" },
+      },
+      {
+        model_name: "mixed-role-route",
+        litellm_params: { model: "azure_ai/opaque-sibling" },
+        model_info: { id: "b", mode: "chat" },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, systemPromptContext).result();
+
+    expect(model.compat).toMatchObject({ supportsDeveloperRole: false });
+    expect(requests[0]?.messages?.[0]).toMatchObject({ role: "system" });
+    expect(requests[0]?.messages?.map((message) => message.role)).not.toContain("developer");
+  });
+
+  it("sends developer when nothing evidences Moonshot, which is why withholding is not neutral", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "plain-route",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { id: "d1", mode: "chat", supports_reasoning: true },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, systemPromptContext).result();
+
+    // The absence of the field is itself an assertion: pi-ai emits `developer`.
+    expect(model.compat).not.toHaveProperty("supportsDeveloperRole");
+    expect(requests[0]?.messages?.[0]).toMatchObject({ role: "developer" });
   });
 });

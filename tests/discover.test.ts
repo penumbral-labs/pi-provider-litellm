@@ -769,15 +769,17 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).not.toHaveProperty("litellmPolicy");
   });
 
-  it("preserves route-text Kimi strict repair only when deployment evidence is absent", async () => {
+  it("withholds route-text Kimi strict repair and keeps only the response-side repair", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { data: [{ model_name: "kimi-k2.6", model_info: { mode: "chat" } }] }),
     );
 
     const evidenceFree = await discoverModels("https://litellm.example.com", "sk-test", {});
+    // A route name is not explicit need for rewriting outbound messages, so the
+    // request-side repair is withheld while the response-only one survives.
     expect(evidenceFree.models[0]?.litellmPolicy).toEqual({
-      normalizeStrictToolMessages: true,
+      normalizeStrictToolMessages: false,
       normalizeThinkTags: true,
     });
 
@@ -2206,18 +2208,21 @@ describe("more evidence never produces a less safe request", () => {
       name: "every deployment identifies Moonshot",
       backends: ["azure_ai/kimi-k2.6-east", "azure_ai/kimi-k2.6-west"],
       mixed: false,
+      unanimousKimi: true,
     },
     {
       name: "only one deployment identifies Moonshot",
       backends: ["azure_ai/kimi-k2.6-east", "azure_ai/k26-prod"],
       mixed: true,
+      unanimousKimi: false,
     },
     {
       name: "no deployment identifies anything",
       backends: ["azure_ai/k26-prod-east", "azure_ai/k26-prod-west"],
       mixed: false,
+      unanimousKimi: false,
     },
-  ])("meets vendor policy per field when $name", async ({ backends, mixed }) => {
+  ])("meets vendor policy per field when $name", async ({ backends, mixed, unanimousKimi }) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: kimiGroup(backends) }));
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
@@ -2231,7 +2236,10 @@ describe("more evidence never produces a less safe request", () => {
     // disappear because a sibling is unlabeled, and no level may be advertised
     // that the group cannot carry — in every mixture.
     expect(offered).toEqual([]);
-    expect(model?.litellmPolicy).toEqual(moonshotPolicy("kimi-k2.6"));
+    // Response-side repair always survives Moonshot evidence; the outbound
+    // rewrite requires every deployment to evidence the need.
+    expect(model?.litellmPolicy?.normalizeThinkTags).toBe(true);
+    expect(model?.litellmPolicy?.normalizeStrictToolMessages).toBe(unanimousKimi);
     expect(model?.compat).toMatchObject({ supportsReasoningEffort: false, supportsStrictMode: false });
     if (mixed) {
       // Shape-changing fields have no safe common value once a candidate is
