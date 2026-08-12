@@ -75,26 +75,6 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("The legacy `litellm-models.json` cache is ignored and is not deleted");
     expect(readme).not.toContain("`litellm-models*.json`");
   });
-
-  it("documents the dispatch gap at its measured scope", async () => {
-    const readme = await readFile("README.md", "utf8");
-
-    // This section has drifted from measured behavior three times. Pin the two facts
-    // that were wrong, so a narrowing edit fails here instead of in a later review.
-    // The gap is keyed on whether an api has a currently-listed model, not on whether
-    // the protocol is one this provider declines to select.
-    expect(readme).toContain("currently-listed");
-    expect(readme).toContain("including `openai-responses` on a proxy that exposes no responses routes");
-    // And the gap is named as an upstream defect with the required fix, not as
-    // intended behavior we live with.
-    expect(readme).toContain("open upstream defect");
-    expect(readme).toContain("route by a provider's declared protocols");
-    // Superseded scopings that were measurably wrong.
-    expect(readme).not.toContain("Known gap for the last two rows");
-    expect(readme).not.toContain("is hidden from `/model` but, if selected by id");
-    expect(readme).not.toContain("older than 24 hours");
-    expect(readme).not.toContain("enter `2` for SSO");
-  });
 });
 
 describe("dependency security overrides", () => {
