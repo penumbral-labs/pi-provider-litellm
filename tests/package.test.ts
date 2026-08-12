@@ -181,23 +181,32 @@ describe("pi package compatibility", () => {
 
   it("keeps source runtime imports loader-provided or built-in", async () => {
     const sourceDir = join(repoRoot, "src");
-    const sourceFiles = (await readdir(sourceDir)).filter((file) => file.endsWith(".ts"));
+    const sourceFiles = (await readdir(sourceDir, { recursive: true })).filter((file) => file.endsWith(".ts"));
     const imports = await Promise.all(
       sourceFiles.map(async (file) => [file, importSpecifiers(await readFile(join(sourceDir, file), "utf8"))] as const),
     );
 
+    // A scanner bug that returned nothing would make `every` vacuously true, so require
+    // that the scan actually found the imports this package is built from. The oracle
+    // itself is pinned by tests/import-specifiers.test.ts.
+    expect(sourceFiles.length).toBeGreaterThan(0);
+    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(sourceFiles.length);
+
+    const allowed = new Set([
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-ai/compat",
+      "@earendil-works/pi-ai/providers/all",
+      "@earendil-works/pi-coding-agent",
+    ]);
     for (const [file, specifiers] of imports) {
-      expect(specifiers, file).toSatisfy((values: string[]) =>
-        values.every(
-          (specifier) =>
-            specifier.startsWith("node:") ||
-            specifier.startsWith("./") ||
-            specifier === "@earendil-works/pi-ai" ||
-            specifier === "@earendil-works/pi-ai/compat" ||
-            specifier === "@earendil-works/pi-ai/providers/all" ||
-            specifier === "@earendil-works/pi-coding-agent",
-        ),
-      );
+      for (const specifier of specifiers) {
+        // UNVERIFIABLE_SPECIFIER lands here too: a computed `import()` cannot be shown to
+        // resolve to something the loader provides, so it fails the contract by default.
+        expect(
+          specifier.startsWith("node:") || specifier.startsWith("./") || allowed.has(specifier),
+          `${file}: ${specifier}`,
+        ).toBe(true);
+      }
     }
   });
 
