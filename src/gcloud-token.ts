@@ -26,19 +26,20 @@ interface ServiceAccountCredentials {
 
 type GoogleCredentials = AuthorizedUserCredentials | ServiceAccountCredentials | { type?: string };
 
-// Empty strings are rejected: an ADC file whose fields are present but blank parses
-// cleanly, cannot mint a token, and must not be reported as a usable credential.
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+// Blank fields are rejected: an ADC file whose fields are present but empty or
+// whitespace parses cleanly, cannot mint a token, and must not be reported as a usable
+// credential.
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isAuthorizedUserCredentials(credentials: GoogleCredentials): credentials is AuthorizedUserCredentials {
   const candidate = credentials as Partial<AuthorizedUserCredentials>;
   return (
     credentials.type === "authorized_user" &&
-    isNonEmptyString(candidate.client_id) &&
-    isNonEmptyString(candidate.client_secret) &&
-    isNonEmptyString(candidate.refresh_token)
+    isNonBlankString(candidate.client_id) &&
+    isNonBlankString(candidate.client_secret) &&
+    isNonBlankString(candidate.refresh_token)
   );
 }
 
