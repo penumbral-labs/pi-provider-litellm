@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
+import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
+
+useHermeticEnv();
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -35,12 +37,6 @@ async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSi
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
-  delete process.env.LITELLM_BASE_URL;
-  delete process.env.LITELLM_API_KEY;
-  delete process.env.LITELLM_HEADERS;
-  delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
-  delete process.env.LITELLM_GCLOUD_TOKEN_AUTH;
-  delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
 });
 
 const VALID_ADC = {
@@ -69,9 +65,17 @@ async function setupAdcProvider(adc: unknown | undefined): Promise<{
   await extension(pi);
   const ctx = { env: async (name: string) => process.env[name], fileExists: async () => false };
 
+  // Without these, `pi.providers[0]?.auth...?.()` yields undefined when registration
+  // never happened -- the same value the negative cases assert, so they would pass
+  // against a provider that was never registered at all.
+  const provider = pi.providers[0];
+  expect(pi.providers).toHaveLength(1);
+  expect(typeof provider?.auth.apiKey?.check).toBe("function");
+  expect(typeof provider?.auth.apiKey?.resolve).toBe("function");
+
   return {
-    check: async () => pi.providers[0]?.auth.apiKey?.check?.({ ctx }),
-    resolve: async () => pi.providers[0]?.auth.apiKey?.resolve?.({ ctx }),
+    check: async () => provider?.auth.apiKey?.check?.({ ctx }),
+    resolve: async () => provider?.auth.apiKey?.resolve?.({ ctx }),
   };
 }
 
@@ -89,8 +93,6 @@ describe("gcloud ADC provider auth", () => {
     await expect(provider.check()).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
     const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
     expect(resolved.auth.apiKey).toBe("ya29.minted");
-    // The deleted `!command` delivery would have produced a shell string here.
-    expect(resolved.auth.apiKey.startsWith("!")).toBe(false);
     expect(resolved.source).toBe("gcloud ADC");
   });
 
