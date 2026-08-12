@@ -1460,4 +1460,48 @@ describe("multi-provider hardening", () => {
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-obj"));
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-null"));
   });
+
+  it("reports an empty catalog again after a refresh that registered tools", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    let listCalls = 0;
+    const catalogs: unknown[][] = [
+      [],
+      [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+      [],
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        const tools = catalogs[Math.min(listCalls, catalogs.length - 1)] ?? [];
+        listCalls += 1;
+        return jsonResponse(200, { tools });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await extension(pi);
+
+    const refresh = (host: string) =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: `https://${host}` } },
+        signal: new AbortController().signal,
+      });
+
+    // Distinct hosts so each refresh performs a pass rather than short-circuiting on the identity.
+    await refresh("a.example.com");
+    await refresh("b.example.com");
+    await refresh("c.example.com");
+
+    const emptyLines = stderr.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("no MCP tools were registered"));
+    // Reported, cleared by the successful pass, then reported again — not suppressed as unchanged.
+    expect(emptyLines).toHaveLength(2);
+  });
 });

@@ -21,6 +21,7 @@ const MAX_DETAIL_BYTES = 256;
 const MAX_ERROR_WALK_DEPTH = 16;
 const MAX_DIAGNOSTIC_SAMPLES = 5;
 const MAX_DIAGNOSTIC_CAUSE_BYTES = 200;
+const MAX_DIAGNOSTIC_LABEL_BYTES = 96;
 const TRUNCATION_MARKER = "\n[truncated by pi-provider-litellm]";
 const DESCRIPTION_TRUNCATION_MARKER = "… [truncated]";
 const SHORT_TRUNCATION_MARKER = "…";
@@ -54,7 +55,7 @@ export type McpIncidentReason = McpDropReason | McpDegradeReason;
 
 const DROP_REASON_TEXT: Readonly<Record<McpDropReason, string>> = {
   "invalid-tool": "a missing name or server identity",
-  "duplicate-identity": "duplicate identities",
+  "duplicate-identity": "a repeated identity (the first occurrence of each is the one registered)",
   "invalid-schema": "an invalid or oversized input schema",
   "name-collision": "a colliding generated Pi name",
 };
@@ -71,9 +72,10 @@ const INCIDENT_REASON_TEXT: Readonly<Record<McpIncidentReason, string>> = {
 export interface McpPreparationReport {
   // Raw tool entries the proxy returned, before any normalization.
   discovered: number;
-  // Tools registered with the schema the proxy supplied.
+  // Tools that will be registered, whatever parameter shape they ended up with.
   prepared: number;
-  // Of `prepared`, how many carry the extension-owned envelope instead of the proxy's schema.
+  // Of `prepared`, how many carry the extension-owned envelope rather than a proxy-supplied schema.
+  // Includes both the schemaless path and hazard degradations; `degraded` counts only the latter.
   enveloped: number;
   // Tools discarded because the registered-tool cap was reached.
   overflow: number;
@@ -144,8 +146,14 @@ export function reportMcpRegistrationFatal(registered: number, attempted: number
   );
 }
 
-// Reports a discovery that yielded no registrable tool, so the silence is explained.
-export function reportMcpEmptyCatalog(raw: number): void {
+// Reports a discovery that yielded no registrable tool, so the silence is explained. A pass that did
+// register something clears the incident, so a later recurrence is reported rather than suppressed as
+// an unchanged message.
+export function reportMcpCatalogOutcome(raw: number, registered: number): void {
+  if (registered > 0) {
+    clearIncident("empty-catalog");
+    return;
+  }
   emitSafetyDiagnostic(
     "empty-catalog",
     `no MCP tools were registered from ${plural(raw, "raw entry", "raw entries")} returned by the proxy.`,
@@ -247,9 +255,12 @@ function invalidToolLabel(value: unknown, index: number): string {
   const server = raw
     ? (stringValue(raw.mcp_info?.server_name) ?? stringValue(raw.server_name) ?? stringValue(raw.server_id))
     : undefined;
-  if (name && server) return `${sanitizeName(server)}_${sanitizeName(name)}`;
-  if (name) return `unknown_server_${sanitizeName(name)}`;
-  if (server) return `${sanitizeName(server)}_unnamed`;
+  // Sanitizing the charset is not enough: a proxy can supply a megabyte-long name and this label is
+  // printed to stderr. Bound it like every other untrusted string in this module.
+  const bounded = (value: string): string => truncateUtf8(value, MAX_DIAGNOSTIC_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
+  if (name && server) return bounded(`${sanitizeName(server)}_${sanitizeName(name)}`);
+  if (name) return bounded(`unknown_server_${sanitizeName(name)}`);
+  if (server) return bounded(`${sanitizeName(server)}_unnamed`);
   return `entry_${index}`;
 }
 
@@ -281,7 +292,16 @@ export async function discoverMcpTools(
     }
     const body = parseJson(await readBoundedText(response, MAX_DISCOVERY_BODY_BYTES, "MCP discovery"), "MCP discovery");
     const bodyRecord = asRecord(body);
-    const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : [];
+    // An unrecognized body shape is not the same as an empty catalog, and reporting it as "0 raw
+    // entries" would send an operator looking at the wrong thing.
+    const rawTools = Array.isArray(body)
+      ? body
+      : Array.isArray(bodyRecord?.tools)
+        ? bodyRecord.tools
+        : bodyRecord !== undefined && !("tools" in bodyRecord)
+          ? []
+          : undefined;
+    if (rawTools === undefined) throw new Error("MCP discovery returned an unexpected body shape");
     onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
     const tools: LiteLLMMcpTool[] = [];
     const invalid: string[] = [];
@@ -431,6 +451,8 @@ const UNSAFE_REGEX_KEY = "pattern";
 const UNSAFE_REGEX_MAP_KEY = "patternProperties";
 const NONLOCAL_REF_KEYS = ["$dynamicRef", "$recursiveRef"] as const;
 const MAX_SCAN_NODES = 20_000;
+const MAX_REF_HOPS = 32;
+const POINTER_MISSING = Symbol("pointer-missing");
 // Keywords whose immediate children are keyed by *name* rather than by keyword. Inside one of these
 // a key like `patternProperties` is the name of a tool argument, not a constraint, so the keyword
 // checks must not fire on it. This is the only context the scan needs; it does not restrict where
@@ -445,7 +467,57 @@ const NAME_KEYED_KEYWORDS = new Set([
 ]);
 
 // Why a supplied schema could not be proven safe to hand to the validator.
-export type SchemaHazard = "regex" | "nonlocal-ref" | "budget" | "cycle";
+export type SchemaHazard = "regex" | "nonlocal-ref" | "unresolvable-ref" | "ref-cycle" | "budget" | "cycle";
+
+// Resolves a JSON pointer fragment against the supplied document. Returns POINTER_MISSING rather
+// than undefined so that a target whose value genuinely is `undefined` cannot be mistaken for a hit.
+function resolvePointer(root: unknown, fragment: string): unknown {
+  if (fragment === "") return root;
+  // A plain `#name` is an $anchor reference, which cannot be resolved without an anchor index.
+  if (!fragment.startsWith("/")) return POINTER_MISSING;
+  let current: unknown = root;
+  for (const rawToken of fragment.slice(1).split("/")) {
+    const token = rawToken.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (Array.isArray(current)) {
+      const index = Number(token);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return POINTER_MISSING;
+      current = current[index];
+      continue;
+    }
+    const record = asRecord(current);
+    if (!record || !(token in record)) return POINTER_MISSING;
+    current = record[token];
+  }
+  return current;
+}
+
+// Follows a local `#` reference chain and reports whether the validator could actually use it.
+//
+// Covering the whole document proves no regex hides behind a pointer, but it does not prove the
+// pointer names a subschema at all. TypeBox resolves the pointer and then treats whatever it finds
+// as a schema, so `#/description` makes it throw on a string, a mutual `$defs` pair makes it recurse
+// until the stack is gone, and a missing target silently resolves to `false` — a tool that can never
+// validate any argument. Object identity cannot see any of these, because each pointer hop is a
+// different object.
+function findLocalRefHazard(root: Record<string, unknown>, ref: string): SchemaHazard | undefined {
+  const visited = new Set<string>();
+  let pointer = ref;
+  for (;;) {
+    if (visited.has(pointer)) return "ref-cycle";
+    visited.add(pointer);
+    if (visited.size > MAX_REF_HOPS) return "budget";
+    const target = resolvePointer(root, pointer.slice(1));
+    if (target === POINTER_MISSING) return "unresolvable-ref";
+    // A boolean is a valid subschema in its own right.
+    if (typeof target === "boolean") return undefined;
+    const record = asRecord(target);
+    if (!record) return "unresolvable-ref";
+    const next = record.$ref;
+    if (typeof next !== "string") return undefined;
+    if (!next.startsWith("#")) return "nonlocal-ref";
+    pointer = next;
+  }
+}
 
 // Walks the whole untrusted schema graph looking for anything the validator could turn into a
 // regex, plus references we cannot resolve within the document we were given.
@@ -454,8 +526,8 @@ export type SchemaHazard = "regex" | "nonlocal-ref" | "budget" | "cycle";
 // node budget, and identity-based cycle detection. Hitting any bound returns a hazard rather than
 // `undefined`, because an unfinished scan proves nothing.
 //
-// A local `#/...` ref is safe precisely because this walk covers the whole document, so its target
-// has been inspected too. Any other ref form is a hazard.
+// A local `#/...` ref is only accepted when the walk covers its target *and* the target resolves to
+// a usable subschema, with the reference chain proven acyclic. Any other ref form is a hazard.
 export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | undefined {
   const seen = new WeakSet<object>();
   let budget = MAX_SCAN_NODES;
@@ -481,9 +553,13 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
         // or `patternProperties` holding a map whose keys are expressions.
         if (key === UNSAFE_REGEX_KEY && typeof child === "string") return "regex";
         if (key === UNSAFE_REGEX_MAP_KEY && asRecord(child) !== undefined) return "regex";
-        // A local `#/...` pointer is safe because this walk covers the whole document, so its
-        // target has been inspected too. Anything else points outside what we can see.
-        if (key === "$ref" && typeof child === "string" && !child.startsWith("#")) return "nonlocal-ref";
+        // A pointer outside the supplied document cannot be inspected at all. A local one is only
+        // safe if it also resolves to something the validator can use as a schema.
+        if (key === "$ref" && typeof child === "string") {
+          if (!child.startsWith("#")) return "nonlocal-ref";
+          const refHazard = findLocalRefHazard(root, child);
+          if (refHazard) return refHazard;
+        }
         if ((NONLOCAL_REF_KEYS as readonly string[]).includes(key) && typeof child === "string") {
           return "nonlocal-ref";
         }
@@ -621,13 +697,14 @@ export function prepareTools(discovery: McpDiscovery): {
     prepared.push({ ...candidate, name });
   }
 
-  const envelopedNames = degrades.get("schema-envelope") ?? [];
   return {
     prepared,
     report: {
       discovered: discovery.raw,
       prepared: prepared.length,
-      enveloped: envelopedNames.length,
+      // Counting only hazard degradations would tell an operator that schemaless tools have a
+      // Pi-side argument contract when they do not.
+      enveloped: prepared.filter((tool) => tool.syntheticArgsEnvelope).length,
       overflow: accepted.length - candidates.length,
       dropped: [...drops.entries()].map(([reason, tools]) => ({ reason, tools })),
       degraded: [...degrades.entries()].map(([reason, tools]) => ({ reason, tools })),

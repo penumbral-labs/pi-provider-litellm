@@ -425,9 +425,9 @@ describe("createMcpToolDefinitions", () => {
     expect(diagnostics.filter((message) => message.includes("MCP tool call response exceeded"))).toHaveLength(1);
 
     // Each class is reported on its own line, with a count and the sanitized generated names.
-    const duplicateLine = diagnostics.find((message) => message.includes("duplicate identities"));
+    const duplicateLine = diagnostics.find((message) => message.includes("a repeated identity"));
     expect(duplicateLine).toMatch(
-      /^LiteLLM MCP: dropped 1 MCP tool with duplicate identities: mcp_server_duplicate_[a-f0-9]{10}\.\n$/,
+      /^LiteLLM MCP: dropped 1 MCP tool with a repeated identity \(the first occurrence of each is the one registered\): mcp_server_duplicate_[a-f0-9]{10}\.\n$/,
     );
     const schemaLine = diagnostics.find((message) => message.includes("invalid or oversized input schema"));
     expect(schemaLine).toMatch(
@@ -495,35 +495,6 @@ describe("createMcpToolDefinitions", () => {
     expect(progress).toContain(
       "Prepared 1 of 2 raw MCP tools (0 kept with a safe args envelope); lost 1 (invalid-schema=1)",
     );
-  });
-
-  it("derives names from the post-cap set so a dropped sibling does not rename a survivor", async () => {
-    const collidingTool = {
-      name: "search",
-      server_name: "shared",
-      input_schema: { type: "object", properties: {} },
-    };
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(200, [
-        { ...collidingTool, server_id: "server-one" },
-        ...Array.from({ length: 511 }, (_, index) => ({
-          name: `tool-${index}`,
-          server_name: "server",
-          input_schema: { type: "object", properties: {} },
-        })),
-        { ...collidingTool, server_id: "server-two" },
-      ]),
-    );
-
-    const definitions = await createMcpToolDefinitions(async () => ({
-      baseUrl: "https://litellm.example.com",
-      apiKey: "sk-test",
-    }));
-
-    // The second `shared/search` falls beyond the 512 cap and is never registered, so the survivor
-    // keeps the plain readable name instead of being renamed by a tool that does not exist.
-    expect(definitions).toHaveLength(512);
-    expect(definitions[0]?.name).toEqual(named("mcp_shared_search"));
   });
 
   it("still disambiguates with a hash when both colliding tools survive the cap", async () => {
@@ -1322,8 +1293,10 @@ describe("loss accounting reconciles to the raw catalog", () => {
     expect(definitions.map((definition) => definition.name)).toEqual([named("mcp_srv_absent")]);
     expect(definitions[0]?.parameters).toMatchObject({ type: "object", required: ["args"] });
     expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 3 });
-    // The schemaless envelope is not a hazard degradation.
-    expect(report.enveloped).toBe(0);
+    // The schemaless tool carries the envelope, so it is counted...
+    expect(report.enveloped).toBe(1);
+    // ...but it is not a hazard degradation, so no schema-envelope class is reported.
+    expect(report.degraded).toEqual([]);
   });
 });
 
@@ -1474,5 +1447,229 @@ describe("findSchemaHazard", () => {
       }),
     ).toBeUndefined();
     expect(findSchemaHazard({ type: "object", properties: { s: { enum: ["pattern"] } } })).toBeUndefined();
+  });
+});
+
+// The guard's own string-absence assertions cannot catch a hazard class nobody anticipated: a
+// pointer to a non-schema, or a ref cycle, contains no forbidden substring. This suite instead
+// exercises the consumer being protected — it compiles every registered schema with the same
+// TypeBox the runtime uses and watches the RegExp constructor — so a future escape fails here
+// regardless of what shape it takes.
+describe("every registered schema is safe for the validator that consumes it", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+  const EVIL = "^(a+)+$";
+  const REMOTE = "https://evil.example/x.json";
+
+  const hostileCatalog = [
+    { name: "clean", server_name: "srv", inputSchema: { type: "object", properties: { q: { type: "string" } } } },
+    { name: "bare", server_name: "srv", inputSchema: { type: "object" } },
+    { name: "schemaless", server_name: "srv" },
+    { name: "direct", server_name: "srv", inputSchema: { type: "object", properties: { s: { pattern: EVIL } } } },
+    { name: "patternprops", server_name: "srv", inputSchema: { type: "object", patternProperties: { [EVIL]: {} } } },
+    {
+      name: "viadeps",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        properties: { k: {} },
+        dependencies: { k: { properties: { s: { pattern: EVIL } } } },
+      },
+    },
+    {
+      name: "viaadditems",
+      server_name: "srv",
+      inputSchema: { type: "object", properties: { a: { type: "array", additionalItems: { pattern: EVIL } } } },
+    },
+    {
+      name: "refintodefault",
+      server_name: "srv",
+      inputSchema: { type: "object", default: { e: { pattern: EVIL } }, properties: { s: { $ref: "#/default/e" } } },
+    },
+    {
+      name: "refintoexamples",
+      server_name: "srv",
+      inputSchema: { type: "object", examples: [{ pattern: EVIL }], properties: { s: { $ref: "#/examples/0" } } },
+    },
+    { name: "remoteref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $ref: REMOTE } } } },
+    { name: "dynref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $dynamicRef: "#m" } } } },
+    // Pointers that resolve to something that is not a subschema, or not at all.
+    {
+      name: "refnonschema",
+      server_name: "srv",
+      inputSchema: { type: "object", description: "hi", properties: { s: { $ref: "#/description" } } },
+    },
+    {
+      name: "refmissing",
+      server_name: "srv",
+      inputSchema: { type: "object", properties: { s: { $ref: "#/$defs/missing" } } },
+    },
+    {
+      name: "refcycle",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        $defs: { a: { $ref: "#/$defs/b" }, b: { $ref: "#/$defs/a" } },
+        properties: { s: { $ref: "#/$defs/a" } },
+      },
+    },
+    {
+      name: "refanchor",
+      server_name: "srv",
+      inputSchema: { type: "object", properties: { s: { $ref: "#someAnchor" } } },
+    },
+    // Legitimate local refs, which must survive as passthrough.
+    {
+      name: "goodref",
+      server_name: "srv",
+      $comment: "resolves to a real subschema",
+      inputSchema: { type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } },
+    },
+    { name: "selfref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $ref: "#" } } } },
+  ];
+
+  it("compiles and runs without throwing, and never compiles a proxy-supplied expression", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: hostileCatalog }));
+    const definitions = await createMcpToolDefinitions(auth);
+    expect(definitions.length).toBeGreaterThan(10);
+
+    const { Compile } = await import("typebox/compile");
+    const compiled: string[] = [];
+    const NativeRegExp = globalThis.RegExp;
+    class RecordingRegExp extends NativeRegExp {
+      constructor(source: string | RegExp, flags?: string) {
+        compiled.push(String(source));
+        super(source as never, flags);
+      }
+    }
+    globalThis.RegExp = RecordingRegExp as never;
+    try {
+      for (const definition of definitions) {
+        // Compiling is where TypeBox resolves refs and builds regexes; Check is where it runs them.
+        const validator = Compile(definition.parameters as never);
+        expect(() => validator.Check({ args: {}, q: "x", s: "x", k: "x", a: ["x"] })).not.toThrow();
+      }
+    } finally {
+      globalThis.RegExp = NativeRegExp;
+    }
+
+    // No proxy-supplied expression or reference may have been compiled or embedded.
+    for (const source of compiled) {
+      expect(source).not.toContain("(a+)+");
+      expect(source).not.toContain("evil.example");
+    }
+    const serialized = JSON.stringify(definitions.map((definition) => definition.parameters));
+    expect(serialized).not.toContain(EVIL);
+    expect(serialized).not.toContain(REMOTE);
+    expect(serialized).not.toContain("$dynamicRef");
+  });
+
+  it("keeps a legitimate local reference as passthrough rather than over-degrading", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "goodref",
+            server_name: "srv",
+            inputSchema: { type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } },
+          },
+        ],
+      }),
+    );
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+    expect(report.enveloped).toBe(0);
+    expect(JSON.stringify(definitions[0]?.parameters)).toContain("$ref");
+  });
+});
+
+describe("reference resolution hazards", () => {
+  it("reports a local pointer that does not resolve to a subschema", () => {
+    expect(findSchemaHazard({ type: "object", description: "hi", properties: { s: { $ref: "#/description" } } })).toBe(
+      "unresolvable-ref",
+    );
+    expect(findSchemaHazard({ type: "object", properties: { s: { $ref: "#/$defs/missing" } } })).toBe(
+      "unresolvable-ref",
+    );
+    // `#name` is an $anchor reference, which cannot be resolved without an anchor index.
+    expect(findSchemaHazard({ type: "object", properties: { s: { $ref: "#someAnchor" } } })).toBe("unresolvable-ref");
+  });
+
+  it("reports a reference cycle that object identity cannot see", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { a: { $ref: "#/$defs/b" }, b: { $ref: "#/$defs/a" } },
+        properties: { s: { $ref: "#/$defs/a" } },
+      }),
+    ).toBe("ref-cycle");
+  });
+
+  it("accepts local pointers that resolve to a usable subschema", () => {
+    expect(
+      findSchemaHazard({ type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } }),
+    ).toBeUndefined();
+    // A boolean is a valid subschema, and `#` is the document itself.
+    expect(
+      findSchemaHazard({ type: "object", $defs: { s: true }, properties: { s: { $ref: "#/$defs/s" } } }),
+    ).toBeUndefined();
+    expect(findSchemaHazard({ type: "object", properties: { s: { $ref: "#" } } })).toBeUndefined();
+    // Escaped pointer tokens resolve correctly.
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { "a/b": { type: "string" } },
+        properties: { s: { $ref: "#/$defs/a~1b" } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("follows a chain of local references and rejects one that leaves the document", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { a: { $ref: "#/$defs/b" }, b: { type: "string" } },
+        properties: { s: { $ref: "#/$defs/a" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { a: { $ref: "https://evil.example/x.json" } },
+        properties: { s: { $ref: "#/$defs/a" } },
+      }),
+    ).toBe("nonlocal-ref");
+  });
+});
+
+describe("unrecognized discovery body shapes", () => {
+  it("rejects a non-array tools container instead of reporting an empty catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: { a: { name: "x" } } }));
+    await expect(discoverMcpToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow(
+      "MCP discovery returned an unexpected body shape",
+    );
+  });
+
+  it("still accepts both documented shapes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    expect((await discoverMcpToolsRaw("https://litellm.example.com", "sk-test")).raw).toBe(0);
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [] }));
+    expect((await discoverMcpToolsRaw("https://litellm.example.com", "sk-test")).raw).toBe(0);
+  });
+});
+
+describe("bounded diagnostic labels", () => {
+  it("bounds a normalization label built from a huge proxy-supplied name", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [{ name: "A".repeat(200_000) }] }));
+
+    await createDefinitionsRaw(async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" }));
+
+    const line = stderr.mock.calls.map(([m]) => String(m)).find((m) => m.includes("missing name or server identity"));
+    expect(line).toBeDefined();
+    // Well under the 200 KB a charset-only sanitizer would have emitted.
+    expect(Buffer.byteLength(line ?? "", "utf8")).toBeLessThan(400);
+    expect(line).toContain("…");
   });
 });

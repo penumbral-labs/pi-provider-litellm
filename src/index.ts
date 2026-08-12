@@ -28,7 +28,7 @@ import {
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions, reportMcpEmptyCatalog, reportMcpRegistrationFatal } from "./mcp-tools.js";
+import { createMcpToolDefinitions, reportMcpCatalogOutcome, reportMcpRegistrationFatal } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -1015,8 +1015,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         }
         // A catalog that produced nothing is not a settled catalog: leaving the identity unset lets a
         // later refresh retry discovery, which is network-only and non-blocking.
+        reportMcpCatalogOutcome(report.discovered, definitions.length);
         if (definitions.length > 0) registeredMcpIdentity = identity;
-        else reportMcpEmptyCatalog(report.discovered);
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(
