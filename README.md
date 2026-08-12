@@ -154,7 +154,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default |
-| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata (for ids that carry provider evidence) and defaults |
+| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata (for ids that carry provider evidence, including bare Anthropic aliases) and defaults |
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
@@ -239,19 +239,21 @@ One public `model_name` on a LiteLLM proxy may be load-balanced across several d
 
 ### Metadata authority
 
-Catalog metadata (limits, pricing, modalities, reasoning levels) is adopted only from evidence the proxy actually reports — `litellm_params.model`, `model_info.base_model`, or the deployment's adapter. A public route name is not treated as backend evidence, because an operator can point any route at any model. Two consequences are visible in the model list:
+Catalog metadata (limits, pricing, modalities, reasoning levels) is adopted only from evidence the proxy actually reports — `litellm_params.model`, `model_info.base_model`, or the deployment's adapter. A public route name is not backend evidence for a deployment group, because an operator can point any route at any model. It is still used in two narrower, unchanged places: when a group reduces to exactly one routable deployment the route name remains the only available catalog hint, and request-compatibility flags are still derived from the route id as they were before. Two consequences are visible in the model list:
 
 - When deployments disagree about which provider backs a route, catalog metadata is withheld for the whole group rather than guessed, and a one-line diagnostic naming the affected routes is written to stderr.
-- An unqualified or ambiguous id is left unknown instead of being matched against every provider catalog, which previously allowed a bare id such as `gpt-4o` to inherit another provider's limits and pricing.
+- An unqualified or ambiguous id is left unknown instead of being matched against every provider catalog, which previously allowed a bare id such as `gpt-4o` to inherit another provider's limits and pricing. Bare Anthropic aliases (`opus-4-7`, `sonnet-4.6`, `fable-5`) remain an explicit exception and still resolve.
 
 A model whose price evidence is incomplete is suffixed so unknown cost is never presented as free:
 
 | Suffix | Meaning |
 |---|---|
-| ` (incomplete metadata)` | A reduced `/model/info` group without complete price evidence. Its metadata is not re-derived from the model id when read back from the cache. |
-| ` (no metadata)` | An evidence-free `/v1/models` or `/health` model. Pi catalog metadata may be filled in later from the model id, including for cached entries. |
+| ` (incomplete metadata)` | A reduced `/model/info` group without complete price evidence, or a `/health` route the Pi catalog does not resolve. Permanent: this metadata is never re-derived from the model id, including on cached reads. |
+| ` (no metadata)` | An evidence-free `/v1/models` model. Pi catalog metadata may be filled in later from the model id, including for cached entries. |
 
-Models restored from `models-store.json` while offline produce the same requests as they did immediately after discovery.
+A `/health` route the catalog does resolve keeps its plain catalog name, because its metadata is real.
+
+A reduced `/model/info` group or a `/health` model restored from `models-store.json` while offline produces the same requests as it did immediately after discovery. `/v1/models` models are the deliberate exception: their sentinel authorizes bounded later enrichment, so a cached entry can gain catalog metadata on a subsequent read.
 
 ## Troubleshooting
 
