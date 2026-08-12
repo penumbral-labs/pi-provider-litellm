@@ -262,17 +262,40 @@ describe("reduceModelGroup", () => {
     expect(result).toMatchObject({ catalogProvider: "anthropic", reasoning: true });
   });
 
-  it("withholds evidence from a row whose wire types are wrong instead of throwing", () => {
-    const good = row({ model_info: { id: "good", mode: "chat" } });
-    const badMode = row({ model_info: { id: "bad", mode: 7 as unknown as string } });
+  it("treats an unreadable mode as unknown rather than as evidence of a non-chat deployment", () => {
+    // An unreadable `mode` must not relax the group. Dropping the row the way a
+    // genuinely non-chat deployment is dropped would discard its limits and let the
+    // group report a larger context window than any deployment can serve.
+    const roomy = row({ model_info: { id: "roomy", mode: "chat", max_input_tokens: 200_000 } });
+    const cramped = { id: "cramped", max_input_tokens: 8_000 };
+    const unreadable = row({ model_info: { ...cramped, mode: 7 as unknown as string } });
+    const embedding = row({ model_info: { ...cramped, mode: "embedding" } });
+
+    // Unreadable: still a deployment, so its tighter limit clamps the group.
+    expect(reduceModelGroup([roomy, unreadable], resolveCatalog)).toMatchObject({
+      deploymentCount: 2,
+      contextWindow: 8_000,
+      api: "openai-completions",
+    });
+    // Genuinely non-chat: excluded from metadata, and only votes on transport.
+    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toMatchObject({
+      deploymentCount: 1,
+      contextWindow: 200_000,
+    });
+
+    // A lone unreadable row is surfaced conservatively rather than silently hidden.
+    expect(reduceModelGroup([unreadable], resolveCatalog)).toMatchObject({
+      deploymentCount: 1,
+      contextWindow: 8_000,
+      api: "openai-completions",
+    });
+  });
+
+  it("drops non-string accepted parameters and keeps the usable ones", () => {
     const badParams = row({
       model_info: { id: "bad", mode: "chat", supported_openai_params: [1, "temperature"] as unknown as string[] },
     });
 
-    // A non-string mode is unusable transport evidence, so the row is not routable.
-    expect(reduceModelGroup([good, badMode], resolveCatalog)).toMatchObject({ deploymentCount: 1 });
-    expect(reduceModelGroup([badMode], resolveCatalog)).toBeUndefined();
-    // Non-string params are dropped, leaving the usable ones.
     expect(reduceModelGroup([badParams], resolveCatalog)?.acceptedOpenAIParams).toEqual(["temperature"]);
   });
 

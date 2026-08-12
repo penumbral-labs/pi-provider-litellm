@@ -49,14 +49,17 @@ type CostField = (typeof COST_FIELDS)[number];
 // `/model/info` is parsed JSON from operator-authored proxy config, so a field
 // declared as a string can arrive as a number. Reading it as one must withhold
 // that row's evidence, not throw and lose every model in the response.
-function wireString(value: unknown): string | undefined {
+export function wireString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
 function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = wireString(mode)?.trim();
-  if (value === undefined) return "unsupported";
+  // An unreadable mode is not evidence that the deployment is non-chat. Treating it
+  // as "unsupported" would drop the row from the reduction and discard its limits,
+  // relaxing the group; "unknown" keeps it routable and conservative.
+  if (value === undefined) return "unknown";
   if (RESPONSES_MODE_PATTERN.test(value)) return "responses";
   if (CHAT_STYLE_MODE_PATTERN.test(value)) return "chat";
   return "unsupported";
@@ -175,7 +178,10 @@ export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  const candidates = uniqueDeployments(entries.filter((entry) => entry.model_name));
+  // A group is addressed by its public route name, so a row without a readable one
+  // cannot participate. Enforced here rather than at each caller, so no caller can
+  // leak a non-string id into a discovered model.
+  const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
   if (candidates.length === 0) return undefined;
   // Transport votes over every candidate row, so a row this reduction will not
   // otherwise use — an embedding sibling, say — can still force Chat. Capability,
@@ -233,8 +239,11 @@ export function reduceModelGroup(
     ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
     : undefined;
 
+  const id = wireString(deployments[0]?.model_name);
+  if (id === undefined) return undefined;
+
   return {
-    id: deployments[0]?.model_name as string,
+    id,
     deploymentCount: deployments.length,
     api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,

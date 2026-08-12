@@ -634,6 +634,15 @@ describe("discoverModels via /model/info", () => {
         model_info: { id: "a", mode: "chat" },
       },
     ],
+    // Every untrusted string this branch newly reads. A YAML value such as
+    // `model_name: 4.1` parses as a number, which is an ordinary operator typo.
+    ["a numeric route name", { model_name: 4.1, model_info: { id: "a", mode: "chat" } }],
+    ["a numeric adapter", { model_name: "bad-adapter", model_info: { id: "a", mode: "chat", litellm_provider: 7 } }],
+    [
+      "a numeric backend model",
+      { model_name: "bad-backend", litellm_params: { model: 7 }, model_info: { id: "a", mode: "chat" } },
+    ],
+    ["a numeric base model", { model_name: "bad-base", model_info: { id: "a", mode: "chat", base_model: 7 } }],
   ])("withholds a row with %s instead of failing the whole discovery", async (_case, bad) => {
     // One operator typo in proxy config must not cost every other model.
     mockEndpoints({
@@ -654,6 +663,42 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models.map((model) => model.id)).toContain("healthy-route");
     expect(result.models.find((model) => model.id === "healthy-route")?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("withholds a fallback or health entry whose id is not a string", async () => {
+    // The same invariant on the two paths that build a model straight from an id.
+    mockEndpoints({
+      "/model/info": () => jsonResponse(403, {}),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: 7 }, { id: "gpt-4o", owned_by: 7 }] }),
+    });
+    const fallback = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    expect(fallback.models.map((model) => model.id)).toEqual(["gpt-4o"]);
+
+    mockEndpoints({
+      "/model/info": () => jsonResponse(403, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: 7 }, { model: "anthropic/claude-opus-4-7" }] }),
+    });
+    const health = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    expect(health.models.map((model) => model.id)).toEqual(["anthropic/claude-opus-4-7"]);
+  });
+
+  it("withholds a health deployment whose route name is not a string", async () => {
+    // This path bypasses the grouping loop: `/health` supplies the route name
+    // directly to the reducer, so it needs its own guard.
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-1": () => jsonResponse(200, { data: [{ model_info: { mode: "chat" } }] }),
+      "/model/info": () => jsonResponse(403, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [{ model: 7, model_id: "uuid-1" }, { model: "anthropic/claude-opus-4-7" }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map((model) => model.id)).toEqual(["anthropic/claude-opus-4-7"]);
   });
 
   it("survives a deeply nested deployment row", async () => {

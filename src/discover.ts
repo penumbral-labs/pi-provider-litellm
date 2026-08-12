@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_TOKENS,
   reduceModelGroup,
   type SemanticFamily,
+  wireString,
 } from "./model-groups.js";
 import type {
   DiscoveredModel,
@@ -217,15 +218,15 @@ const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   vertex_ai: "google-vertex",
 };
 
-function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | undefined {
-  const normalized = adapter?.trim().toLowerCase();
+function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
+  const normalized = wireString(adapter)?.trim().toLowerCase();
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => candidate?.trim())
+    .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
   // Provider identity and semantic family must describe the same backend, so a
   // resolution reports the family of the candidate that resolved it (or of the
@@ -474,6 +475,7 @@ function mapFromModelInfoGroup(
     if (resolved || !singleton) return resolved;
     // Exactly one routable deployment: the public route name is the only
     // remaining hint, and using it preserves upstream singleton behavior.
+    // `reduceModelGroup` only passes rows whose route name is a readable string.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
     return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
@@ -510,7 +512,7 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = entry.model;
+  const id = wireString(entry.model);
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
   return {
@@ -535,10 +537,11 @@ function mapFromModelsList(
   entry: ModelsListEntry,
   modelsDev: ModelsDevResponse | undefined,
 ): DiscoveredModel | undefined {
-  const id = entry.id;
+  const id = wireString(entry.id);
   if (!id) return undefined;
-  const catalogModel = findCatalogModel(id, entry.owned_by);
-  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
+  const ownedBy = wireString(entry.owned_by);
+  const catalogModel = findCatalogModel(id, ownedBy);
+  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, ownedBy));
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
@@ -608,10 +611,12 @@ export async function discoverModels(
   if (infoResult.ok) {
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
-      if (!entry.model_name) continue;
-      const group = groups.get(entry.model_name) ?? [];
+      // A route without a readable public name cannot be grouped or addressed.
+      const route = wireString(entry.model_name);
+      if (!route) continue;
+      const group = groups.get(route) ?? [];
       group.push(entry);
-      groups.set(entry.model_name, group);
+      groups.set(route, group);
     }
     const ambiguousRoutes: string[] = [];
     let models = [...groups.values()]
