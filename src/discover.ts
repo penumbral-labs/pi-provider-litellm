@@ -135,6 +135,10 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
 }
 
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
+  // ponytail: legacy cache lacks field provenance; add per-field cache provenance if
+  // strict preservation becomes necessary. The two-marker contract below is the
+  // workaround for that absence, so this deferral is still open, not resolved.
+  //
   // This sentinel is emitted only by the evidence-free `/v1/models` fallback, so
   // re-deriving catalog metadata from the model id here cannot re-authorize a
   // reduced `/model/info` group whose catalog authority was withheld. Reduced
@@ -452,17 +456,29 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
 
 const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
 
+// Reported routes, so a persistent misconfiguration is announced once rather than on
+// every background refresh and every `/model` open. Keyed by route rather than a
+// single flag so a newly ambiguous route is still reported. Mirrors the once-per-
+// process diagnostic set in src/index.ts.
+const reportedAmbiguousRoutes = new Set<string>();
+
 // Withholding catalog authority is safe but invisible: the route silently reports
 // default limits and zero cost. This is a safety-relevant degradation, so it is
-// reported once per discovery regardless of LITELLM_VERBOSE_DISCOVERY, and
-// carries only a count and bounded public route ids.
+// reported regardless of LITELLM_VERBOSE_DISCOVERY, and carries only a count and
+// bounded public route ids.
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
-  if (routes.length === 0) return;
-  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
-  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reportedAmbiguousRoutes.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
   process.stderr.write(
-    `LiteLLM discovery: ${routes.length} route group(s) have conflicting deployment provider identity; ` +
-      `catalog limits, pricing, and reasoning metadata are withheld: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+    // "missing or conflicting": the group is also withheld when one deployment
+    // resolves a provider and another supplies no usable backend evidence at all,
+    // which points at a different fix than a genuine provider conflict.
+    `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
+      `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
+      `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
   );
 }
 

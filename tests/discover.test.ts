@@ -821,11 +821,97 @@ describe("discoverModels via /model/info", () => {
 
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toContain("4 route group(s) have conflicting deployment provider identity");
+    expect(diagnostics[0]).toContain("4 route group(s) have missing or conflicting deployment provider evidence");
     // Bounded: a count, at most three route ids, and no deployment ids or params.
     expect(diagnostics[0]).toContain("route-a, route-b, route-c (+1 more)");
     expect(diagnostics[0]).not.toContain("route-d");
     expect(diagnostics[0]).not.toContain("route-a-a");
+  });
+
+  it("reports each ambiguous route once per process, not once per discovery", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const conflicting = (route: string) => [
+      { model_name: route, model_info: { id: `${route}-a`, mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
+      {
+        model_name: route,
+        model_info: { id: `${route}-b`, mode: "chat" },
+        litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+      },
+    ];
+    const discover = async (routes: string[]) => {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: routes.flatMap(conflicting) }) });
+      await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    };
+
+    await discover(["once-a", "once-b"]);
+    expect(stderr.mock.calls).toHaveLength(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("2 route group(s)");
+
+    // A background refresh of the same misconfiguration must not repeat itself.
+    await discover(["once-a", "once-b"]);
+    expect(stderr.mock.calls).toHaveLength(1);
+
+    // A newly ambiguous route is still worth reporting, and only that one.
+    await discover(["once-a", "once-b", "once-c"]);
+    expect(stderr.mock.calls).toHaveLength(2);
+    const second = String(stderr.mock.calls[1]?.[0]);
+    expect(second).toContain("1 route group(s)");
+    expect(second).toContain("once-c");
+    expect(second).not.toContain("once-a");
+  });
+
+  it("reports a route whose deployments supply partial provider evidence", async () => {
+    // Withholding also happens when one deployment resolves a provider and another
+    // supplies none, so the wording must not claim a conflict is the only cause.
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "partial-evidence",
+              model_info: { id: "a", mode: "chat" },
+              litellm_params: { model: "openai/gpt-4o" },
+            },
+            { model_name: "partial-evidence", model_info: { id: "b", mode: "chat" } },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.name).toBe("partial-evidence (incomplete metadata)");
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("missing or conflicting");
+    expect(diagnostics[0]).toContain("partial-evidence");
+  });
+
+  it("keeps catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
+    // An embedding sibling votes on transport but is not a deployment, so the group
+    // is still a singleton and its route name remains a usable catalog hint. If the
+    // count were taken before the mode filter, this route would lose its metadata.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "openai/gpt-5.5", model_info: { id: "chat", mode: "chat" } },
+            { model_name: "openai/gpt-5.5", model_info: { id: "embed", mode: "embedding" } },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5",
+      reasoning: true,
+      contextWindow: 272_000,
+      api: "openai-completions",
+    });
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
   it("stays silent when provider identity is unanimous or wholly unknown", async () => {
