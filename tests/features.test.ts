@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
@@ -31,6 +31,14 @@ async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSi
     signal,
   });
 }
+
+// These two are absent from the afterEach delete list below, so a developer shell
+// exporting either one silently changes what this file exercises while CI stays
+// green. Clearing them per test keeps it order-independent.
+beforeEach(() => {
+  delete process.env.LITELLM_OFFLINE;
+  delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -308,10 +316,6 @@ describe("feature parity", () => {
 
   it("uses fresh Pi auth when a discovered MCP tool executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    // Hermetic against a developer environment that exports these; the file has no
-    // beforeEach clear and the wider cleanup is tracked as follow-up.
-    delete process.env.LITELLM_OFFLINE;
-    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     // Distinct from the auth-borne value below. getRuntimeAuth prefers the resolved
@@ -370,10 +374,6 @@ describe("feature parity", () => {
 
   it("falls back to provider headers when resolved auth carries none", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    // Hermetic against a developer environment that exports these; the file has no
-    // beforeEach clear and the wider cleanup is tracked as follow-up.
-    delete process.env.LITELLM_OFFLINE;
-    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
@@ -421,10 +421,6 @@ describe("feature parity", () => {
 
   it("uses fresh Pi auth when a registered Skills tool executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    // Hermetic against a developer environment that exports these; the file has no
-    // beforeEach clear and the wider cleanup is tracked as follow-up.
-    delete process.env.LITELLM_OFFLINE;
-    delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
     process.env.LITELLM_BASE_URL = "https://cached.example.com";
     process.env.LITELLM_API_KEY = "cached-token";
     process.env.LITELLM_HEADERS = '{"x-source":"provider"}';
@@ -1177,6 +1173,33 @@ describe("feature parity", () => {
       { type: "thinking", thinking: "internal reasoning" },
       { type: "text", text: "DONE" },
     ]);
+  });
+
+  it("does not rewrite think tags on another provider's messages", async () => {
+    // The message_end hook is global. A model id that matches our Moonshot pattern can
+    // belong to another provider, so the provider check is what keeps us out of it.
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const content = [{ type: "text", text: "<think>not ours</think>DONE" }];
+    let message: any = {
+      role: "assistant",
+      provider: "moonshot",
+      model: "kimi-k2.6",
+      content,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+
+    for (const handler of pi.handlers.get("message_end") ?? []) {
+      const result = await handler({ message });
+      if (result?.message) message = result.message;
+    }
+
+    expect(message.content).toBe(content);
   });
 
   it("keeps final Kimi text visible when a dangling think tag prefixes it", async () => {

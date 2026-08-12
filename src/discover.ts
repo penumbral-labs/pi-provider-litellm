@@ -93,8 +93,8 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
 
 // Returns the `api` + `compat` pair for one protocol as a single ModelProtocol
 // value. Callers spread the result rather than setting the two fields separately,
-// which is what makes an impossible pairing a compile error instead of a
-// convention every call site has to remember.
+// so no call site has to remember the pairing. See ModelProtocol in types.ts for
+// what the type system does and does not catch here.
 export function modelProtocol(modelId: string, mode?: string | null): ModelProtocol {
   return isResponsesMode(mode)
     ? { api: "openai-responses", compat: responsesCompat(modelId) }

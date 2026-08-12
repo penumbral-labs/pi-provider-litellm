@@ -232,16 +232,23 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 
 Models this provider dispatches are sent to the host the active credential resolves to. A model that cannot be matched to that host is hidden from `/model` rather than requested, and its request URL is derived from the credential's root rather than from whatever base URL the model carries.
 
-Two separate mechanisms are involved, and they are worth keeping apart: **model-list filtering** decides what `/model` offers, and the **dispatch-time guard** decides whether a request is allowed once a model has been chosen. Choosing a model by id, or restoring one from a saved session, skips the filtering and reaches the guard directly.
+Two separate mechanisms are involved, and they behave differently: **catalog filtering** decides what `/model` offers, and the **dispatch guard** decides whether a chosen model may issue a request. Choosing a model by id, or restoring one from a saved session, skips filtering entirely and goes straight to dispatch.
 
-| Model | Offered in `/model` | Dispatch |
-|---|---|---|
-| Protocol discovery selects, host matches the credential | yes | sent to the credential's host, with the URL derived from that host |
-| Protocol discovery selects, host differs — stale cache, switched proxy | no | rejected before any request, including by id or session restore |
-| Protocol this provider implements but discovery cannot select (`anthropic-messages`) | no | **not contained** — see below |
-| `api` this provider does not implement | no | **not contained** — see below |
+**Catalog filtering** is uniform. A model is offered only when its protocol is one discovery selects and its host matches the active credential; everything else is dropped with a diagnostic, per the table below.
 
-**Known gap for the last two rows.** Pi routes a model to a provider only when that provider already lists a model using the same `api`. For an `api` with no discovered models, Pi dispatches through its global API registry without calling this provider, so the guard never runs and the request goes to whatever `baseUrl` the entry configures, carrying this provider's credentials. Such a model is kept out of `/model`, and it is rejected if it ever does reach this provider, but neither prevents a direct or session-restored dispatch. Closing it requires a change in Pi — routing by the provider's declared protocols rather than by its current model list. Until then, do not point a `models.json` LiteLLM entry at a host you do not intend to receive your proxy credentials.
+**Dispatch** depends on how Pi routes the model, and Pi routes to a provider only when that provider currently lists a model using the same `api`:
+
+| Model reaching dispatch | Behavior |
+|---|---|
+| `api` matching a model this provider currently lists, host matches | sent to the credential's host, URL derived from that host |
+| `api` matching a model this provider currently lists, host differs | rejected before any request |
+| `api` with **no** currently-listed model — including a selectable protocol your proxy happens not to expose | **not contained**; see below |
+
+That third row is the gap, and it is wider than the unsupported protocols: if your proxy exposes no `mode: "responses"` routes, then `openai-responses` has no listed model and a hand-written `models.json` entry using it is dispatched by Pi through its global API registry without calling this provider. The request goes to whatever `baseUrl` the entry names, carrying this provider's API key and configured headers. The model is still kept out of `/model`, and it is rejected if it ever does reach this provider, but neither prevents a direct or session-restored dispatch.
+
+One mitigation applies automatically: when the active credential supplies its own base URL — which `/login litellm` SSO credentials do, but environment or stored API keys do not — Pi rewrites the request base to that credential's host before dispatch, so the entry cannot reach a foreign host. On an SSO credential this also means the stale-host rejection above never fires; the request is silently repointed to the credential host instead.
+
+Closing the gap properly requires a change in Pi: routing by a provider's declared protocols rather than by its current model list. Until then, do not point a `models.json` LiteLLM entry at a host you do not intend to receive your proxy credentials.
 
 A model is dropped when:
 
