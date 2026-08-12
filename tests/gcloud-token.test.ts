@@ -116,6 +116,54 @@ describe("getGcloudToken", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("reuses the cached token while the credential is unchanged", async () => {
+    const adcPath = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "stable-client",
+      client_secret: "stable-secret",
+      refresh_token: "stable-refresh",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { access_token: "cached" }));
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-10T12:00:00.000Z").getTime());
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+
+    await expect(getGcloudToken()).resolves.toBe("cached");
+    await expect(getGcloudToken()).resolves.toBe("cached");
+    await expect(getGcloudToken()).resolves.toBe("cached");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Re-running `gcloud auth application-default login` rewrites refresh_token and leaves
+  // client_id and client_secret alone, so the cache identity must react to that field on its
+  // own. Rotating all three at once cannot show this.
+  it("invalidates the cached token when only the refresh token rotates", async () => {
+    const before = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "same-client",
+      client_secret: "same-secret",
+      refresh_token: "refresh-one",
+    });
+    const after = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "same-client",
+      client_secret: "same-secret",
+      refresh_token: "refresh-two",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "before-relogin" }))
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "after-relogin" }));
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-10T12:00:00.000Z").getTime());
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = before;
+    await expect(getGcloudToken()).resolves.toBe("before-relogin");
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = after;
+    await expect(getGcloudToken()).resolves.toBe("after-relogin");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not reuse a cached token after the ADC identity changes", async () => {
     const firstPath = await writeAdcFile({
       type: "authorized_user",
