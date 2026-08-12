@@ -1180,6 +1180,24 @@ describe("extension startup", () => {
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([]);
   });
 
+  it("repoints an SSO request to the credential host instead of rejecting a stale model", async () => {
+    // Documented asymmetry, pinned so it cannot drift silently. Pi replaces
+    // model.baseUrl with the credential's own baseUrl before dispatch, and OAuth
+    // credentials supply one, so our stale-host comparison sees the credential root on
+    // both sides and never fires. The request is safe -- it goes to the credential
+    // host -- but it is repointed, not rejected. Every other host-guard test drives
+    // the api-key shape, where no auth.baseUrl exists and rejection does happen.
+    const harness = await oauthTransitionHarness();
+
+    const result = await harness.completeWith(
+      harness.oauth("sk-sso", "https://sso.example.com"),
+      "https://stale.example.com/v1",
+    );
+
+    expect(result.stopReason).toBe("stop");
+    expect(harness.urls()).toEqual(["https://sso.example.com/v1/chat/completions"]);
+  });
+
   it("lets an explicit request base URL outrank the remembered SSO root", async () => {
     // Isolates precedence from invalidation: the memo is still live here, because
     // OAuth is still the active credential. Only the ordering decides the host, so

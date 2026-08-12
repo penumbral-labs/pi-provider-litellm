@@ -652,6 +652,24 @@ describe("createLiteLLMProvider", () => {
     expect(apiSpies.responses).not.toHaveBeenCalled();
   });
 
+  it("allows a selectable protocol on the credential host even with no discovered peer", () => {
+    // The guard decides on protocol and host, not on whether discovery produced a model
+    // of that protocol. That is deliberate, and it is also why this provider is not what
+    // contains such a model: Pi only routes to us when we already list its api, so for a
+    // protocol our proxy never exposed, nothing here is consulted. Documented in
+    // README's dispatch table; pinned so the reasoning stays visible.
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
+    const baseModel = discovered("model").models[0];
+    const onlyResponses = toNativeModels("litellm", "https://proxy.example", [
+      { ...baseModel, id: "responses-only", api: "openai-responses", compat: undefined },
+    ]);
+
+    expect(value.filterModels?.(onlyResponses, credential)?.map((model) => model.baseUrl)).toEqual([
+      "https://proxy.example/v1",
+    ]);
+    expect(() => value.stream(onlyResponses[0], { messages: [] })).not.toThrow();
+  });
+
   it("rejects a stale-host model on stream and streamSimple before dispatch", () => {
     // The direct-id and session-restore paths reach stream without passing through
     // filterModels, so the guard has to reject there too, not only in the listing.
