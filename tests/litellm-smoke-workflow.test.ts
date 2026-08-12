@@ -94,23 +94,47 @@ describe("LiteLLM smoke workflow", () => {
       "npm run check && npm run clean && npm run build && npm run supply-chain:guard",
     );
     expect(readCiWorkflow()).not.toContain("run: npm pack --dry-run");
-    expect(readReleaseWorkflow()).not.toContain("run: npm run check");
     expect(readReleaseWorkflow()).not.toContain("run: npm pack --dry-run");
     expect(readReleaseWorkflow()).toContain("run: npm publish --access public --provenance");
   });
 
-  // The whole quality gate hangs off one npm lifecycle hook, and npm skips lifecycle hooks
-  // entirely when `ignore-scripts` is configured -- which it is on at least one developer
-  // machine. Record that assumption explicitly so the exposure is visible in review rather
-  // than discovered at publish time: the release workflow must not rely on the hook alone.
-  it("does not rely solely on a lifecycle hook for the release gate", () => {
+  // npm skips lifecycle hooks entirely when `ignore-scripts` is configured, so relying on
+  // `npm publish` to invoke prepublishOnly would let a publish ship with no lint, typecheck,
+  // tests or package guard. The gate must be its own step, and it must run before publish --
+  // a step ordered after it would verify nothing.
+  it("runs the release gate as an explicit step before publishing", () => {
     const release = readReleaseWorkflow();
-    const runsGateDirectly = /run: npm run (prepublishOnly|check|supply-chain:guard)/.test(release);
+    const gateAt = release.indexOf("run: npm run prepublishOnly");
+    const publishAt = release.indexOf("run: npm publish --access public --provenance");
 
-    expect(
-      runsGateDirectly,
-      "release.yml must run the gate as an explicit step: `npm publish` skips prepublishOnly when npm is configured with ignore-scripts",
-    ).toBe(true);
+    expect(gateAt, "release.yml must run `npm run prepublishOnly` as an explicit step").toBeGreaterThan(-1);
+    expect(publishAt, "release.yml must still publish").toBeGreaterThan(-1);
+    expect(gateAt, "the gate step must appear before the publish step").toBeLessThan(publishAt);
+  });
+
+  it("keeps the publish flow tag-driven", () => {
+    expect(readReleaseWorkflow()).toContain("tags:");
+    expect(readReleaseWorkflow()).toContain("v*.*.*");
+  });
+
+  // `--list-models` also reports models from Pi's own store, so this leg must run against an
+  // agent dir no earlier step has populated, and must prove it discriminates.
+  it("isolates and negative-controls the list-models smoke leg", () => {
+    const workflow = readWorkflow();
+
+    expect(workflow).toContain('list_models_dir="$' + '{{ runner.temp }}/pi-list-models"');
+    expect(workflow).toContain(
+      'PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm',
+    );
+    expect(workflow).toContain('p.pi.extensions=["./src/does-not-exist.ts"]');
+    expect(workflow).toContain("negative control failed: models listed without a loadable entrypoint");
+    // The shared agent dir stays available to the completion legs, which need the login the
+    // terminal smoke performed, but must not be what --list-models reads.
+    expect(workflow).toContain('export PI_CODING_AGENT_DIR="$' + '{{ runner.temp }}/pi-cli-smoke"');
+  });
+
+  it("does not leave a dist build step in the smoke job", () => {
+    expect(readWorkflow()).not.toContain("run: npm run build");
   });
 
   it("runs for path-filtered pull requests", () => {
@@ -197,7 +221,11 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow.slice(initializeStart, terminalStart)).toContain(agentDir);
     expect(workflow.slice(initializeStart, terminalStart)).toContain('mkdir -p "$PI_CODING_AGENT_DIR"');
     expect(workflow.slice(terminalStart, cliStart)).toContain(agentDir);
-    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(agentDir);
+    // The CLI step exports the shared dir inside its script rather than declaring it as step
+    // env, because its --list-models leg deliberately runs against a separate empty dir.
+    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(
+      'export PI_CODING_AGENT_DIR="$' + '{{ runner.temp }}/pi-cli-smoke"',
+    );
     expect(workflow.slice(cliStart)).not.toContain('rm -rf "$PI_CODING_AGENT_DIR"');
   });
 
