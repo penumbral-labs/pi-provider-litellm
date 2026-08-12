@@ -176,30 +176,41 @@ describe("supply-chain guard", () => {
     }
   });
 
-  it.for(["prepack", "postpack", "prepublish", "prepare", "postinstall"] as const)(
-    "rejects an automatic %s lifecycle hook",
-    async (hook) => {
-      const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-hook-"));
+  it.for([
+    "preinstall",
+    "install",
+    "postinstall",
+    "preprepare",
+    "prepare",
+    "postprepare",
+    "prepack",
+    "postpack",
+    "prepublish",
+    "publish",
+    "postpublish",
+  ] as const)("rejects an automatic %s lifecycle hook", async (hook) => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-hook-"));
 
-      try {
-        await writeFixturePackage(
-          fixture,
-          ["src", "README.md", "LICENSE"],
-          allowedSourceModules.map((module) => ({ path: `src/${module}.ts` })),
-        );
-        const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as Record<string, unknown>;
-        manifest.scripts = { [hook]: "node inject.js" };
-        await writeFile(join(fixture, "package.json"), JSON.stringify(manifest, null, 2));
+    try {
+      await writeFixturePackage(
+        fixture,
+        ["src", "README.md", "LICENSE"],
+        allowedSourceModules.map((module) => ({ path: `src/${module}.ts` })),
+      );
+      const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as Record<string, unknown>;
+      manifest.scripts = { [hook]: "node inject.js" };
+      await writeFile(join(fixture, "package.json"), JSON.stringify(manifest, null, 2));
 
-        const result = await checkSupplyChain(fixture);
+      const result = await checkSupplyChain(fixture);
 
-        expect(result.ok).toBe(false);
-        expect(result.errors).toContain(`package.json: scripts.${hook} runs during package installation`);
-      } finally {
-        await rm(fixture, { recursive: true, force: true });
-      }
-    },
-  );
+      expect(result.ok).toBe(false);
+      expect(result.errors).toContain(
+        `package.json: scripts.${hook} runs automatically during install, pack, or publish`,
+      );
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
 
   it("accepts prepublishOnly as an explicit verification command", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-verify-"));

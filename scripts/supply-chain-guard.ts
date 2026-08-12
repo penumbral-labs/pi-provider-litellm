@@ -7,19 +7,25 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Hooks npm runs automatically during install or packing. Any of these can mutate the
-// tarball or the consumer's machine without the guard observing it, because the guard
-// inspects `npm pack --dry-run --ignore-scripts`. `prepublishOnly` is deliberately
-// absent: it runs only on an explicit publish and is this package's verification
-// command, not a packaging mutation hook.
-const installLifecycleScripts = new Set([
+// Hooks npm runs automatically during install, packing or publishing. Any of these can
+// mutate the tarball or the consumer's machine without the guard observing it, because
+// the guard inspects `npm pack --dry-run --ignore-scripts`. `prepare` has automatic
+// pre/post siblings that also run on `npm ci`, and the release workflow runs `npm ci`
+// before publishing, so a `postprepare` would execute with repository write access
+// before the tarball is built. `prepublishOnly` is deliberately absent: it runs only on
+// an explicit publish and is this package's verification command, not a mutation hook.
+const automaticLifecycleScripts = new Set([
   "preinstall",
   "install",
   "postinstall",
+  "preprepare",
   "prepare",
+  "postprepare",
   "prepack",
   "postpack",
   "prepublish",
+  "publish",
+  "postpublish",
 ]);
 const runtimeDependencySections = new Set([
   "dependencies",
@@ -157,8 +163,8 @@ function checkDependencyValue(section: string, value: unknown, errors: string[],
 
 function checkManifest(manifest: PackageManifest, errors: string[]): void {
   for (const [name] of Object.entries(manifest.scripts ?? {})) {
-    if (installLifecycleScripts.has(name)) {
-      errors.push(`package.json: scripts.${name} runs during package installation`);
+    if (automaticLifecycleScripts.has(name)) {
+      errors.push(`package.json: scripts.${name} runs automatically during install, pack, or publish`);
     }
   }
 
