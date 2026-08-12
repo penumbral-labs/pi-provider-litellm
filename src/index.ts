@@ -28,7 +28,12 @@ import {
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions, reportMcpCatalogOutcome, reportMcpRegistrationFatal } from "./mcp-tools.js";
+import {
+  createMcpToolDefinitions,
+  credentialFingerprint,
+  reportMcpCatalogOutcome,
+  reportMcpRegistrationFatal,
+} from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -916,11 +921,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let mcpRegistrationFatal = false;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
+  // Identifies the catalog a set of credentials points at, so a credential change forces
+  // re-registration. The base URL stays readable because it is not secret and is useful when
+  // reasoning about a refresh; everything credential-bearing is reduced to a non-reversible
+  // fingerprint so no key or header value is held in the identity string.
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
       baseUrl: normalizeBaseUrl(auth.baseUrl),
-      apiKey: auth.apiKey,
-      headers: Object.entries(auth.headers ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      credential: credentialFingerprint(auth.apiKey, auth.headers),
     });
   }
 

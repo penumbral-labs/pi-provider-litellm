@@ -1504,4 +1504,40 @@ describe("multi-provider hardening", () => {
     // Reported, cleared by the successful pass, then reported again — not suppressed as unchanged.
     expect(emptyLines).toHaveLength(2);
   });
+
+  it("re-registers when the API key rotates on the same host", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    const listedKeys: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        listedKeys.push(String(new Headers(init?.headers).get("authorization")));
+        return jsonResponse(200, {
+          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const refreshWithKey = (key: string) =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: { type: "api_key", key, env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
+        signal: new AbortController().signal,
+      });
+
+    await refreshWithKey("sk-first");
+    await refreshWithKey("sk-first");
+    await refreshWithKey("sk-second");
+
+    // Fingerprinting the credential must not cost the change detection it exists to provide:
+    // the unchanged key is skipped, the rotated one triggers a fresh catalog pass.
+    expect(listedKeys).toEqual(["Bearer sk-first", "Bearer sk-second"]);
+  });
 });

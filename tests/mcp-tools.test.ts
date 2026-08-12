@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMcpToolDefinitions as createMcpToolDefinitionsRaw,
+  credentialFingerprint,
   discoverMcpTools as discoverMcpToolsRaw,
   executeMcpTool,
   findSchemaHazard,
@@ -1858,5 +1860,46 @@ describe("upstream assumptions the guard depends on", () => {
 
     expect(() => call("definitely not an email")).toThrow();
     expect(() => call("a@b.co")).not.toThrow();
+  });
+});
+
+describe("credentialFingerprint", () => {
+  const KEY = "sk-super-secret-value-must-not-appear";
+
+  it("holds no credential material and is not reversible by inspection", () => {
+    const fingerprint = credentialFingerprint(KEY, { "x-proxy-auth": "header-secret-value" });
+    expect(fingerprint).not.toContain(KEY);
+    expect(fingerprint).not.toContain("super-secret");
+    expect(fingerprint).not.toContain("header-secret-value");
+    expect(fingerprint).toMatch(/^[a-f0-9]{32}$/);
+  });
+
+  it("changes when any credential material changes, so a catalog notices", () => {
+    const base = credentialFingerprint(KEY);
+    expect(credentialFingerprint(`${KEY}-rotated`)).not.toBe(base);
+    // Headers carry authorization material too, so they must participate.
+    expect(credentialFingerprint(KEY, { "x-proxy-auth": "a" })).not.toBe(base);
+    expect(credentialFingerprint(KEY, { "x-proxy-auth": "a" })).not.toBe(
+      credentialFingerprint(KEY, { "x-proxy-auth": "b" }),
+    );
+    // A header being added at all is a change.
+    expect(credentialFingerprint(KEY, {})).toBe(base);
+  });
+
+  it("is stable for identical material regardless of header ordering", () => {
+    const left = credentialFingerprint(KEY, { b: "2", a: "1" });
+    const right = credentialFingerprint(KEY, { a: "1", b: "2" });
+    expect(left).toBe(right);
+  });
+
+  it("is salted per process, so an identical key does not yield a predictable digest", async () => {
+    const own = credentialFingerprint(KEY);
+    // A bare digest of the key would be reproducible by anyone holding a candidate key; this must not be.
+    const bareDigest = createHash("sha256").update(KEY).digest("hex").slice(0, 32);
+    expect(own).not.toBe(bareDigest);
+    // A freshly loaded module has a different salt, confirming the salt is real and per process.
+    vi.resetModules();
+    const { credentialFingerprint: fresh } = await import("../src/mcp-tools.js");
+    expect(fresh(KEY)).not.toBe(own);
   });
 });

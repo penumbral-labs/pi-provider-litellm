@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -159,6 +159,25 @@ export function reportMcpCatalogOutcome(raw: number, registered: number): void {
     `no MCP tools were registered from ${plural(raw, "raw entry", "raw entries")} returned by the proxy.`,
     `empty-catalog:${raw}`,
   );
+}
+
+// Random per process, never logged and never persisted. The catalog identity it feeds is only ever
+// compared with other identities computed in the same process, so it does not need to be stable
+// across runs — and a random salt means even a leaked identity cannot be dictionary-attacked back to
+// the credential, which a bare digest of a short key would not prevent.
+const credentialIdentitySalt = randomBytes(32);
+
+// A non-reversible stand-in for the credential material behind an MCP catalog.
+//
+// Covers the headers as well as the key: `LITELLM_HEADERS` can carry its own authorization material,
+// so fingerprinting the key alone would leave secrets in the identity. Any change to either yields a
+// different fingerprint, which is what the catalog needs in order to notice a credential change.
+export function credentialFingerprint(apiKey: string, headers?: Record<string, string>): string {
+  const material = JSON.stringify([
+    apiKey,
+    Object.entries(headers ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+  ]);
+  return createHmac("sha256", credentialIdentitySalt).update(material).digest("hex").slice(0, 32);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
