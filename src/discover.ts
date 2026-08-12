@@ -4,14 +4,14 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
 import {
-  advertisableLevels,
   type CatalogResolution,
   catalogResolution,
+  closeSerializerPolicy,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   type FamilyEvidence,
   isResponsesMode,
-  NO_TRANSMISSIBLE_LEVELS,
+  meetVendorCompat,
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
@@ -185,7 +185,12 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
   // reasoning model skips via the guard below.
   const model = {
     ...restored,
-    thinkingLevelMap: advertisableLevels(restored.thinkingLevelMap, restored.compat, restored.reasoning),
+    ...closeSerializerPolicy({
+      api: restored.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: restored.reasoning,
+      vendorCompat: restored.compat,
+      catalogLevels: restored.thinkingLevelMap,
+    }),
   } as Model<Api>;
   // Reduced deployment groups use a distinct marker; this sentinel remains
   // exclusive to evidence-free fallback models that may be enriched safely.
@@ -210,11 +215,14 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
   return {
     ...model,
     name: catalogModel.name,
-    reasoning: catalogModel.reasoning,
-    // The cached compat stays as stored, so catalog levels must pass the same
-    // transmissibility gate as every discovery path rather than being trusted
-    // because the catalog offered them.
-    thinkingLevelMap: advertisableLevels(catalogModel.thinkingLevelMap, model.compat, catalogModel.reasoning),
+    // The cached compat stays as stored, so catalog levels are closed against it
+    // rather than trusted because the catalog offered them.
+    ...closeSerializerPolicy({
+      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: catalogModel.reasoning,
+      vendorCompat: model.compat,
+      catalogLevels: catalogModel.thinkingLevelMap,
+    }),
     input: catalogModel.input,
     cost: catalogModel.cost,
     contextWindow: catalogModel.contextWindow,
@@ -299,8 +307,14 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   if (routingFamily !== undefined && baseFamily !== undefined && routingFamily !== baseFamily) {
     return { semanticFamily: "conflicting" };
   }
-  const model =
-    (routingModel ? semanticModel(routingModel) : undefined) ?? (baseModel ? semanticModel(baseModel) : undefined);
+  // Two generations of one family are as contradictory as two families: applying
+  // the routing model's contract to a declared K3 backend would send the wrong
+  // control. Withhold the generation policy instead of taking the first.
+  const routingGeneration = routingModel ? semanticModel(routingModel) : undefined;
+  const baseGeneration = baseModel ? semanticModel(baseModel) : undefined;
+  const contradictoryGenerations =
+    routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
+  const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   // Provider identity and semantic family must describe the same backend, so a
   // resolution reports the family of the candidate that resolved it (or of the
@@ -565,43 +579,52 @@ function mapFromModelInfoGroup(
   // The policy's compat only applies on Chat, so its level map must be gated the
   // same way; otherwise a Responses group advertises Chat-shaped levels that the
   // Responses wire emits as bare `reasoning.effort` values.
-  // Withholding catalog authority and additive vendor features on contradictory
-  // evidence is conservative; withholding a vendor's RESTRICTIONS is not — it
-  // makes the request more aggressive. A group where one deployment evidences
-  // Moonshot keeps the Moonshot constraints, so more evidence can never produce a
-  // less safe request than none. The route name is still never consulted here.
-  const restrictiveFamily = reduced.declaredFamilies.includes("kimi") ? "kimi" : reduced.semanticFamily;
-  const compat =
-    reduced.api === "openai-completions"
-      ? { ...buildCompat(reduced.id, restrictiveFamily), ...reasoningPolicy?.compat }
-      : buildCompat(reduced.id, restrictiveFamily);
-  // The policy's level values are Chat-shaped (they pair with its Chat compat),
-  // so a Responses group keeps catalog levels instead: emitting `off` or `max`
-  // as a bare `reasoning.effort` value is not a Responses effort. Dropping the
-  // map entirely would be worse than either — pi-ai reads absent as all levels.
-  const candidateLevels =
-    reduced.api === "openai-completions"
-      ? (reasoningPolicy?.thinkingLevelMap ?? reduced.thinkingLevelMap)
-      : reduced.thinkingLevelMap;
-  const levels = advertisableLevels(candidateLevels, compat, reasoning);
+  // Vendor compatibility is the per-field conservative meet of what each routable
+  // deployment evidences. An unlabeled deployment contributes no conclusion, which
+  // blocks every shape-changing field while still letting a deployment-evidenced
+  // safety restriction survive. A unanimous group meets to exactly that vendor's
+  // block, so the common case is unchanged. Route text is consulted only when no
+  // deployment identified a family at all.
+  const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
+  const vendorCompat = unlabeled
+    ? buildCompat(reduced.id, reduced.semanticFamily)
+    : meetVendorCompat(
+        // A deployment that identified no family contributes NO conclusion, not a
+        // route-name-derived one: passing `undefined` family to `buildCompat` would
+        // infer the vendor from the route id and hand the meet a unanimous vote it
+        // never earned, which is exactly the inference this withholds.
+        reduced.deploymentFamilies.map((family) =>
+          family === undefined ? undefined : buildCompat(reduced.id, family),
+        ),
+      );
+  const policy = closeSerializerPolicy({
+    api: reduced.api,
+    reasoning,
+    vendorCompat,
+    semanticCompat: reasoningPolicy?.compat,
+    semanticLevels: reasoningPolicy?.thinkingLevelMap,
+    catalogLevels: reduced.thinkingLevelMap,
+  });
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
     // catalog re-derivation from the model id during offline cache reads.
     name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
-    reasoning,
-    ...(levels ? { thinkingLevelMap: levels } : {}),
+    ...policy,
     input: reduced.vision ? ["text", "image"] : ["text"],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat,
     // The route id, not the semantic label: `moonshotPolicy`'s forced-thinking
     // check is a route-id pattern, and no semantic label can ever match it, so
     // passing a label made the exemption unreachable and split the display
     // conclusion by discovery source for one route.
-    ...(restrictiveFamily === "kimi" || (restrictiveFamily === undefined && isMoonshotModel(reduced.id))
+    // Tool-message repair and `<think>` unwrapping are message-shape repairs that
+    // are no-ops against a non-Moonshot backend, so a deployment evidencing
+    // Moonshot keeps them even when a sibling is unlabeled. Route text is evidence
+    // only when no deployment identified a family.
+    ...(reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id))
       ? { litellmPolicy: moonshotPolicy(reduced.id) }
       : {}),
   };
@@ -624,34 +647,41 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   const model = mapFromModelInfo(chatOnly);
   if (!model) return undefined;
   // Without a deployment `model_name` the only identifier is the `/health` route
-  // text, which is not evidence for request controls. Deleting the map would
-  // hand pi-ai an absent map, i.e. every standard level; deny them explicitly.
-  if (!entry.model_name && model.reasoning) model.thinkingLevelMap = NO_TRANSMISSIBLE_LEVELS;
-  else if (!entry.model_name) delete model.thinkingLevelMap;
-  return model;
+  // text, which is not evidence for request controls. Deleting the map would hand
+  // pi-ai an absent map, i.e. every standard level, so the conclusion is closed
+  // again with no candidate levels rather than mutated in place.
+  if (entry.model_name) return model;
+  return {
+    ...model,
+    ...closeSerializerPolicy({
+      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: model.reasoning,
+      vendorCompat: model.compat,
+      denyLevels: true,
+    }),
+  };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
-  const reasoning = catalogModel?.reasoning ?? false;
-  const compat = buildCompat(id);
   return {
     id,
     name: catalogModel?.name ?? id,
-    reasoning,
     // Same evidence quality as the `/v1/models` fallback — a route name and
-    // nothing else — so it publishes the same catalog map through the same gate.
-    // Denying outright here instead left one route with levels on one fallback
-    // path and none on the other.
-    thinkingLevelMap: advertisableLevels(catalogModel?.thinkingLevelMap, compat, reasoning),
+    // nothing else — so it closes the same catalog map the same way.
+    ...closeSerializerPolicy({
+      api: "openai-completions",
+      reasoning: catalogModel?.reasoning ?? false,
+      vendorCompat: buildCompat(id),
+      catalogLevels: catalogModel?.thinkingLevelMap,
+    }),
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat,
     ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
@@ -664,19 +694,20 @@ function mapFromModelsList(
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
   const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
-  const reasoning = modelsDevMetadata.reasoning ?? catalogModel?.reasoning ?? false;
-  const compat = buildCompat(id);
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
-    reasoning,
-    thinkingLevelMap: advertisableLevels(catalogModel?.thinkingLevelMap, compat, reasoning),
+    ...closeSerializerPolicy({
+      api: "openai-completions",
+      reasoning: modelsDevMetadata.reasoning ?? catalogModel?.reasoning ?? false,
+      vendorCompat: buildCompat(id),
+      catalogLevels: catalogModel?.thinkingLevelMap,
+    }),
     input: modelsDevMetadata.input ?? catalogModel?.input ?? ["text"],
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat,
     ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }

@@ -54,6 +54,35 @@ export function successfulResponse(text: string): Chunk[] {
   ];
 }
 
+// Responses-shaped equivalent. A `mode: responses` deployment is served on
+// `/responses`, which speaks a different event vocabulary from chat completions,
+// so a chat-shaped reply cannot stand in for it — without this the harness threw
+// on the URL and no Responses request could be inspected at all.
+export function successfulResponsesReply(text: string): Chunk[] {
+  const message = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }],
+  };
+  return [
+    sseChunk({ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } }),
+    sseChunk({ type: "response.output_item.added", output_index: 0, item: { ...message, content: [] } }),
+    sseChunk({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text }),
+    sseChunk({ type: "response.output_item.done", output_index: 0, item: message }),
+    sseChunk({
+      type: "response.completed",
+      response: {
+        id: "resp_1",
+        status: "completed",
+        output: [message],
+        usage: { input_tokens: 1, output_tokens: 1, input_tokens_details: { cached_tokens: 0 } },
+      },
+    }),
+  ];
+}
+
 export async function createCompatibilityHarness(
   discoveryRows?: readonly ModelInfoEntry[],
   options: { modelsStore?: InMemoryModelsStore; allowNetwork?: boolean } = {},
@@ -102,11 +131,15 @@ export async function createCompatibilityHarness(
       });
     }
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
-    if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+    // Both request surfaces are served so a `mode: responses` deployment can be
+    // exercised on the wire, not only through discovery.
+    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses")) {
+      throw new Error(`unexpected URL: ${url}`);
+    }
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
-    const history = JSON.stringify(requestBody.messages);
+    const history = JSON.stringify(requestBody.messages ?? requestBody.input ?? []);
     if (history.includes("Overflow the context")) {
       return Response.json(
         {

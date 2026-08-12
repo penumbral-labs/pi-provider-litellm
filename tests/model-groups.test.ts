@@ -104,9 +104,9 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: true,
       semanticFamily: "conflicting",
       catalogAuthorityAmbiguous: true,
-      // Sorted, deduplicated, and excludes the "conflicting" marker: the caller
-      // needs to know which vendors' restrictions to keep, not that they clashed.
-      declaredFamilies: ["claude", "openai"],
+      // Positional, with `undefined` for a deployment that identified no family:
+      // the per-field meet must be able to tell "unlabeled" from "disagreed".
+      deploymentFamilies: ["claude", "openai", undefined, undefined],
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },
     };

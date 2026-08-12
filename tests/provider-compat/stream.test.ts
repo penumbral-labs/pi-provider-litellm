@@ -1,6 +1,12 @@
 import { type Context, getSupportedThinkingLevels, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
+import {
+  createCompatibilityHarness,
+  RED_CIRCLE_PNG,
+  sseChunk,
+  successfulResponse,
+  successfulResponsesReply,
+} from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -556,4 +562,75 @@ describe("advertised thinking levels are transmissible", () => {
       }
     },
   );
+});
+
+// Required property: for every model any discovery path can produce, on either
+// API, every level the picker offers must serialize a control the API recognizes
+// — or no level is offered. Verified against the real serializers, not a
+// re-implementation of the rule under test.
+describe("advertised levels serialize on both APIs", () => {
+  // Values each API actually accepts. Chat carries a level through
+  // `reasoning_effort` or a `thinking` payload; Responses carries `reasoning.effort`
+  // and has no `off`/`max` effort.
+  const RESPONSES_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+  const BACKENDS = [
+    "moonshot/kimi-k2.5",
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.7-code",
+    "moonshot/kimi-k3",
+    // Untabled and future Kimi shapes: negative cases that must fail closed.
+    "moonshot/kimi-k2-thinking",
+    "moonshot/kimi-latest",
+    "moonshot/kimi-k4",
+    "moonshot/kimi-k9.9-ultra",
+    "moonshot/kimi-k2.8-code",
+    "deepseek/deepseek-v4",
+    "deepseek/deepseek-r1",
+    "openai/o3",
+    "openai/gpt-5.5",
+    "anthropic/claude-sonnet-4-6",
+    "internal/opaque-backend",
+  ];
+  const EVIDENCE = [undefined, ["temperature"], ["thinking"], ["reasoning_effort"], ["thinking", "reasoning_effort"]];
+
+  it.each(
+    BACKENDS.flatMap((backend) =>
+      ["chat", "responses"].flatMap((mode) => EVIDENCE.map((params) => ({ backend, mode, params }))),
+    ),
+  )("$backend / $mode / $params", async ({ backend, mode, params }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "prop-route",
+        litellm_params: { model: backend, ...(params ? { allowed_openai_params: params } : {}) },
+        model_info: { id: "d1", mode, supports_reasoning: true },
+      },
+    ]);
+
+    const reply = model.api === "openai-responses" ? successfulResponsesReply : successfulResponse;
+    const offered = getSupportedThinkingLevels(model).filter((level) => level !== "off");
+    for (const level of offered) {
+      respond(...reply("ok"));
+      await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: level }).result();
+      const body = (requests.at(-1) ?? {}) as Record<string, unknown>;
+      const label = `${backend} / ${mode} / ${JSON.stringify(params)} level=${level}`;
+
+      if (model.api === "openai-responses") {
+        const reasoning = body.reasoning as { effort?: string } | undefined;
+        expect(reasoning?.effort, `${label} sent no reasoning.effort`).toBeDefined();
+        // `off` and `max` are not Responses efforts; a Chat-shaped map leaking
+        // through would emit exactly those.
+        expect(RESPONSES_EFFORTS.has(String(reasoning?.effort)), `${label} effort=${reasoning?.effort}`).toBe(true);
+      } else {
+        const carried = ["reasoning_effort", "thinking", "reasoning"].filter((key) => body[key] !== undefined);
+        expect(carried, `${label} advertised a level but sent nothing`).not.toEqual([]);
+      }
+    }
+
+    if (offered.length === 0) {
+      // The no-level conclusion must be explicit; an absent map means every
+      // standard level upstream.
+      expect(model.reasoning ? model.thinkingLevelMap : {}).toBeDefined();
+    }
+  });
 });

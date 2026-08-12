@@ -607,17 +607,12 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    // Catalog authority is withheld and no reasoning selector is invented, but
-    // one deployment really is Moonshot-backed, so its restrictions still apply:
-    // dropping them would make requests to that deployment more aggressive, and
-    // they are a no-op against the OpenAI sibling.
-    expect(result.models[0]?.compat).toMatchObject({
-      maxTokensField: "max_tokens",
-      supportsStrictMode: false,
-      supportsReasoningEffort: false,
-    });
+    // Per-field conservative meet: the shape-changing fields are withheld because
+    // the OpenAI candidate would reject them, the safety restrictions the Moonshot
+    // candidate needs survive, and nothing is inferred from the route name.
+    expect(result.models[0]?.compat).not.toHaveProperty("maxTokensField");
     expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
-    expect(result.models[0]?.litellmPolicy).toEqual(moonshotPolicy("kimi-looking-route"));
+    expect(result.models[0]?.compat).toMatchObject({ supportsReasoningEffort: false, supportsStrictMode: false });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
@@ -2207,20 +2202,47 @@ describe("more evidence never produces a less safe request", () => {
     }));
 
   it.each([
-    { name: "every deployment identifies Moonshot", backends: ["azure_ai/kimi-k2.6-east", "azure_ai/kimi-k2.6-west"] },
-    { name: "only one deployment identifies Moonshot", backends: ["azure_ai/kimi-k2.6-east", "azure_ai/k26-prod"] },
-    { name: "no deployment identifies anything", backends: ["azure_ai/k26-prod-east", "azure_ai/k26-prod-west"] },
-  ])("keeps Moonshot constraints when $name", async ({ backends }) => {
+    {
+      name: "every deployment identifies Moonshot",
+      backends: ["azure_ai/kimi-k2.6-east", "azure_ai/kimi-k2.6-west"],
+      mixed: false,
+    },
+    {
+      name: "only one deployment identifies Moonshot",
+      backends: ["azure_ai/kimi-k2.6-east", "azure_ai/k26-prod"],
+      mixed: true,
+    },
+    {
+      name: "no deployment identifies anything",
+      backends: ["azure_ai/k26-prod-east", "azure_ai/k26-prod-west"],
+      mixed: false,
+    },
+  ])("meets vendor policy per field when $name", async ({ backends, mixed }) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: kimiGroup(backends) }));
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const model = result.models[0];
 
-    // Withholding catalog authority on contradictory evidence is conservative;
-    // withholding a vendor's restrictions is not, because it makes the request
-    // more aggressive. Partial evidence must not be the least safe case.
-    expect(result.models[0]?.compat).toMatchObject({ maxTokensField: "max_tokens", supportsStrictMode: false });
-    expect(result.models[0]?.litellmPolicy).toEqual(moonshotPolicy("kimi-k2.6"));
-    expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
+    // Partial family evidence is withheld outright, so it gets no vendor compat
+    // and no request policy. What it must never do is advertise a level: the
+    // closed serializer policy is what keeps that from fail-opening.
+    const offered = getSupportedThinkingLevels(nativeModel(model)).filter((level) => level !== "off");
+    // The adjudicated target: a deployment-evidenced safety restriction must not
+    // disappear because a sibling is unlabeled, and no level may be advertised
+    // that the group cannot carry — in every mixture.
+    expect(offered).toEqual([]);
+    expect(model?.litellmPolicy).toEqual(moonshotPolicy("kimi-k2.6"));
+    expect(model?.compat).toMatchObject({ supportsReasoningEffort: false, supportsStrictMode: false });
+    if (mixed) {
+      // Shape-changing fields have no safe common value once a candidate is
+      // unlabeled: `max_tokens` is rejected by newer OpenAI models.
+      expect(model?.compat).not.toHaveProperty("maxTokensField");
+    } else {
+      expect(model?.compat).toMatchObject({ maxTokensField: "max_tokens" });
+    }
+    // Never catalog limits, pricing, or provider identity from a mixed group.
+    expect(model?.contextWindow).toBe(128_000);
+    expect(model?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
   it("still withholds additive vendor features when families disagree", async () => {
@@ -2295,5 +2317,47 @@ describe("more evidence never produces a less safe request", () => {
       getSupportedThinkingLevels(nativeModel(listed.models[0])),
     );
     expect(getSupportedThinkingLevels(nativeModel(health.models[0]))).not.toEqual([]);
+  });
+});
+
+describe("display normalization follows persisted policy, not route text", () => {
+  it.each([
+    {
+      name: "an opaque route over a genuine Moonshot backend",
+      route: "internal/prod-chat-7",
+      backend: "moonshot/kimi-k2.6",
+      expected: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
+    },
+    {
+      name: "a Kimi-looking route over a foreign backend",
+      route: "kimi-k2.6",
+      backend: "openai/gpt-4o",
+      expected: undefined,
+    },
+    {
+      name: "an opaque route over a forced-thinking Moonshot backend",
+      route: "internal/prod-chat-8",
+      backend: "moonshot/kimi-k2-thinking",
+      expected: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
+    },
+  ])("$name", async ({ route, backend, expected }) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: route,
+            litellm_params: { model: backend },
+            model_info: { id: "d1", mode: "chat", litellm_provider: backend.split("/")[0] },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // The conclusion is persisted from deployment evidence, so a genuine backend
+    // behind an opaque name is handled and a lookalike name over a foreign
+    // backend is not. `message_end` reads only this field.
+    expect(result.models[0]?.litellmPolicy).toEqual(expected);
   });
 });

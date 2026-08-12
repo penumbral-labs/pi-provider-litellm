@@ -57,11 +57,10 @@ export interface ReducedModelGroup {
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
-  // Every family any deployment identified, even when they disagreed. Catalog
-  // authority and additive vendor features need unanimity, but a vendor's
-  // RESTRICTIONS must apply as soon as one deployment evidences that vendor:
-  // withholding a restriction makes the request more aggressive, not safer.
-  declaredFamilies: SemanticFamily[];
+  // Family each routable deployment identified, positionally, with `undefined`
+  // for a deployment that identified none. The per-field meet needs to know that
+  // a candidate is unlabeled — not merely that the group disagreed.
+  deploymentFamilies: (SemanticFamily | undefined)[];
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
 }
@@ -174,28 +173,156 @@ export const NO_TRANSMISSIBLE_LEVELS = {
   max: null,
 } as const;
 
-// pi-ai serializes a thinking level either through `reasoning_effort` — which it
-// allows unless we explicitly deny it — or through an explicit `thinkingFormat`.
-// A compat that denies effort and names no format can carry nothing, so any map
-// paired with it would advertise levels that never reach the wire.
-function carriesReasoningLevels(compat: DiscoveredModel["compat"]): boolean {
-  const openAICompat = compat as OpenAICompat | undefined;
-  return openAICompat?.thinkingFormat !== undefined || openAICompat?.supportsReasoningEffort !== false;
+const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+// Efforts the Responses API accepts. pi-ai passes an unmapped level through
+// verbatim and reads `thinkingLevelMap.off` as the disable value, so a Chat-shaped
+// map would emit `off` or `max` as an effort. `none` is the disable spelling —
+// pi-ai's own `openai/gpt-5.5` entry maps `off` to it.
+const RESPONSES_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+// A level map is only meaningful next to the compat that serializes it, and the
+// two used to travel separately: five call sites each decided whether to copy
+// one, the other, or both. `SerializerPolicy` closes them into one value so a
+// consumer cannot take a level map without the conclusion that carries it.
+export interface SerializerPolicy {
+  reasoning: boolean;
+  thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
+  compat: DiscoveredModel["compat"];
 }
 
-// The single place where an advertised level map meets the compat that has to
-// carry it. Level advertisement and transmissibility travelled on separate
-// channels before this, which let four different paths offer levels that
-// serialized nothing. Every path that publishes a thinkingLevelMap goes through
-// here so the invariant is mechanical rather than restated per call site.
-export function advertisableLevels(
+// Chat carries a level through `reasoning_effort` or an explicit `thinkingFormat`.
+// pi-ai would default effort on for a litellm provider, but a closed policy must
+// state its own carrier rather than inherit one, so this reports only explicit
+// evidence and the caller sets the carrier it concluded.
+function chatCarrier(compat: OpenAICompat | undefined): boolean {
+  return compat?.thinkingFormat !== undefined || compat?.supportsReasoningEffort === true;
+}
+
+function deniesChatEffort(compat: OpenAICompat | undefined): boolean {
+  return compat?.supportsReasoningEffort === false && compat?.thinkingFormat === undefined;
+}
+
+// Translates a Chat-shaped map into Responses efforts, denying any level with no
+// valid Responses value instead of letting it through verbatim.
+export function toResponsesLevels(
   levels: DiscoveredModel["thinkingLevelMap"] | undefined,
-  compat: DiscoveredModel["compat"],
-  reasoning: boolean,
-): DiscoveredModel["thinkingLevelMap"] | undefined {
-  if (!reasoning) return levels;
-  if (!carriesReasoningLevels(compat)) return NO_TRANSMISSIBLE_LEVELS;
-  return levels;
+): NonNullable<DiscoveredModel["thinkingLevelMap"]> {
+  const translated: Record<string, string | null> = {};
+  for (const level of EXTENDED_LEVELS) {
+    const chat = levels?.[level];
+    if (level === "off") {
+      // Disable is `none` on this API, never `off`.
+      translated.off = chat === null ? null : "none";
+      continue;
+    }
+    // pi-ai passes an absent level through as its own name, so an absent entry
+    // is only advertisable when the name itself is a valid effort.
+    const candidate = chat === undefined ? level : chat;
+    translated[level] = candidate !== null && RESPONSES_EFFORTS.has(candidate) ? candidate : null;
+  }
+  return translated as NonNullable<DiscoveredModel["thinkingLevelMap"]>;
+}
+
+// Fields whose conservative direction is to APPLY them: each one removes or
+// narrows something we would otherwise send, and the resulting request is
+// accepted by any OpenAI-compatible backend. Applying one because a single
+// deployment needs it therefore cannot break an unlabeled sibling.
+const MEET_APPLY_IF_ANY = [
+  "supportsStore",
+  "supportsDeveloperRole",
+  "supportsReasoningEffort",
+  "supportsStrictMode",
+] as const;
+
+// Fields that change the request shape or add a capability. Applying one because
+// a sibling needs it can break the other candidate — `max_tokens` is rejected by
+// newer OpenAI models in favour of `max_completion_tokens`, and `cache_control`
+// markers are only valid for Anthropic — so these need every candidate to agree
+// and are otherwise withheld explicitly.
+const MEET_REQUIRE_UNANIMITY = [
+  "maxTokensField",
+  "cacheControlFormat",
+  "thinkingFormat",
+  "requiresReasoningContentOnAssistantMessages",
+] as const;
+
+// The conservative meet of per-deployment vendor conclusions, field by field. A
+// blanket union would copy every vendor flag as soon as one deployment named a
+// vendor, which is unsafe: not every restrictive-looking flag is monotone. A
+// blanket withhold would drop safety restrictions a deployment demonstrably
+// needs. Neither is right, so each field carries its own direction and anything
+// without a demonstrably safe common value is withheld rather than inferred.
+export function meetVendorCompat(
+  perDeployment: readonly (DiscoveredModel["compat"] | undefined)[],
+): DiscoveredModel["compat"] {
+  const candidates = perDeployment.map((compat) => compat as OpenAICompat | undefined);
+  if (candidates.length === 0) return undefined;
+  const met: Record<string, unknown> = {};
+  for (const field of MEET_APPLY_IF_ANY) {
+    const stated = candidates.map((compat) => compat?.[field]).filter((value) => value !== undefined);
+    // Values within this set are all `false`; a disagreement would mean two
+    // vendors want opposite narrowing, which has no safe common value.
+    if (stated.length > 0 && new Set(stated).size === 1) met[field] = stated[0];
+  }
+  for (const field of MEET_REQUIRE_UNANIMITY) {
+    const stated = candidates.map((compat) => compat?.[field]);
+    if (stated.every((value) => value !== undefined) && new Set(stated).size === 1) met[field] = stated[0];
+  }
+  return (Object.keys(met).length > 0 ? met : undefined) as DiscoveredModel["compat"];
+}
+
+// The one place a level map is paired with a serializer conclusion. Every
+// discovery, cache, health and singleton path consumes the whole returned object.
+export function closeSerializerPolicy(input: {
+  api: "openai-completions" | "openai-responses";
+  reasoning: boolean;
+  vendorCompat: DiscoveredModel["compat"];
+  semanticCompat?: ReasoningPolicy["compat"];
+  semanticLevels?: DiscoveredModel["thinkingLevelMap"];
+  catalogLevels?: DiscoveredModel["thinkingLevelMap"];
+  // For callers with no level evidence at all. Distinct from "no candidate map":
+  // this states the no-level conclusion explicitly, so a caller spreading the
+  // policy over an earlier model cannot leave a stale map behind.
+  denyLevels?: boolean;
+}): SerializerPolicy {
+  const { api, reasoning, vendorCompat, semanticCompat, semanticLevels, catalogLevels, denyLevels } = input;
+  if (api === "openai-responses") {
+    // Chat compat fields are not part of the Responses compat union, so only the
+    // shared ones travel. The Responses serializer emits `reasoning.effort`
+    // whenever the model reasons, so the carrier is inherent to the API.
+    const shared = vendorCompat as OpenAICompat | undefined;
+    const compat: DiscoveredModel["compat"] = {
+      ...(shared?.supportsDeveloperRole === false ? { supportsDeveloperRole: false } : {}),
+      ...(shared?.supportsStrictMode === false ? { supportsStrictMode: false } : {}),
+    };
+    if (!reasoning) return { reasoning, compat };
+    if (denyLevels) return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+    return { reasoning, thinkingLevelMap: toResponsesLevels(semanticLevels ?? catalogLevels), compat };
+  }
+  // A model with no compat at all keeps none: fabricating an empty object here
+  // would rewrite every cached model that passes through.
+  const stated = vendorCompat !== undefined || semanticCompat !== undefined;
+  const merged = { ...(vendorCompat as OpenAICompat), ...semanticCompat } as OpenAICompat;
+  const compat = (stated ? merged : undefined) as DiscoveredModel["compat"];
+  if (!reasoning) return { reasoning, compat };
+  if (denyLevels) return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+  if (deniesChatEffort(merged)) {
+    // The vendor denies effort and named no format: nothing can carry a level.
+    return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+  }
+  const candidateLevels = semanticLevels ?? catalogLevels;
+  // No candidate map: pi-ai offers the standard levels and serializes them through
+  // `reasoning_effort`, which this compat permits, so there is nothing to close.
+  if (candidateLevels === undefined) return { reasoning, compat };
+  if (chatCarrier(merged)) return { reasoning, thinkingLevelMap: candidateLevels, compat };
+  // Advertising a specific map without an explicit carrier would lean on pi-ai's
+  // default for a litellm provider; state the carrier this policy concluded.
+  return {
+    reasoning,
+    thinkingLevelMap: candidateLevels,
+    compat: { ...merged, supportsReasoningEffort: true } as DiscoveredModel["compat"],
+  };
 }
 
 function buildReasoningPolicy(
@@ -441,13 +568,9 @@ export function reduceModelGroup(
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
-    declaredFamilies: [
-      ...new Set(
-        catalogs
-          .map((catalog) => catalog?.semanticFamily)
-          .filter((family): family is SemanticFamily => family !== undefined && family !== "conflicting"),
-      ),
-    ].sort(),
+    deploymentFamilies: catalogs.map((catalog) =>
+      catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,
+    ),
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };
