@@ -503,7 +503,9 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
+  // Branch on the readable name, not the raw field: an unreadable one must fall back
+  // to the `/health` route name rather than discarding a model the route could name.
+  if (wireString(entry.model_name) || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
   // A thinking-level map is a per-generation control, and `/health` supplies only
   // route text for it. Other catalog metadata on this path is unchanged.

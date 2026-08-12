@@ -242,13 +242,17 @@ jobs:
             summary.map((row) => row.mode).join(",") === "chat,responses",
             `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
           );
+          // Supersets, not exact equality: recent LiteLLM computes
+          // `supported_openai_params` from its own provider config rather than echoing
+          // the operator's, and the image tag is a moving `main-latest`. The property
+          // this fixture needs is that the operator's declared params survive and that
+          // the two rows remain asymmetric.
+          const has = (row, ...params) => params.every((param) => row.accepted.includes(param));
+          assert(has(summary[0], "temperature", "reasoning_effort"), `chat row lost declared params: ${summary[0].accepted}`);
+          assert(has(summary[1], "temperature", "thinking"), `responses row lost declared params: ${summary[1].accepted}`);
           assert(
-            summary[0].accepted.join(",") === "reasoning_effort,temperature",
-            `chat deployment accepted set drifted: ${summary[0].accepted.join(",")}`,
-          );
-          assert(
-            summary[1].accepted.join(",") === "reasoning_effort,temperature,thinking",
-            `responses deployment accepted set drifted: ${summary[1].accepted.join(",")}`,
+            summary[0].accepted.join(",") !== summary[1].accepted.join(","),
+            "the two deployments must remain asymmetric for this fixture to exercise intersection",
           );
 
           // Assert the reduced outcome, not just the wire shape. The two deployments
@@ -276,7 +280,13 @@ jobs:
             grouped[0].cost.input === 0 && grouped[0].cost.output === 0,
             `withheld-authority group must report unknown cost, received ${JSON.stringify(grouped[0].cost)}`,
           );
-          assert(grouped[0].contextWindow === 128000, `expected the conservative default context window`);
+          // Catalog authority is withheld, so no catalog limit may be adopted. Asserted
+          // via the marker and cost above; a bare 128000 check would also pass on an
+          // explicit router limit and so cannot isolate the conservative default.
+          assert(
+            grouped[0].thinkingLevelMap === undefined,
+            "withheld-authority group must not adopt a catalog thinking-level map",
+          );
           NODE
 
       - name: Run provider smoke

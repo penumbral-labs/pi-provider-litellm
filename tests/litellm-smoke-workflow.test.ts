@@ -95,8 +95,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("mode: chat");
     expect(workflow).toContain("mode: responses");
     expect(workflow).toContain('=== "chat,responses"');
-    expect(workflow).toContain('=== "reasoning_effort,temperature"');
-    expect(workflow).toContain('=== "reasoning_effort,temperature,thinking"');
+    expect(workflow).toContain('has(summary[0], "temperature", "reasoning_effort")');
+    expect(workflow).toContain('has(summary[1], "temperature", "thinking")');
+    expect(workflow).toContain("must remain asymmetric");
 
     // Structural: the verification step must actually exist in the job's step list,
     // be enabled, run after the build that produces dist/, and assert the reduced

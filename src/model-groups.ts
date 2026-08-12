@@ -53,6 +53,13 @@ export function wireString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+// An unreadable capability flag must not be read as `true`. `"false"` and `"no"` are
+// both truthy, so coercing would relax a group guarantee — the one direction that
+// matters here, since a capability is only advertised when every deployment agrees.
+function wireBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = wireString(mode)?.trim();
@@ -198,10 +205,10 @@ export function reduceModelGroup(
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
   const reasoning = deployments.every(
-    (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
+    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning ?? false,
   );
   const vision = deployments.every(
-    (entry, index) => entry.model_info?.supports_vision ?? catalogAuthority[index]?.vision ?? false,
+    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision ?? false,
   );
   const contextWindow = min(
     deployments.map(

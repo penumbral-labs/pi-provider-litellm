@@ -291,6 +291,22 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("does not read an unreadable capability flag as true", () => {
+    // `"false"` and `"no"` are truthy, so coercion would advertise a capability no
+    // deployment claimed. A group guarantee must never be relaxed by a bad wire type.
+    const lying = row({
+      model_info: {
+        id: "lying",
+        mode: "chat",
+        supports_vision: "no" as unknown as boolean,
+        supports_reasoning: "false" as unknown as boolean,
+      },
+      litellm_params: { model: "internal/unknown" },
+    });
+
+    expect(reduceModelGroup([lying], resolveCatalog)).toMatchObject({ vision: false, reasoning: false });
+  });
+
   it("drops non-string accepted parameters and keeps the usable ones", () => {
     const badParams = row({
       model_info: { id: "bad", mode: "chat", supported_openai_params: [1, "temperature"] as unknown as string[] },

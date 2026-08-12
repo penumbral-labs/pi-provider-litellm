@@ -683,6 +683,23 @@ describe("discoverModels via /model/info", () => {
     expect(health.models.map((model) => model.id)).toEqual(["anthropic/claude-opus-4-7"]);
   });
 
+  it("falls back to the health route name when a deployment row's own name is unreadable", async () => {
+    // The detail row's `model_name` is unusable, but `/health` named the route, so the
+    // model must survive under that name rather than being discarded.
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-1": () =>
+        jsonResponse(200, { data: [{ model_name: 7, model_info: { mode: "chat" } }] }),
+      "/model/info": () => jsonResponse(403, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "named-route", model_id: "uuid-1" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    expect(result.models.map((model) => model.id)).toEqual(["named-route"]);
+  });
+
   it("withholds a health deployment whose route name is not a string", async () => {
     // This path bypasses the grouping loop: `/health` supplies the route name
     // directly to the reducer, so it needs its own guard.
