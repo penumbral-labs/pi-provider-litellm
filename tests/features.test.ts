@@ -96,6 +96,46 @@ describe("gcloud ADC provider auth", () => {
     expect(resolved.source).toBe("gcloud ADC");
   });
 
+  // ADC outranks the environment key in resolveCredentials, so check must name ADC here.
+  // Nothing covered this state before, and reporting the fallback instead looked correct
+  // in isolation while contradicting what every request actually sends.
+  it("names ADC when it outranks a configured fallback", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse(200, { access_token: "ya29.minted", expires_in: 3600 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    process.env.LITELLM_API_KEY = "sk-env-fallback";
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    const checked = (await provider.check()) as { source: string };
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+
+    expect(resolved.auth.apiKey).toBe("ya29.minted");
+    expect(resolved.source).toBe("gcloud ADC");
+    expect(checked.source).toBe(resolved.source);
+  });
+
+  // The one state where the two legitimately differ: check cannot know the refresh token
+  // is dead without a network call, so resolve reports the credential it fell back to.
+  it("falls back to the environment key when ADC cannot mint", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") return jsonResponse(400, { error: "invalid_grant" });
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.LITELLM_API_KEY = "sk-env-fallback";
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+
+    expect(resolved.auth.apiKey).toBe("sk-env-fallback");
+    expect(resolved.source).toBe("LITELLM_API_KEY");
+  });
+
   it.for([
     ["an unreadable ADC file", undefined],
     ["service_account credentials", { type: "service_account", client_email: "a@b.iam.gserviceaccount.com" }],

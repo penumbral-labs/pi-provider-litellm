@@ -74,8 +74,6 @@ export interface ResolvedCredentials {
   apiKey?: string;
   apiKeyFingerprint?: string;
   apiKeyConfig?: string;
-  // A usable `authorized_user` Google ADC credential was found.
-  hasGcloudAdc?: boolean;
   // `apiKey` was minted from Google ADC rather than config, helper, or env.
   apiKeyFromGcloudAdc?: boolean;
 }
