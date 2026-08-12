@@ -84,10 +84,11 @@ describe("pi package compatibility", () => {
     // The gap is keyed on whether an api has a currently-listed model, not on whether
     // the protocol is one this provider declines to select.
     expect(readme).toContain("currently-listed");
-    expect(readme).toContain("including a selectable protocol your proxy happens not to expose");
-    // And containment depends on the credential type, because Pi rewrites the request
-    // base only when the resolved credential supplies one.
-    expect(readme).toContain("when the active credential supplies its own base URL");
+    expect(readme).toContain("including `openai-responses` on a proxy that exposes no responses routes");
+    // And the gap is named as an upstream defect with the required fix, not as
+    // intended behavior we live with.
+    expect(readme).toContain("open upstream defect");
+    expect(readme).toContain("route by a provider's declared protocols");
     // Superseded scopings that were measurably wrong.
     expect(readme).not.toContain("Known gap for the last two rows");
     expect(readme).not.toContain("is hidden from `/model` but, if selected by id");

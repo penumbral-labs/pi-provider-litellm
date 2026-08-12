@@ -578,32 +578,6 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.baseUrl).toBe("https://litellm.example.com/v1");
   });
 
-  it("leaves synthetic Messages payloads unchanged by Chat and Responses compatibility hooks", async () => {
-    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
-    process.env.LITELLM_API_KEY = "test-key";
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-    const payload = {
-      model: "kimi-k2.6",
-      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "call-1" }] }],
-      reasoning_effort: "HIGH",
-    };
-
-    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
-      { payload },
-      { model: { provider: "litellm", id: "kimi-k2.6", api: "anthropic-messages" } },
-    );
-
-    expect(result).toBeUndefined();
-    expect(payload).toEqual({
-      model: "kimi-k2.6",
-      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "call-1" }] }],
-      reasoning_effort: "HIGH",
-    });
-  });
-
   it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(
@@ -1180,13 +1154,12 @@ describe("extension startup", () => {
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([]);
   });
 
-  it("repoints an SSO request to the credential host instead of rejecting a stale model", async () => {
-    // Documented asymmetry, pinned so it cannot drift silently. Pi replaces
-    // model.baseUrl with the credential's own baseUrl before dispatch, and OAuth
-    // credentials supply one, so our stale-host comparison sees the credential root on
-    // both sides and never fires. The request is safe -- it goes to the credential
-    // host -- but it is repointed, not rejected. Every other host-guard test drives
-    // the api-key shape, where no auth.baseUrl exists and rejection does happen.
+  it("rejects a stale-host model on the SSO path before any request", async () => {
+    // oauth.toAuth deliberately returns no baseUrl, so Pi does not overwrite the
+    // model's host before dispatch and the guard's host comparison is meaningful on
+    // this path too. Previously Pi replaced it with the credential root, which made
+    // the comparison compare the credential against itself and silently repointed a
+    // stale model instead of rejecting it.
     const harness = await oauthTransitionHarness();
 
     const result = await harness.completeWith(
@@ -1194,8 +1167,8 @@ describe("extension startup", () => {
       "https://stale.example.com/v1",
     );
 
-    expect(result.stopReason).toBe("stop");
-    expect(harness.urls()).toEqual(["https://sso.example.com/v1/chat/completions"]);
+    expect(result.stopReason).toBe("error");
+    expect(harness.urls()).toEqual([]);
   });
 
   it("lets an explicit request base URL outrank the remembered SSO root", async () => {
@@ -1210,7 +1183,10 @@ describe("extension startup", () => {
       expires: Number.MAX_SAFE_INTEGER,
       baseUrl: "https://sso.example.com",
     });
-    expect(auth?.baseUrl).toBe("https://sso.example.com");
+    // toAuth must not carry a baseUrl: Pi would overwrite the model host with it and
+    // defeat the stale-host comparison. The root reaches the request path via the
+    // token-keyed runtime root instead.
+    expect(auth?.baseUrl).toBeUndefined();
     const model = {
       id: "explicit-model",
       name: "Explicit model",
@@ -1522,10 +1498,9 @@ describe("extension startup", () => {
 
     const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential);
     expect(await readHelperCount(agentDir)).toBe(1);
-    await expect(pi.providers[0]?.auth.oauth?.toAuth(refreshed!)).resolves.toMatchObject({
-      apiKey: "refreshed-token",
-      baseUrl: "https://proxy.example.com",
-    });
+    const refreshedAuth = await pi.providers[0]?.auth.oauth?.toAuth(refreshed!);
+    expect(refreshedAuth).toMatchObject({ apiKey: "refreshed-token" });
+    expect(refreshedAuth).not.toHaveProperty("baseUrl");
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
@@ -1607,10 +1582,9 @@ describe("extension startup", () => {
       expires: Number.MAX_SAFE_INTEGER,
       baseUrl: "https://proxy.example.com",
     });
-    await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
-      apiKey: "sk-virtual-abc",
-      baseUrl: "https://proxy.example.com",
-    });
+    const ssoAuth = await pi.providers[0]?.auth.oauth?.toAuth(credential!);
+    expect(ssoAuth).toMatchObject({ apiKey: "sk-virtual-abc" });
+    expect(ssoAuth).not.toHaveProperty("baseUrl");
     expect(seenRequests).toContainEqual(
       expect.objectContaining({
         url: "https://proxy.example.com/key/generate",

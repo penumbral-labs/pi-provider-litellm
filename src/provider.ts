@@ -9,12 +9,7 @@ import {
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
-import {
-  createLiteLLMProtocolApis,
-  isSelectableLiteLLMApi,
-  resolveModelBaseUrl,
-  SELECTABLE_LITELLM_API_NAMES,
-} from "./protocols.js";
+import { createLiteLLMProtocolApis, isLiteLLMApi, LITELLM_API_NAMES, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -82,10 +77,10 @@ function activeCredentialRoot(root: string): { root: string; host: string } {
 // bounds for models that came from user models.json config rather than from our
 // own discovery.
 function modelError(model: Model<LiteLLMApi>, activeHost: string): Error | undefined {
-  if (!isSelectableLiteLLMApi(model.api)) {
+  if (!isLiteLLMApi(model.api)) {
     return new Error(
       `LiteLLM model ${model.id} declares unsupported protocol "${model.api}"; ` +
-        `set "api" to one of ${SELECTABLE_LITELLM_API_NAMES.join(", ")} in models.json`,
+        `set "api" to one of ${LITELLM_API_NAMES.join(", ")} in models.json`,
     );
   }
   const storedHost = parseHost(model.baseUrl);

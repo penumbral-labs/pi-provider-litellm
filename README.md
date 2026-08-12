@@ -242,13 +242,13 @@ Two separate mechanisms are involved, and they behave differently: **catalog fil
 |---|---|
 | `api` matching a model this provider currently lists, host matches | sent to the credential's host, URL derived from that host |
 | `api` matching a model this provider currently lists, host differs | rejected before any request |
-| `api` with **no** currently-listed model — including a selectable protocol your proxy happens not to expose | **not contained**; see below |
+| `api` with **no** currently-listed model — including `openai-responses` on a proxy that exposes no responses routes | **not contained**; open upstream defect, see below |
 
-That third row is the gap, and it is wider than the unsupported protocols: if your proxy exposes no `mode: "responses"` routes, then `openai-responses` has no listed model and a hand-written `models.json` entry using it is dispatched by Pi through its global API registry without calling this provider. The request goes to whatever `baseUrl` the entry names, carrying this provider's API key and configured headers. The model is still kept out of `/model`, and it is rejected if it ever does reach this provider, but neither prevents a direct or session-restored dispatch.
+The third row is wider than a foreign `api`: if your proxy exposes no `mode: "responses"` routes, then `openai-responses` has no listed model, and a hand-written `models.json` entry using it is dispatched by Pi through its global API registry without calling this provider. The request goes to whatever `baseUrl` the entry names, carrying this provider's API key and configured headers. Such a model is still kept out of `/model`, and it is rejected if it ever does reach this provider, but neither prevents a direct or session-restored dispatch.
 
-One mitigation applies automatically: when the active credential supplies its own base URL — which `/login litellm` SSO credentials do, but environment or stored API keys do not — Pi rewrites the request base to that credential's host before dispatch, so the entry cannot reach a foreign host. On an SSO credential this also means the stale-host rejection above never fires; the request is silently repointed to the credential host instead.
+That third row is an open defect, not intended behavior, and it is not something this provider can close: `Provider` exposes no way to declare which protocols an implementation supports, so Pi has only the current model list to route on. The fix belongs in Pi — route by a provider's declared protocols, or expose that declaration — and until it lands, do not point a `models.json` LiteLLM entry at a host you do not intend to receive your proxy credentials.
 
-Closing the gap properly requires a change in Pi: routing by a provider's declared protocols rather than by its current model list. Until then, do not point a `models.json` LiteLLM entry at a host you do not intend to receive your proxy credentials.
+The behavior in all three rows is asserted against Pi's real composer in `tests/dispatch-routing.test.ts`, including the credential exposure in the third. That test is written to fail if Pi starts routing by declared protocol, which is the signal that the row can be corrected.
 
 A model is dropped when:
 
@@ -277,7 +277,7 @@ Discovery maps each model to a request protocol and derives its request URL from
 
 A model in `~/.pi/agent/models.json` whose `api` is anything other than these two is kept out of `/model` and rejected if it reaches this provider, with a diagnostic naming the supported values.
 
-An `anthropic-messages` request path exists internally — it maps to the bare proxy root, because the Anthropic API appends `/v1/messages` itself — but discovery never selects it and it is not supported for configuration. Setting it in `models.json` is unsafe for the reason given under [Model host enforcement](#model-host-enforcement), not merely unsupported. Native Messages support is separate work.
+These two protocols are the whole set this provider implements. Anthropic Messages support is a separate change; a protocol is added here only together with the discovery mapping that selects it, because Pi will not route a protocol this provider never lists.
 
 For models this provider dispatches, a per-model `baseUrl` in `models.json` is not honored as a request target — it is re-derived from the active credential host, and the model is rejected when its host differs.
 

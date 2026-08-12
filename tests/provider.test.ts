@@ -9,14 +9,12 @@ import {
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import { createLiteLLMProtocolApis } from "../src/protocols.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, ModelProtocol } from "../src/types.js";
 
-const apiSpies = vi.hoisted(() => ({ anthropic: vi.fn(), completions: vi.fn(), responses: vi.fn() }));
+const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@earendil-works/pi-ai/compat")>()),
-  anthropicMessagesApi: () => ({ stream: apiSpies.anthropic, streamSimple: apiSpies.anthropic }),
   openAICompletionsApi: () => ({ stream: apiSpies.completions, streamSimple: apiSpies.completions }),
   openAIResponsesApi: () => ({ stream: apiSpies.responses, streamSimple: apiSpies.responses }),
 }));
@@ -67,14 +65,6 @@ const discovered = (id: string): DiscoveryResult => ({
 // reports a widening error (TS2322) instead of the pairing error (TS2353), which
 // would satisfy @ts-expect-error for the wrong reason.
 {
-  const messagesWithCompletionsField: DiscoveredModel = {
-    ...discovered("messages").models[0],
-    api: "anthropic-messages",
-    compat: {
-      // @ts-expect-error supportsStore is an OpenAI-completions field.
-      supportsStore: false,
-    },
-  };
   const responsesWithCompletionsField: DiscoveredModel = {
     ...discovered("responses").models[0],
     api: "openai-responses",
@@ -98,7 +88,6 @@ const discovered = (id: string): DiscoveryResult => ({
     // @ts-expect-error completions compat cannot pair with the Responses protocol.
     compat: { supportsStore: false, maxTokensField: "max_tokens" as const },
   };
-  void messagesWithCompletionsField;
   void responsesWithCompletionsField;
   void responsesWithCacheControl;
   void mismatchedProtocol;
@@ -109,7 +98,7 @@ expectTypeOf<DiscoveredModel["api"]>().toEqualTypeOf<LiteLLMApi>();
 // Every ModelProtocol member must carry both fields, so a builder cannot omit one.
 expectTypeOf<ModelProtocol>().toExtend<{ api: LiteLLMApi }>();
 
-function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
+function native(id: string): Model<"openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
 
@@ -182,13 +171,11 @@ describe("toNativeModels", () => {
     const models = toNativeModels("litellm", "https://proxy.example/v1/", [
       baseModel,
       { ...baseModel, id: "responses", api: "openai-responses", compat: {} },
-      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
     ]);
 
     expect(models.map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
       { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
       { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
-      { api: "anthropic-messages", baseUrl: "https://proxy.example" },
     ]);
   });
 });
@@ -330,22 +317,6 @@ describe("createLiteLLMProvider", () => {
       { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
       { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
     ]);
-  });
-
-  it("does not list a protocol discovery cannot select", () => {
-    // Pi dispatches a model whose api matches none of our listed models without
-    // routing through this provider, so we cannot govern its host. Listing it would
-    // imply a guarantee the guard does not provide.
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    const baseModel = discovered("model").models[0];
-    const models = toNativeModels("litellm", "https://proxy.example", [
-      baseModel,
-      { ...baseModel, id: "messages", api: "anthropic-messages", compat: undefined },
-    ]);
-
-    expect(value.filterModels?.(models, credential).map((model) => model.id)).toEqual(["model"]);
-    expect(String(stderr.mock.calls.at(-1)?.[0])).toContain('declares unsupported protocol "anthropic-messages"');
   });
 
   it("derives the request base from the active root, not the cached model path", () => {
@@ -564,7 +535,6 @@ describe("createLiteLLMProvider", () => {
 
     expect(apiSpies.completions).toHaveBeenCalledOnce();
     expect(apiSpies.responses).not.toHaveBeenCalled();
-    expect(apiSpies.anthropic).not.toHaveBeenCalled();
   });
 
   it("routes Responses models through the Responses API", async () => {
@@ -578,7 +548,6 @@ describe("createLiteLLMProvider", () => {
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
-    expect(apiSpies.anthropic).not.toHaveBeenCalled();
   });
 
   it("blocks stale hosts on stream and streamSimple before protocol dispatch", async () => {
@@ -623,31 +592,6 @@ describe("createLiteLLMProvider", () => {
     expect(() => value.streamSimple(foreignApiModel("gemini"), { messages: [] })).toThrow(
       /set "api" to one of openai-completions, openai-responses/,
     );
-    expect(apiSpies.completions).not.toHaveBeenCalled();
-    expect(apiSpies.responses).not.toHaveBeenCalled();
-    expect(apiSpies.anthropic).not.toHaveBeenCalled();
-  });
-
-  it("maps the Messages protocol to the bare proxy root in the registry", () => {
-    // The registry entry stays correct and wired even though discovery cannot select
-    // it: the Anthropic API appends /v1/messages to the base URL itself.
-    const messagesModel = toNativeModels("litellm", "https://proxy.example/v1/", [
-      { ...discovered("messages").models[0], api: "anthropic-messages", compat: undefined },
-    ])[0];
-
-    expect(messagesModel.baseUrl).toBe("https://proxy.example");
-    expect(Object.keys(createLiteLLMProtocolApis())).toContain("anthropic-messages");
-  });
-
-  it("rejects a non-selectable protocol on stream and streamSimple before dispatch", () => {
-    const messagesModel = toNativeModels("litellm", "https://proxy.example/v1/", [
-      { ...discovered("messages").models[0], api: "anthropic-messages", compat: undefined },
-    ])[0];
-    const value = controller();
-
-    expect(() => value.stream(messagesModel, { messages: [] })).toThrow(/declares unsupported protocol/);
-    expect(() => value.streamSimple(messagesModel, { messages: [] })).toThrow(/declares unsupported protocol/);
-    expect(apiSpies.anthropic).not.toHaveBeenCalled();
     expect(apiSpies.completions).not.toHaveBeenCalled();
     expect(apiSpies.responses).not.toHaveBeenCalled();
   });

@@ -650,7 +650,10 @@ async function resolveApiKeyAuth(
   };
 }
 
-function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
+function createProviderAuth(
+  definition: ProviderDefinition,
+  rememberOAuthRuntimeRoot: (apiKey: string, root: string) => void,
+): ProviderAuth {
   return {
     apiKey: {
       name: `${definition.displayName} API key`,
@@ -697,12 +700,19 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
             ...(await refreshLiteLLM(credential, signal)),
             type: "oauth" as const,
           }),
+          // Deliberately returns no baseUrl. Pi overwrites model.baseUrl with
+          // auth.baseUrl before dispatch, which would replace a stale cached host with
+          // the credential root and make the host comparison in provider.ts compare the
+          // credential against itself -- silently repointing a stale model instead of
+          // rejecting it. The root is still resolved here so an unusable credential
+          // fails at login/refresh time, and it is remembered against this access token
+          // for the guarded request path and the Skills/MCP surfaces to reproject from.
           toAuth: async (credential) => {
             const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
             if (!baseUrl) throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+            rememberOAuthRuntimeRoot(credential.access, baseUrl);
             return {
               apiKey: credential.access,
-              baseUrl,
               headers: resolveHeaders(definition),
             };
           },
@@ -778,7 +788,6 @@ function prepareLiteLLMRequestPayload(
   api: Api | undefined,
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
-  if (api === "anthropic-messages") return undefined;
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
@@ -984,6 +993,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+  // The host an OAuth login resolved, bound to the access token it was resolved for.
+  // Request paths and the Skills/MCP surfaces receive no Credential, and OAuth
+  // credentials contribute no request env, so this is the only credential-derived
+  // source of a root for them. Token-keyed so a different credential cannot read it,
+  // and cleared when a non-OAuth credential resolves so it cannot outlive /logout.
+  // Only the default provider enables OAuth, so one slot is sufficient.
+  let oauthRuntimeRoot: { apiKey: string; root: string } | undefined;
+  const rememberOAuthRuntimeRoot = (apiKey: string, root: string): void => {
+    oauthRuntimeRoot = { apiKey, root };
+  };
+  const oauthRuntimeRootFor = (apiKey: string | undefined): string | undefined =>
+    apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined;
   const reportedRuntimeAuthFailures = new Set<string>();
   const reportRuntimeAuthOnce = (message: string): void => {
     if (reportedRuntimeAuthFailures.has(message)) return;
@@ -1022,7 +1043,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const root = resolveSanitizedCredentialRoot(
         definitions[0],
         undefined,
-        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL],
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? oauthRuntimeRootFor(apiKey),
       );
       if (!root || isPlaceholderHost(new URL(root).host)) return undefined;
       const headers = Object.fromEntries(
@@ -1106,28 +1127,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   for (const definition of definitions) {
-    // Request paths get no Credential, so the host an OAuth login resolved has to
-    // be remembered here. Two rules keep that memory from outliving its credential:
-    // it is bound to the access token it was resolved for, and it is discarded as
-    // soon as a non-OAuth credential resolves. Without both, the remembered root
-    // survives /logout and can send a later api key to the SSO host.
-    let oauthRuntimeRoot: { apiKey: string; root: string } | undefined;
-    const providerAuth = createProviderAuth(definition);
-    const oauth = providerAuth.oauth;
-    if (oauth) {
-      const oauthToAuth = oauth.toAuth;
-      oauth.toAuth = async (credential) => {
-        const auth = await oauthToAuth(credential);
-        const root = resolveSanitizedCredentialRoot(definition, credential, auth.baseUrl);
-        oauthRuntimeRoot = root && auth.apiKey ? { apiKey: auth.apiKey, root } : undefined;
-        return auth;
-      };
-    }
+    const providerAuth = createProviderAuth(definition, rememberOAuthRuntimeRoot);
     const apiKeyAuth = providerAuth.apiKey;
     if (apiKeyAuth) {
       const apiKeyResolve = apiKeyAuth.resolve;
       apiKeyAuth.resolve = async (input) => {
-        // Resolving an api key means OAuth is no longer the active credential.
+        // Resolving an api key means OAuth is no longer the active credential, so the
+        // remembered SSO root must not survive the transition.
         oauthRuntimeRoot = undefined;
         return apiKeyResolve(input);
       };
@@ -1142,11 +1148,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       // environment defaults. Ordering the memo first made a stale root outrank the
       // live credential and wedged the provider until restart.
       resolveCredentialRoot: ({ credential, requestBaseUrl, apiKey }) =>
-        resolveSanitizedCredentialRoot(
-          definition,
-          credential,
-          requestBaseUrl ?? (apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined),
-        ),
+        resolveSanitizedCredentialRoot(definition, credential, requestBaseUrl ?? oauthRuntimeRootFor(apiKey)),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
