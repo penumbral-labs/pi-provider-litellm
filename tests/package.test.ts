@@ -179,6 +179,72 @@ describe("pi package compatibility", () => {
     }
   }, 60_000);
 
+  // The CI smoke asserts model ids in `--list-models` output, and Pi serves those from its own
+  // models-store as well as from a loaded extension. This proves the assertion cannot be
+  // satisfied by a prepopulated store alone: with a cached model present and the manifest
+  // entrypoint broken, the extension does not load and its provider is absent.
+  it("cannot satisfy the list-models assertion from a prepopulated store alone", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-cache-"));
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-cachedir-"));
+    const cachedModelId = "cached-only-model";
+    const piBin = resolve(repoRoot, "node_modules/.bin/pi");
+
+    try {
+      const archivePath = join(fixture, "git-package.tar");
+      await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, "HEAD"], { cwd: repoRoot });
+      await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
+      await rm(archivePath);
+
+      await writeFile(
+        join(agentDir, "models-store.json"),
+        JSON.stringify({
+          litellm: {
+            checkedAt: Date.now(),
+            models: [
+              {
+                id: cachedModelId,
+                name: cachedModelId,
+                provider: "litellm",
+                api: "openai-completions",
+                baseUrl: "https://litellm.example.com/v1",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 128_000,
+                maxTokens: 4096,
+              },
+            ],
+          },
+        }),
+        "utf8",
+      );
+
+      const manifestPath = join(fixture, "package.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest;
+      manifest.pi.extensions = ["./src/does-not-exist.ts"];
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
+        cwd: fixture,
+        env: {
+          ...process.env,
+          PI_CODING_AGENT_DIR: agentDir,
+          LITELLM_HEADERS: "{bad json",
+          LITELLM_OFFLINE: "1",
+          LITELLM_BASE_URL: "https://proxy.invalid",
+          LITELLM_API_KEY: "sk-not-a-real-key",
+        },
+      });
+      const output = `${stdout}${stderr}`;
+
+      // The store is present, so a naive assertion on cached ids would pass here.
+      expect(output).not.toContain("failed to parse custom headers");
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+      await rm(agentDir, { force: true, recursive: true });
+    }
+  }, 60_000);
+
   it("keeps source runtime imports loader-provided or built-in", async () => {
     await initImportSpecifiers();
     const sourceDir = join(repoRoot, "src");
