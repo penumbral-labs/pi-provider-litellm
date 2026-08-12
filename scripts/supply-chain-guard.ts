@@ -206,11 +206,15 @@ async function listPackageFiles(root: string, errors: string[]): Promise<string[
 
 // The allowlist bounds what may ship; this bounds what must. Without it a `files` typo
 // publishes a package with no source at all and the guard reports success, because it
-// only ever inspects files that are present.
+// only ever inspects files that are present. Only the source modules are checked: npm
+// includes package.json, README and LICENSE whatever `files` says, so asserting those
+// could never fail.
 function checkRequiredPackageFiles(files: string[], errors: string[]): void {
   const present = new Set(files);
-  for (const required of ["package.json", "README.md", "LICENSE", ...allowedSourceModules.map((m) => `src/${m}.ts`)]) {
-    if (!present.has(required)) errors.push(`npm package: required published file ${required} is missing`);
+  for (const module of allowedSourceModules) {
+    if (!present.has(`src/${module}.ts`)) {
+      errors.push(`npm package: required published file src/${module}.ts is missing`);
+    }
   }
 }
 
