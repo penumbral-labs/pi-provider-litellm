@@ -99,6 +99,20 @@ describe("LiteLLM smoke workflow", () => {
     expect(readReleaseWorkflow()).toContain("run: npm publish --access public --provenance");
   });
 
+  // The whole quality gate hangs off one npm lifecycle hook, and npm skips lifecycle hooks
+  // entirely when `ignore-scripts` is configured -- which it is on at least one developer
+  // machine. Record that assumption explicitly so the exposure is visible in review rather
+  // than discovered at publish time: the release workflow must not rely on the hook alone.
+  it("does not rely solely on a lifecycle hook for the release gate", () => {
+    const release = readReleaseWorkflow();
+    const runsGateDirectly = /run: npm run (prepublishOnly|check|supply-chain:guard)/.test(release);
+
+    expect(
+      runsGateDirectly,
+      "release.yml must run the gate as an explicit step: `npm publish` skips prepublishOnly when npm is configured with ignore-scripts",
+    ).toBe(true);
+  });
+
   it("runs for path-filtered pull requests", () => {
     expect(readWorkflow()).toContain(`pull_request:
     paths:
