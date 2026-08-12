@@ -235,6 +235,47 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["not a number", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+  ])("ignores a %s catalog limit and falls back to the conservative default", (_case, invalid) => {
+    // The same validation must apply to catalog-supplied limits, not only to the
+    // router-reported ones, or a bad catalog value would clamp the whole group.
+    const noRouterLimits = row({
+      model_info: { id: "only", mode: "chat", max_input_tokens: undefined, max_output_tokens: undefined },
+    });
+    const brokenCatalog: CatalogResolver = () => ({
+      provider: "anthropic",
+      reasoning: true,
+      vision: true,
+      contextWindow: invalid,
+      maxTokens: invalid,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    });
+
+    const result = reduceModelGroup([noRouterLimits], brokenCatalog);
+
+    expect(result).toMatchObject({ contextWindow: 128_000, maxTokens: 16_384 });
+    // Authority is not discarded wholesale; only the unusable limits are.
+    expect(result).toMatchObject({ catalogProvider: "anthropic", reasoning: true });
+  });
+
+  it("withholds evidence from a row whose wire types are wrong instead of throwing", () => {
+    const good = row({ model_info: { id: "good", mode: "chat" } });
+    const badMode = row({ model_info: { id: "bad", mode: 7 as unknown as string } });
+    const badParams = row({
+      model_info: { id: "bad", mode: "chat", supported_openai_params: [1, "temperature"] as unknown as string[] },
+    });
+
+    // A non-string mode is unusable transport evidence, so the row is not routable.
+    expect(reduceModelGroup([good, badMode], resolveCatalog)).toMatchObject({ deploymentCount: 1 });
+    expect(reduceModelGroup([badMode], resolveCatalog)).toBeUndefined();
+    // Non-string params are dropped, leaving the usable ones.
+    expect(reduceModelGroup([badParams], resolveCatalog)?.acceptedOpenAIParams).toEqual(["temperature"]);
+  });
+
   it("drops a group when every deployment is non-chat", () => {
     expect(
       reduceModelGroup(
@@ -436,6 +477,36 @@ describe("reduceModelGroup", () => {
     const alternating: CatalogResolver = (entry, singleton) =>
       withTiers(call++ === 0 ? tiers : reordered)(entry, singleton);
     expect(reduceModelGroup(rows, alternating)?.cost.tiers).toEqual(tiers);
+  });
+
+  it("treats a reordered tier ladder as disagreement rather than as equal", () => {
+    // Tier order is semantic: the ladder is evaluated in sequence. Canonicalization
+    // sorts object KEYS but must not sort array ELEMENTS, or two different ladders
+    // would compare equal and one deployment's pricing would be adopted for both.
+    const ladder = [
+      { inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 },
+      { inputTokensAbove: 400_000, input: 9, output: 30, cacheRead: 0.9, cacheWrite: 11.25 },
+    ];
+    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
+    const withLadder =
+      (value: typeof ladder): CatalogResolver =>
+      () => ({
+        provider: "anthropic",
+        reasoning: true,
+        vision: true,
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: value },
+      });
+
+    let call = 0;
+    const swapped: CatalogResolver = (entry, singleton) =>
+      withLadder(call++ === 0 ? ladder : [...ladder].reverse())(entry, singleton);
+    expect(reduceModelGroup(rows, swapped)?.cost.tiers).toBeUndefined();
+
+    // Identical ladders in identical order still adopt, so the check above is not
+    // simply rejecting every multi-element ladder.
+    expect(reduceModelGroup(rows, withLadder(ladder))?.cost.tiers).toEqual(ladder);
   });
 
   it("withholds tiered pricing when deployments genuinely disagree", () => {

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
@@ -22,6 +22,15 @@ function mockEndpoints(routes: Record<string, () => Response>): void {
     throw new Error(`unexpected URL: ${url}`);
   });
 }
+
+// No test in this file may reach the network. Every test starts with a fetch that
+// refuses, so forgetting to stub an endpoint fails loudly instead of dialling out
+// or silently falling through to a real implementation.
+beforeEach(() => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    throw new Error(`unstubbed fetch: ${input instanceof URL ? input.toString() : String(input)}`);
+  });
+});
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -567,6 +576,107 @@ describe("discoverModels via /model/info", () => {
         maxTokens: 4_000,
       });
     }
+  });
+
+  it("keeps baseline compatibility metadata for Responses-mode routes", async () => {
+    // Compat is derived from the model id alone on this branch. If API-aware compat
+    // were reintroduced at the call site, a Responses-mode Moonshot route would
+    // silently lose these Kimi repairs, so the whole object is pinned exactly.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "moonshot/kimi-k2.6", model_info: { id: "one", mode: "responses" } }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({ api: "openai-responses" });
+    expect(result.models[0]?.compat).toEqual({
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false,
+      maxTokensField: "max_tokens",
+    });
+  });
+
+  it("keeps the Anthropic prompt-cache marker on a Responses-mode alias", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "anthropic/claude-sonnet-4-6", model_info: { id: "one", mode: "responses" } }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({ api: "openai-responses" });
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
+  });
+
+  it.each([
+    ["a numeric mode", { model_name: "bad-mode", model_info: { id: "a", mode: 7 } }],
+    ["a numeric deployment id", { model_name: "bad-id", model_info: { id: 7, mode: "chat" } }],
+    [
+      "non-string accepted params",
+      { model_name: "bad-params", model_info: { id: "a", mode: "chat", supported_openai_params: [1, "temperature"] } },
+    ],
+    [
+      "a non-array accepted params field",
+      { model_name: "bad-params-shape", model_info: { id: "a", mode: "chat", supported_openai_params: "temperature" } },
+    ],
+    [
+      "non-string allowed params",
+      {
+        model_name: "bad-allowed",
+        litellm_params: { model: "openai/gpt-4o", allowed_openai_params: [{}] },
+        model_info: { id: "a", mode: "chat" },
+      },
+    ],
+  ])("withholds a row with %s instead of failing the whole discovery", async (_case, bad) => {
+    // One operator typo in proxy config must not cost every other model.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            bad,
+            {
+              model_name: "healthy-route",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "b", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map((model) => model.id)).toContain("healthy-route");
+    expect(result.models.find((model) => model.id === "healthy-route")?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("survives a deeply nested deployment row", async () => {
+    // Canonicalization is depth-bounded, so a pathological payload cannot exhaust
+    // the stack and take every model down with it.
+    let nested: unknown = "leaf";
+    for (let depth = 0; depth < 20_000; depth++) nested = { nested };
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "deep-route",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "a", mode: "chat", extra: nested },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.id).toBe("deep-route");
   });
 
   it("never emits the fallback-only sentinel for a reduced deployment group", async () => {
