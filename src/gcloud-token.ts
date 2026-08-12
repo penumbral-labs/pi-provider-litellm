@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -58,15 +58,22 @@ function getAdcPath(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
-// Identifies the credential without retaining it. The refresh token participates so
-// that re-running `gcloud auth application-default login` invalidates the cached
-// access token, but it is hashed so no caller and no heap-resident cache entry holds
-// reversible credential material.
+// Random per process, never exported, never logged, never written anywhere. A bare digest of
+// a credential is non-reversible but still linkable: anyone holding candidate refresh tokens
+// could confirm a match, and the same credential would produce the same value in every
+// process and every heap dump. Salting with process-local entropy removes both -- the
+// fingerprint is meaningless outside this process and cannot be precomputed.
+const IDENTITY_SALT = randomBytes(32);
+
+// Identifies the credential without retaining it. The refresh token participates so that
+// re-running `gcloud auth application-default login` invalidates the cached access token.
+// Stable for a given credential within one process, and unrelated across processes.
+export function gcloudCredentialFingerprint(clientId: string, refreshToken: string): string {
+  return createHmac("sha256", IDENTITY_SALT).update(`${clientId}\u0000${refreshToken}`).digest("hex").slice(0, 32);
+}
+
 function getCredentialsCacheKey(credentials: AuthorizedUserCredentials): string {
-  const fingerprint = createHash("sha256")
-    .update(`${credentials.client_id}\u0000${credentials.refresh_token}`)
-    .digest("hex")
-    .slice(0, 32);
+  const fingerprint = gcloudCredentialFingerprint(credentials.client_id, credentials.refresh_token);
   return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${fingerprint}`;
 }
 
