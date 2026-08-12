@@ -22,12 +22,17 @@ export const MANAGED_ENV_VARS = [
 // Snapshots and clears the managed variables before each test and restores the
 // original values afterwards, so a result never depends on ambient environment or
 // on which test ran first in the file.
-export function useHermeticEnv(): void {
+//
+// `extra` adds suite-specific names. HOME is deliberately not in the shared set: clearing
+// it for every suite would break the npm and git subprocesses tests/package.test.ts spawns,
+// so only the suites that exercise ADC path discovery opt into it.
+export function useHermeticEnv(extra: readonly string[] = []): void {
+  const managed = [...MANAGED_ENV_VARS, ...extra];
   let saved: Array<[string, string | undefined]> = [];
 
   beforeEach(() => {
-    saved = MANAGED_ENV_VARS.map((name) => [name, process.env[name]]);
-    for (const name of MANAGED_ENV_VARS) delete process.env[name];
+    saved = managed.map((name) => [name, process.env[name]]);
+    for (const name of managed) delete process.env[name];
   });
 
   afterEach(() => {

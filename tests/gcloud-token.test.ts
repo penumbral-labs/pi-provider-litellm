@@ -1,14 +1,13 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CACHE_TTL_MS, getGcloudToken, hasGcloudAdcCredentials, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { useHermeticEnv } from "./test-helpers.js";
 
-const ORIGINAL_ENV = {
-  APPDATA: process.env.APPDATA,
-  GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-  HOME: process.env.HOME,
-};
+// HOME is included because getAdcPath falls back to it when GOOGLE_APPLICATION_CREDENTIALS
+// is unset, which this suite exercises.
+useHermeticEnv(["HOME"]);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -24,17 +23,7 @@ async function writeAdcFile(body: unknown): Promise<string> {
   return path;
 }
 
-// Clear before as well as restore after: the first test in the file would otherwise read
-// the developer's real ADC location through GOOGLE_APPLICATION_CREDENTIALS or HOME.
-beforeEach(() => {
-  for (const key of Object.keys(ORIGINAL_ENV)) delete process.env[key];
-});
-
 afterEach(() => {
-  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
   resetGcloudTokenCache();
   vi.restoreAllMocks();
 });
