@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_TOKENS,
   type FamilyEvidence,
   isResponsesMode,
+  type MessagesBackendCompat,
   meetVendorCompat,
   reduceModelGroup,
   type SemanticFamily,
@@ -72,7 +73,7 @@ export function normalizeBaseUrl(input: string): string {
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
 // the `cacheControlFormat: "anthropic"` flag, pi never relays cache_control
 // markers through the proxy, so prompt caching silently no-ops on Claude models.
-const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
+const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku|fable)(?=$|[-_/.:]))/i;
 const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
 // Deployments expose the gpt-5.5 route under varying names (`llm-gateway/gpt-5.5`,
@@ -86,6 +87,10 @@ export function isMoonshotModel(modelId: string): boolean {
 
 export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
+}
+
+export function shouldSuppressReasoningContent(modelId: string): boolean {
+  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
 // The Moonshot request/display conclusions travel together on the model so the
@@ -155,9 +160,11 @@ function catalogProviderCandidates(lookupIds: readonly string[], id: string, own
 function resolveCatalogModel(
   id: string,
   ownedBy?: string,
+  adapterProvider?: BuiltinProvider,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy)) {
+  const providers = adapterProvider ? [adapterProvider] : catalogProviderCandidates(lookupIds, id, ownedBy);
+  for (const provider of providers) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -241,10 +248,19 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
   };
 }
 
+function undecoratedBackendIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const undecorated = routed.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
+  return [
+    ...new Set([routed, routed.replace(/:\d+$/, ""), undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean)),
+  ];
+}
+
 function catalogLookupIds(id: string): string[] {
   const lookupIds = new Set([id]);
   const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
   lookupIds.add(unprefixed);
+  for (const candidate of undecoratedBackendIds(id)) lookupIds.add(candidate);
 
   const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
   const match = /^(?:claude-)?(opus|sonnet|haiku)-(\d+)-(\d+)$/.exec(anthropicAlias);
@@ -277,7 +293,7 @@ function semanticModel(id: string): SemanticModel | undefined {
 
 function semanticFamily(id: string): SemanticFamily | undefined {
   const value = id.toLowerCase();
-  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/.test(value)) return "claude";
   if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
   if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
   if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
@@ -306,8 +322,52 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
+function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined {
+  if (model.api !== "anthropic-messages") return undefined;
+  const compat = (model as Model<"anthropic-messages">).compat;
+  const carried: MessagesBackendCompat = {};
+  if (compat?.forceAdaptiveThinking !== undefined) carried.forceAdaptiveThinking = compat.forceAdaptiveThinking;
+  if (compat?.supportsTemperature !== undefined) carried.supportsTemperature = compat.supportsTemperature;
+  if (compat?.supportsStrictTools !== undefined) carried.supportsStrictTools = compat.supportsStrictTools;
+  return carried;
+}
+
+function anthropicBackendLookupIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const base = routed.replace(/^(?:[a-z0-9-]+\.)*anthropic[./]/, "");
+  return undecoratedBackendIds(base);
+}
+
+function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefined {
+  const model = findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(id));
+  return model ? messagesCompatOf(model) : undefined;
+}
+
+const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
+const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
+
+function isClaudeWitness(candidate: string | undefined): candidate is string {
+  return candidate !== undefined && semanticFamily(candidate) === "claude" && CLAUDE_MODEL_PATTERN.test(candidate);
+}
+
+function resolveClaudeBackendIdentity(
+  adapter: string | undefined,
+  routingModel: string | undefined,
+  baseModel: string | undefined,
+  adapterProvider: BuiltinProvider | undefined,
+): CatalogResolution["backendIdentity"] {
+  if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter)) return undefined;
+  if (isClaudeWitness(routingModel)) return { semanticFamily: "claude" };
+  if (routingModel) {
+    if (semanticFamily(routingModel) !== undefined) return undefined;
+    if (resolveCatalogModel(routingModel, undefined, adapterProvider)) return undefined;
+  }
+  return isClaudeWitness(baseModel) ? { semanticFamily: "claude" } : undefined;
+}
+
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
-  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
+  const adapterProvider = adapterCatalogProvider(adapter);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
   const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
@@ -327,23 +387,42 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
   const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
-  // Provider identity and semantic family must describe the same backend, so a
-  // resolution reports the family of the candidate that resolved it (or of the
-  // catalog model itself) rather than a family borrowed from a sibling candidate.
-  let unresolvedFamily: SemanticFamily | undefined;
-  for (const candidate of candidates) {
+  const backendIdentity = resolveClaudeBackendIdentity(
+    adapter,
+    routingModel,
+    contradictoryGenerations ? undefined : baseModel,
+    adapterProvider,
+  );
+  const resolvedFamily = routingFamily ?? baseFamily ?? (backendIdentity ? "claude" : undefined);
+  const agreeing = candidates.filter(
+    (candidate) => resolvedFamily === undefined || semanticFamily(candidate) === resolvedFamily,
+  );
+  const messagesCompat = agreeing.reduce<MessagesBackendCompat | undefined>(
+    (carried, candidate) => carried ?? messagesCompatFromBackend(candidate),
+    undefined,
+  );
+  // Provider identity and semantic family must describe the same backend. Adapter
+  // catalog lookup stays within that adapter's provider and never borrows first-party
+  // pricing merely because the backend is Claude-shaped.
+  for (const candidate of agreeing) {
     const family = semanticFamily(candidate);
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);
     if (resolved) {
       return {
         ...catalogResolution(resolved.provider, family ?? semanticFamily(resolved.model.id), resolved.model),
         ...(model ? { semanticModel: model } : {}),
+        backendIdentity,
+        messagesCompat: messagesCompat ?? messagesCompatOf(resolved.model),
       };
     }
-    unresolvedFamily ??= family;
   }
-  return unresolvedFamily
-    ? { semanticFamily: unresolvedFamily, ...(model ? { semanticModel: model } : {}) }
+  return resolvedFamily
+    ? {
+        semanticFamily: resolvedFamily,
+        ...(model ? { semanticModel: model } : {}),
+        backendIdentity,
+        ...(messagesCompat ? { messagesCompat } : {}),
+      }
     : undefined;
 }
 
@@ -651,14 +730,21 @@ function mapFromModelInfoGroup(
           family === undefined ? undefined : buildCompat(reduced.id, family),
         ),
       );
-  const policy = closeSerializerPolicy({
-    api: reduced.api,
-    reasoning,
-    vendorCompat,
-    semanticCompat: reasoningPolicy?.compat,
-    semanticLevels: reasoningPolicy?.thinkingLevelMap,
-    catalogLevels: reduced.thinkingLevelMap,
-  });
+  const policy =
+    reduced.api === "anthropic-messages"
+      ? {
+          reasoning,
+          ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
+          compat: carriedMessagesCompat(reduced.messagesCompat),
+        }
+      : closeSerializerPolicy({
+          api: reduced.api,
+          reasoning,
+          vendorCompat,
+          semanticCompat: reasoningPolicy?.compat,
+          semanticLevels: reasoningPolicy?.thinkingLevelMap,
+          catalogLevels: reduced.thinkingLevelMap,
+        });
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
@@ -679,7 +765,11 @@ function mapFromModelInfoGroup(
     // tool-message repair rewrites outbound messages, so it needs every routable
     // deployment to evidence the need; a mixed group withholds it and says so.
     ...(moonshotEvidence ? { litellmPolicy: moonshotPolicy(reduced.id, unanimousMoonshot) } : {}),
-  };
+  } as DiscoveredModel;
+}
+
+function carriedMessagesCompat(compat: MessagesBackendCompat | undefined): MessagesBackendCompat | undefined {
+  return compat && Object.keys(compat).length > 0 ? compat : undefined;
 }
 
 function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
@@ -693,9 +783,10 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // on the ordinary Chat path, so vendor and reasoning-replay compatibility are
   // built for it instead of being patched back on afterwards. Modes this
   // discovery cannot serve at all are left alone so they still drop out.
-  const chatOnly = isResponsesMode(named.model_info?.mode)
-    ? { ...named, model_info: { ...named.model_info, mode: "chat" } }
-    : named;
+  const chatOnly =
+    isResponsesMode(named.model_info?.mode) || wireString(named.model_info?.mode)?.trim() === "chat"
+      ? { ...named, model_info: { ...named.model_info, mode: undefined } }
+      : named;
   const model = mapFromModelInfo(chatOnly);
   if (!model) return undefined;
   // Without a deployment `model_name` the only identifier is the `/health` route
@@ -706,11 +797,12 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   return {
     ...model,
     ...closeSerializerPolicy({
-      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      api: "openai-completions",
       reasoning: model.reasoning,
-      vendorCompat: model.compat,
+      vendorCompat: model.api === "anthropic-messages" ? buildCompat(model.id, "claude") : model.compat,
       denyLevels: true,
     }),
+    api: "openai-completions",
   };
 }
 

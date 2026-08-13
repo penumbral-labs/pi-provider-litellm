@@ -14,11 +14,17 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
+import { credentialRoot, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./host-policy.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./provider.js";
+import {
+  createMcpToolDefinitions,
+  credentialFingerprint,
+  reportMcpCatalogOutcome,
+  reportMcpRegistrationFatal,
+} from "./mcp-tools.js";
+import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMModelPolicy, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -105,14 +111,7 @@ function resolveSanitizedCredentialRoot(
     cleanConfig(definition.baseUrl) ??
     (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
   if (!baseUrl) return undefined;
-  try {
-    const normalized = normalizeBaseUrl(baseUrl);
-    const parsed = new URL(normalized);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
-    return normalized;
-  } catch {
-    throw new Error("Invalid LiteLLM base URL; a network refresh with a valid URL is required");
-  }
+  return credentialRoot(baseUrl, "Stored configuration").root;
 }
 
 function requireNonPlaceholderCredentialRoot(root: string): string {
@@ -472,26 +471,11 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
 // carrying a scheme-less or non-http(s) root fails on every later turn, far from
 // the place the value was entered, so the clean error belongs here.
 function requireLoginBaseUrl(rawBaseUrl: string): string {
-  const normalized = normalizeBaseUrl(rawBaseUrl);
-  let parsed: URL;
-  try {
-    parsed = new URL(normalized);
-  } catch {
-    throw new Error(
-      `"${rawBaseUrl}" is not a valid URL; include the scheme, for example https://litellm.your-domain.com`,
-    );
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    // `localhost:4000` parses as a `localhost:` scheme rather than failing above, so
-    // this branch is what a missing scheme actually lands on.
-    throw new Error(
-      `"${rawBaseUrl}" must use http or https; include the scheme, for example https://litellm.your-domain.com`,
-    );
-  }
+  const parsed = credentialRoot(rawBaseUrl, "Entered base URL");
   if (isPlaceholderHost(parsed.host)) {
-    throw new Error(`"${rawBaseUrl}" is the documentation placeholder; enter your own LiteLLM proxy URL`);
+    throw new Error(`${DEFAULT_LITELLM_BASE_URL} is the documentation example; enter your own LiteLLM proxy URL`);
   }
-  return normalized;
+  return parsed.root;
 }
 
 async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredential> {
@@ -774,8 +758,28 @@ function prepareLiteLLMRequestPayload(
   sessionId: string | undefined,
   modelPolicy: LiteLLMModelPolicy | undefined,
 ): Record<string, unknown> | undefined {
+  // Native Messages is Anthropic-shaped; none of the OpenAI payload rewrites or
+  // LiteLLM session metadata below are valid on that transport.
+  if (api !== undefined && api !== "openai-completions" && api !== "openai-responses") return undefined;
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
+  const update = (key: string, value: unknown): void => {
+    if (payload[key] !== undefined) return;
+    next ??= { ...payload };
+    next[key] = value;
+  };
+
+  if (
+    openAIApi === "openai-completions" &&
+    modelId &&
+    modelPolicy?.normalizeThinkTags &&
+    shouldSuppressReasoningContent(modelId)
+  ) {
+    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
+      if (key !== "thinking") update(key, value);
+    }
+  }
+
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
@@ -967,6 +971,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
+  // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
+  // never cleared, so a refusal is fatal for this extension instance rather than a per-tool or
+  // retryable condition. Once seen, stop attempting registration here; a reload creates a fresh
+  // instance with its own state, which starts clean on its own.
+  let mcpRegistrationFatal = false;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
   // The host an OAuth login resolved, bound to the access token it was resolved for.
   // Request paths and the Skills/MCP surfaces receive no Credential, and OAuth
@@ -987,11 +996,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     process.stderr.write(`LiteLLM (${PROVIDER_NAME}): ${message}\n`);
   };
 
+  // Identifies the catalog a set of credentials points at, so a credential change forces
+  // re-registration. The base URL stays readable because it is not secret and is useful when
+  // reasoning about a refresh; everything credential-bearing is reduced to a non-reversible
+  // fingerprint so no key or header value is held in the identity string.
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
       baseUrl: normalizeBaseUrl(auth.baseUrl),
-      apiKey: auth.apiKey,
-      headers: Object.entries(auth.headers ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      credential: credentialFingerprint(auth.apiKey, auth.headers),
     });
   }
 
@@ -1066,7 +1078,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   async function registerMcpTools(auth: LiteLLMRuntimeAuth, signal?: AbortSignal): Promise<void> {
-    if (!mcpEnabled || discoveryDisabledReason()) return;
+    if (!mcpEnabled || discoveryDisabledReason() || mcpRegistrationFatal) return;
     const identity = mcpCatalogIdentity(auth);
     while (mcpRegistration) {
       await waitForMcpRegistration(mcpRegistration, signal);
@@ -1078,14 +1090,39 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const registration = (async () => {
       try {
         signal?.throwIfAborted();
-        const tools = await createMcpToolDefinitions(
+        const { definitions, report } = await createMcpToolDefinitions(
           (ctx) => (ctx?.modelRegistry ? resolveDefaultRuntimeAuth(ctx) : Promise.resolve(auth)),
           isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
           signal,
         );
         signal?.throwIfAborted();
-        for (const tool of tools) pi.registerTool(tool);
-        registeredMcpIdentity = identity;
+        let registered = 0;
+        try {
+          for (const definition of definitions) {
+            // Checked per tool so a cancelled refresh stops promptly instead of driving a full
+            // registry rebuild for every remaining tool.
+            signal?.throwIfAborted();
+            pi.registerTool(definition);
+            registered += 1;
+          }
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          // Fatal for this instance: report once, with a bounded Pi-authored cause and no proxy text,
+          // then stop retrying so a stale instance cannot churn discovery on every later refresh.
+          mcpRegistrationFatal = true;
+          reportMcpRegistrationFatal(registered, definitions.length, error);
+          return;
+        }
+        if (isVerboseDiscovery()) {
+          process.stderr.write(
+            `LiteLLM MCP: registered ${registered} of ${definitions.length} prepared MCP tools ` +
+              `(${report.discovered} raw, ${report.enveloped} enveloped).\n`,
+          );
+        }
+        // A catalog that produced nothing is not a settled catalog: leaving the identity unset lets a
+        // later refresh retry discovery, which is network-only and non-blocking.
+        reportMcpCatalogOutcome(report.discovered, definitions.length);
+        if (definitions.length > 0) registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(

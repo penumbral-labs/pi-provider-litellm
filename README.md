@@ -1,6 +1,6 @@
 # pi-provider-litellm
 
-LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.81.0+ is required.
+LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.83.0+ is required.
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
@@ -143,6 +143,53 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 /model
 ```
 
+## Model transport
+
+A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat
+mode, has positive Claude family/model evidence through an Anthropic-, Bedrock-, or Vertex-capable adapter, and resolves
+the same Anthropic compatibility policy. Provider-prefixed and valid unprefixed Claude model identifiers are supported;
+adapter names alone never select Messages. Mixed, unknown, and fallback-only groups remain on Chat Completions;
+unanimous explicit Responses mode takes precedence. The underlying catalog/provider identity and pricing are unchanged
+by this choice.
+
+Requiring unanimous compatibility matters when one public alias is load-balanced across two Claude generations, as
+happens mid-migration: if one deployment requires adaptive thinking and another requires budget thinking, no single
+Messages request satisfies both, so the group stays on Chat Completions and LiteLLM adapts the payload per deployment.
+A backend the bundled catalog does not recognize is treated the same way, rather than guessing a request shape.
+
+Native Messages authenticates to LiteLLM with `x-api-key` (not `Authorization: Bearer`) and intentionally omits
+`litellm_session_id`; LiteLLM session grouping remains enabled for OpenAI Chat and Responses requests.
+
+Anthropic request compatibility — adaptive versus budget thinking, whether the route accepts `temperature`, and strict
+tool schemas — comes from the backend model LiteLLM reports, never from the public route name. Deployment decoration is
+canonicalized first, so Bedrock cross-region and cross-partition inference profiles, Bedrock model versions, Vertex
+serving suffixes, and dated release snapshots resolve to the same policy as the model they are a snapshot of. The same
+canonical identifiers are looked up in the adapter's own catalog, so a decorated Bedrock Claude route keeps its Amazon
+Bedrock provider identity, prices, limits, and thinking levels. A route whose backend has no entry in the bundled catalog
+at all (Vertex Claude today) still carries compatibility while its identity and pricing stay withheld.
+
+LiteLLM does not currently return `x-litellm-response-cost` on `/v1/messages`, so a Claude route on native Messages
+reports the discovered static estimate rather than LiteLLM's actual computed cost. Chat Completions and Responses
+requests still take actual cost from that header when LiteLLM returns it.
+
+## Model catalog authority
+
+Metadata resolves per field, from two sources with a fixed precedence.
+
+**Explicit router values win.** Anything `/model/info` reports for a deployment — capabilities, context and output limits, per-token costs — is used as reported, whether or not the catalog knows the model. Non-finite or non-positive limits are ignored rather than clamping the group.
+
+**Catalog values fill the gaps, but only with bounded unambiguous identity.** Enrichment from Pi's bundled catalog requires a declared adapter, a known provider prefix, or a recognized bare Anthropic alias, **and** an entry for that backend model in the catalog of that provider. A declared adapter is authoritative: a Vertex-served Claude is not priced from the first-party Anthropic catalog. An unqualified route such as a bare `gemini-2.5-pro` or `kimi-k2-thinking` deliberately stays unknown rather than adopting metadata from whichever provider catalog lists that name first, and a model newer than the bundled catalog stays unknown even when its provider is obvious.
+
+**Display cost is marked, not invented.** A model's name carries a `(no metadata)` or `(incomplete metadata)` suffix whenever any of the four display-cost fields (input, output, cache read, cache write) is unresolved, so an unknown price is never shown as free. Filling in only input and output costs therefore leaves the marker in place. For a multi-deployment route, limits reduce to the group minimum and resolved costs to the group maximum.
+
+Qualifying the route in LiteLLM (`model_info.base_model`, `litellm_params.model`, or a provider-prefixed `model_name`) supplies the identity half; reporting all four cost fields supplies the pricing half.
+
+## When LiteLLM models disappear
+
+Models are offered only while the host they were discovered against still matches the active credential's host. After changing `LITELLM_BASE_URL`, switching credentials, or logging in against a different proxy, open `/model` to refresh discovery. Until then LiteLLM contributes no models and the reason is written once to stderr. This is deliberate: a cached model is never silently re-pointed at a host it was not discovered from.
+
+A Claude route discovered before this version was cached as a Chat Completions model. It keeps working on that transport and moves to native Messages on the next `/model` refresh.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |
@@ -191,7 +238,14 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 ## Mocked LiteLLM smoke workflow
 
-The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
+The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes
+route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock.
+The smoke runner discovers those models through LiteLLM, asserts each model's expected API, requires the union of
+`/v1/messages`, `/v1/chat/completions`, and `/v1/responses`, and checks the configured `x-litellm-response-cost`
+expectation. The workflow also proves endpoint coverage from captured LiteLLM request logs rather than response text, and
+requires at least two `/v1/messages` requests so the Pi CLI's own native Messages request is proven and not merely
+the runner's. The smoke runner authenticates with `Authorization: Bearer`, so it covers route reachability rather than
+the `x-api-key` path the extension uses; that path is covered by the Pi CLI smoke and by wire-compatibility tests.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh. One route is configured as two deployments sharing a `model_name`, so the workflow proves LiteLLM really returns a row per deployment carrying `model_info.id`, `mode`, `supported_openai_params`, and `allowed_openai_params` — the upstream contract deployment-group reduction depends on.
 
@@ -268,6 +322,11 @@ Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capabi
 |---|---|
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
+| No LiteLLM models, with a "stale LiteLLM model host" note on stderr | Cached models were discovered against a different host than the active credential — open `/model` to refresh |
+| No LiteLLM models, with a "placeholder LiteLLM model host" note | `LITELLM_BASE_URL` or a stored credential is literally the sample `litellm.example.com`, which is never contacted — set your own proxy URL |
+| No LiteLLM models and no note at all | No base URL is configured anywhere — set `LITELLM_BASE_URL` or run `/login litellm` |
+| No LiteLLM models, with an "invalid LiteLLM model URL" note | `LITELLM_BASE_URL` is not an absolute `http(s)` URL (for example `localhost:4000` instead of `http://localhost:4000`) |
+| Model name ends in `(no metadata)` or `(incomplete metadata)` | The route reports incomplete cost data and its backend is not unambiguously identifiable — see [Model catalog authority](#model-catalog-authority) |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | Model shows as reasoning-capable but no thinking level can be selected | The route has no usable reasoning-control evidence. For a recognized backend, add its carrying parameter (see [the table above](#deployment-groups-and-metadata-evidence)) to `supported_openai_params` or `allowed_openai_params` on **every** deployment of the route. Other backends have no recognized contract and stay closed by design |

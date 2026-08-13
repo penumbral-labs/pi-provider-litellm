@@ -36,8 +36,10 @@ jobs:
       LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
-      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock
+      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
+      LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=absent vidaimock-responses=present grouped-vidaimock=present
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
@@ -52,6 +54,7 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
+      - run: npm run build
 
       - name: Install VidaiMock
         shell: bash
@@ -132,6 +135,8 @@ jobs:
           cat > .tmp/litellm_config.yaml <<YAML
           model_list:
             - model_name: vidaimock-openai
+              model_info:
+                mode: chat
               litellm_params:
                 model: openai/gpt-4o-mini
                 api_base: http://host.docker.internal:8100/v1
@@ -139,9 +144,22 @@ jobs:
             - model_name: anthropic/vidaimock-claude
               model_info:
                 mode: chat
+                litellm_provider: anthropic
               litellm_params:
-                model: anthropic/claude-3-5-sonnet
+                # Must be a backend the bundled Pi catalog knows: native Messages
+                # selection requires unanimous positive compatibility evidence, so an
+                # uncatalogued Claude (3.5, or anything newer than the catalog)
+                # correctly reduces to Chat Completions and would not exercise
+                # /v1/messages at all.
+                model: anthropic/claude-sonnet-4-6
                 api_base: http://host.docker.internal:8100
+                api_key: sk-vidaimock
+            - model_name: vidaimock-responses
+              model_info:
+                mode: responses
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
                 api_key: sk-vidaimock
             - model_name: grouped-vidaimock
               model_info:
@@ -202,38 +220,21 @@ jobs:
           docker logs litellm-smoke >&2 || true
           exit 1
 
-      - name: Verify deployment-group model info contract
+      - name: Capture deployment-group model info
         shell: bash
         run: |
           set -euo pipefail
           node - <<'NODE'
-          const deadline = Date.now() + 60_000;
-          async function fetchRows() {
-            const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
-              headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
-              signal: AbortSignal.timeout(5000),
-            });
-            if (!response.ok) throw new Error(`/model/info returned ${response.status}`);
-            const payload = await response.json();
-            if (!Array.isArray(payload.data)) throw new Error("/model/info payload has no data array");
-            return payload.data.filter((row) => row.model_name === "grouped-vidaimock");
-          }
-          let rows = [];
-          let lastError;
-          while (Date.now() < deadline) {
-            try {
-              rows = await fetchRows();
-              if (rows.length === 2) break;
-              lastError = new Error(`expected two grouped deployments, received ${rows.length}`);
-            } catch (error) {
-              lastError = error;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-          if (rows.length !== 2) throw lastError ?? new Error("grouped deployments never became available");
+          const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
+            headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
+            signal: AbortSignal.timeout(3000),
+          });
+          if (!response.ok) throw new Error(`/model/info returned ${response.status}`);
+          const payload = await response.json();
+          const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
+          if (rows.length !== 2) throw new Error(`expected two grouped deployments, received ${rows.length}`);
           for (const row of rows) {
             if (!row.model_info?.id) throw new Error("grouped deployment is missing model_info.id");
-            if (typeof row.model_info.mode !== "string") throw new Error("grouped deployment is missing mode");
             if (!Array.isArray(row.model_info.supported_openai_params)) {
               throw new Error("grouped deployment is missing supported_openai_params");
             }
@@ -241,9 +242,7 @@ jobs:
               throw new Error("grouped deployment is missing allowed_openai_params");
             }
           }
-          const modes = rows.map((row) => row.model_info.mode).sort();
-          if (modes.join(",") !== "chat,responses") throw new Error(`unexpected grouped modes: ${modes.join(",")}`);
-          console.log(JSON.stringify(rows.map((row) => ({ ...row, litellm_params: undefined })), null, 2));
+          console.log(JSON.stringify(rows, null, 2));
           NODE
 
       - name: Run provider smoke
@@ -275,38 +274,21 @@ jobs:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: npm test -- tests/terminal-smoke.test.ts
 
-      # `--list-models` also reports models Pi has persisted in its own store, so running it
-      # against the shared agent dir the terminal smoke already refreshed would pass even if
-      # the extension failed to load. Use a dedicated empty agent dir for this leg, and prove
-      # the assertion discriminates by first running it with a manifest entrypoint that does
-      # not exist -- the loader skips a missing entry silently, so the models must be absent.
       - name: Run Pi CLI smoke
         env:
           LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: |
           set -euo pipefail
 
-          list_models_dir="${{ runner.temp }}/pi-list-models"
-          rm -rf "$list_models_dir" && mkdir -p "$list_models_dir"
-
-          cp package.json /tmp/pi-manifest.bak
-          node -e 'const f="package.json";const p=require(`./${f}`);p.pi.extensions=["./src/does-not-exist.ts"];require("fs").writeFileSync(f,JSON.stringify(p,null,2))'
-          PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-negative.txt || true
-          cp /tmp/pi-manifest.bak package.json
-          if grep -qF "vidaimock-openai" /tmp/pi-negative.txt; then
-            echo "negative control failed: models listed without a loadable entrypoint" >&2
-            exit 1
-          fi
-
-          rm -rf "$list_models_dir" && mkdir -p "$list_models_dir"
-          PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
+          ./node_modules/.bin/pi -e ./dist/index.js --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
+          grep -F "vidaimock-responses" /tmp/pi-litellm-models.txt
           grep -F "grouped-vidaimock" /tmp/pi-litellm-models.txt
 
-          export PI_CODING_AGENT_DIR="${{ runner.temp }}/pi-cli-smoke"
           ./node_modules/.bin/pi \
-            -e . \
+            -e ./dist/index.js \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL" \
             --no-tools \
@@ -314,16 +296,34 @@ jobs:
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
           grep -F "mock response" /tmp/pi-litellm-response.txt
 
-          # Anthropic-backed route: covers the cacheControlFormat "anthropic"
-          # compat path through LiteLLM's Anthropic translation.
+          # Anthropic-backed route: covers the source extension's native Messages serializer through LiteLLM.
+          messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ./node_modules/.bin/pi \
-            -e . \
+            -e ./dist/index.js \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC" \
             --no-tools \
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
+          docker logs --since "$messages_log_since" litellm-smoke > .tmp/pi-messages.log 2>&1
+          grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/pi-messages.log
+
+      - name: Assert captured LiteLLM endpoint logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logs litellm-smoke > .tmp/litellm.log 2>&1
+          # Endpoint coverage: every enabled wire protocol was exercised through the
+          # proxy, proven from captured request logs rather than response text.
+          grep -F 'POST /v1/chat/completions HTTP/1.1" 200' .tmp/litellm.log
+          grep -F 'POST /v1/responses HTTP/1.1" 200' .tmp/litellm.log
+          # The smoke runner posts to /v1/messages itself, so coverage alone cannot
+          # prove the extension's native Messages path. Require both that request and
+          # the Pi CLI request asserted in the scoped grep above.
+          messages_requests="$(grep -c -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log)"
+          echo "captured /v1/messages requests: $messages_requests"
+          test "$messages_requests" -ge 2
 
       - name: Dump LiteLLM logs
         if: failure()

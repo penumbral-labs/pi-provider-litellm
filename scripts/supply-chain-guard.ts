@@ -67,6 +67,7 @@ export const allowedSourceModules = [
   "cost",
   "discover",
   "gcloud-token",
+  "host-policy",
   "index",
   "litellm",
   "mcp-tools",

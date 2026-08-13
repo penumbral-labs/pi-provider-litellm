@@ -32,7 +32,9 @@
 - `closeSerializerPolicy` must gate every published level map, including the catalog enrichment inside `enrichCachedModel`, whose compat stays as stored.
 - `buildCompat` takes no API argument. Per-API compat belongs to the multi-protocol core; returning an empty compat for Responses drops `supportsDeveloperRole` and makes the level map look transmissible when it is not.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
-- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
+- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json` only when provider identity is unambiguous (known adapter, known provider prefix, or recognized Anthropic alias); keep fallback metadata tests current.
+- Catalog authority is deliberately bounded: an unqualified id stays unknown rather than adopting metadata from an arbitrary provider catalog that lists the same name. Do not reintroduce an all-providers catalog scan.
+- `http(s)`-only validation, canonical host identity, and placeholder rejection live in `src/host-policy.ts`; `normalizeBaseUrl` lives in `src/discover.ts`. Availability, request, and credential-resolution paths share these instead of re-implementing a check.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
@@ -51,6 +53,8 @@
 ## Compatibility Rules
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
+- For native `anthropic-messages` routes, discovered `compat` is the only channel to pi-ai's serializer. Derive it from the backend model LiteLLM reports (never the public route name), canonicalize deployment decoration first, forward the carried fields as a unit, and require unanimity across the group. Unanimous positive compatibility is also a precondition for selecting Messages at all: a group that disagrees, or whose backend is unknown, must reduce to Chat Completions rather than route natively without it.
+- Carrying backend compatibility must not grant catalog provider identity, pricing, or limits to a route that has not earned them.
 - Kimi/Moonshot-style models are handled in `buildCompat()`; keep regression tests with model discovery changes.
 - Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM.
 

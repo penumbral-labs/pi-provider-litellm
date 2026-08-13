@@ -9,7 +9,7 @@ import type {
 import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { discoverModels } from "../src/discover.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveryResult } from "../src/types.js";
+import type { DiscoveryResult, LiteLLMApi } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -39,7 +39,7 @@ const discovered = (id: string): DiscoveryResult => ({
   ],
 });
 
-function native(id: string): Model<"openai-completions" | "openai-responses"> {
+function native(id: string): Model<LiteLLMApi> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
 
@@ -83,6 +83,7 @@ function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[
     name: "LiteLLM",
     baseUrl: "https://proxy.example/v1",
     auth,
+    resolveCredentialRoot: ({ requestBaseUrl }) => requestBaseUrl ?? "https://proxy.example",
     discover: vi.fn(async () => discovered("fresh")),
     ...overrides,
   });

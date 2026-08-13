@@ -12,6 +12,17 @@ export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" 
 // evidence", which would re-enable route-name inference.
 export type FamilyEvidence = SemanticFamily | "conflicting";
 
+export interface BackendIdentityEvidence {
+  semanticFamily: "claude";
+}
+
+// The Anthropic compatibility fields that can be carried from the bundled
+// catalog onto a LiteLLM-routed native Messages model.
+export type MessagesBackendCompat = Pick<
+  NonNullable<Model<"anthropic-messages">["compat"]>,
+  "forceAdaptiveThinking" | "supportsTemperature" | "supportsStrictTools"
+>;
+
 type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
 
 export interface ReasoningPolicy {
@@ -27,6 +38,9 @@ export interface CatalogResolution {
   provider?: string;
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
+  backendIdentity?: BackendIdentityEvidence;
+  // Absent means the backend model is unknown to the catalog, not that it has no requirements.
+  messagesCompat?: MessagesBackendCompat;
   // A singleton route-name catalog hint may supply bounded metadata, but it is
   // not deployment evidence and therefore cannot authorize outbound repairs.
   routeNameOnly?: boolean;
@@ -46,7 +60,7 @@ export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => Cat
 export interface ReducedModelGroup {
   id: string;
   deploymentCount: number;
-  api: "openai-completions" | "openai-responses";
+  api: "anthropic-messages" | "openai-completions" | "openai-responses";
   reasoning: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision: boolean;
@@ -57,6 +71,7 @@ export interface ReducedModelGroup {
   catalogProvider?: string;
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
+  messagesCompat?: MessagesBackendCompat;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
@@ -544,6 +559,10 @@ export function reduceModelGroup(
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = reduceFamilyEvidence(catalogs.map((catalog) => catalog?.semanticFamily));
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
+  const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
+  // Compatibility can remain authoritative when provider identity, pricing, and
+  // limits are withheld. Compare canonically so property order cannot break unanimity.
+  const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
@@ -596,10 +615,16 @@ export function reduceModelGroup(
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
 
+  const api = candidateModes.every((mode) => mode === "responses")
+    ? "openai-responses"
+    : candidateModes.every((mode) => mode === "chat") && backendSemanticFamily === "claude" && messagesCompat
+      ? "anthropic-messages"
+      : "openai-completions";
+
   return {
     id,
     deploymentCount: deployments.length,
-    api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
+    api,
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
     vision,
@@ -610,6 +635,7 @@ export function reduceModelGroup(
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
+    ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     deploymentFamilies: catalogs.map((catalog) =>
       catalog?.routeNameOnly || catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,

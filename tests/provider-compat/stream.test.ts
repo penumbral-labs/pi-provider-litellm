@@ -409,7 +409,7 @@ describe("native provider stream compatibility", () => {
           name: "kimi-k2.6",
           api: "openai-completions",
           provider: "litellm",
-          baseUrl: "https://litellm.example.com/v1",
+          baseUrl: "https://proxy.example.com/v1",
           reasoning: true,
           input: ["text"],
           cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
@@ -532,7 +532,7 @@ describe("native provider stream compatibility", () => {
       })
       .result();
 
-    expect(requests[0]?.messages[0]?.content).toContainEqual({
+    expect(requests[0]?.messages?.[0]?.content).toContainEqual({
       type: "image_url",
       image_url: { url: `data:image/png;base64,${RED_CIRCLE_PNG}` },
     });

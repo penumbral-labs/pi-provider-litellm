@@ -83,6 +83,7 @@ function modelError(model: Model<LiteLLMApi>, activeHost: string): Error | undef
         `set "api" to one of ${LITELLM_API_NAMES.join(", ")} in models.json`,
     );
   }
+  // `isLiteLLMApi` proves the api before any protocol-map lookup below.
   const storedHost = parseHost(model.baseUrl);
   if (!storedHost) return refreshRequired("Cached model has an invalid LiteLLM model URL");
   if (isPlaceholderHost(storedHost)) return refreshRequired("Cached model uses a placeholder LiteLLM model host");

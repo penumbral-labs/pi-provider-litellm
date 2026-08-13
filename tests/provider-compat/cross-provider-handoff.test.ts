@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assistant, createCompatibilityHarness, user } from "./helpers.js";
+import { anthropicTextResponse, assistant, createCompatibilityHarness, user } from "./helpers.js";
+
+const anthropicRoute = {
+  model_name: "claude-route",
+  model_info: { mode: "chat", litellm_provider: "anthropic" },
+  litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+};
 
 describe("native cross-provider handoff compatibility", () => {
   it("replays foreign thinking, tool calls, and tool results into LiteLLM", async () => {
@@ -50,6 +56,29 @@ describe("native cross-provider handoff compatibility", () => {
     ]);
   });
 
+  it("characterizes foreign OpenAI reasoning replay into native Messages", async () => {
+    const { models, model, foreignModel, requests, respond } = await createCompatibilityHarness(anthropicRoute);
+    respond(...anthropicTextResponse("continued"));
+
+    const message = await models
+      .streamSimple(model, {
+        messages: [
+          user("Start elsewhere"),
+          assistant(foreignModel, [
+            { type: "thinking", thinking: "foreign thought", thinkingSignature: "reasoning_content" },
+          ]),
+          user("Continue natively"),
+        ],
+      })
+      .result();
+
+    expect(message.content).toEqual([{ type: "text", text: "continued" }]);
+    expect(requests[0]?.messages).toContainEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "foreign thought" }],
+    });
+  });
+
   it("replays a LiteLLM transcript into another OpenAI-compatible provider", async () => {
     const { models, model, foreignModel, foreignRequests } = await createCompatibilityHarness();
     const message = await models
@@ -90,6 +119,16 @@ describe("native cross-provider handoff compatibility", () => {
       { role: "tool", content: "714", tool_call_id: "litellm_call" },
       { role: "user", content: "Continue elsewhere" },
     ]);
+  });
+
+  it("keeps global LiteLLM hooks isolated from foreign serialized requests", async () => {
+    const { models, foreignModel, foreignRequests } = await createCompatibilityHarness(undefined, {
+      sessionFile: "/tmp/pi-compat-session.jsonl",
+    });
+
+    await models.streamSimple(foreignModel, { messages: [user("Continue elsewhere")] }).result();
+
+    expect(foreignRequests[0]).not.toHaveProperty("litellm_session_id");
   });
 
   it("does not treat a lookalike foreign origin as a foreign request", async () => {

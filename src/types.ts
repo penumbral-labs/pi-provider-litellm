@@ -2,7 +2,7 @@ import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
-export type LiteLLMApi = "openai-completions" | "openai-responses";
+export type LiteLLMApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 
 export type LiteLLMRuntimeAuth = {
   baseUrl: string;
@@ -114,7 +114,10 @@ export interface LiteLLMMcpTool {
   server_name: string;
   server_id?: string;
   description: string;
+  // Absent or `{}` means the proxy supplied no schema; both use the extension-owned envelope.
   input_schema: Record<string, unknown>;
+  // True when the proxy supplied an input schema that was not a JSON object.
+  input_schema_malformed?: boolean;
 }
 
 export interface LiteLLMSkill {

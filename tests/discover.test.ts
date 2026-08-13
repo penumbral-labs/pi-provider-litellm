@@ -255,6 +255,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("model_info");
+    expect(result.models[0]).toMatchObject({ api: "openai-completions", compat: { cacheControlFormat: "anthropic" } });
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
   });
 
@@ -495,10 +496,11 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "bedrock-production",
+      api: "anthropic-messages",
       input: ["text", "image"],
       contextWindow: 200_000,
       maxTokens: 64_000,
-      compat: { cacheControlFormat: "anthropic" },
+      compat: { supportsStrictTools: true },
     });
   });
 
@@ -973,6 +975,273 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(result.source).toBe("model_info");
     expect(result.models.map((m) => m.id)).toEqual(["openai/gpt-4o"]);
     expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(false);
+  });
+});
+
+describe("discoverModels native Messages selection", () => {
+  it("persists adaptive-thinking compatibility from a real-shaped Opus 5 backend", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "claude-opus-5",
+            model_info: {
+              id: "deployment-opus-5",
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              base_model: "bedrock/us.anthropic.claude-opus-5",
+              supports_reasoning: true,
+              supported_openai_params: ["thinking", "reasoning_effort"],
+            },
+            litellm_params: { model: "bedrock/us.anthropic.claude-opus-5" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "claude-opus-5",
+      api: "anthropic-messages",
+    });
+    expect(result.models[0]?.compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsStrictTools: true,
+    });
+  });
+
+  it("selects Messages only for homogeneous strongly evidenced Claude groups", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "bedrock-claude",
+            model_info: { id: "bedrock-a", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-claude",
+            model_info: { id: "bedrock-b", mode: "chat", litellm_provider: "bedrock_converse" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "mixed-route",
+            model_info: { id: "mixed-claude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "mixed-route",
+            model_info: { id: "mixed-openai", mode: "chat", litellm_provider: "openai" },
+            litellm_params: { model: "openai/gpt-4o" },
+          },
+          {
+            model_name: "unknown-route",
+            model_info: { id: "unknown", mode: "chat" },
+            litellm_params: { model: "internal/private" },
+          },
+          {
+            model_name: "claude-responses",
+            model_info: { id: "responses", mode: "responses", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          { model_name: "claude-public-only", model_info: { id: "public", mode: "chat" } },
+          {
+            model_name: "contradicted-claude",
+            model_info: { id: "contradicted", mode: "chat", litellm_provider: "openai" },
+            litellm_params: { model: "openai/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "anthropic-claude",
+            model_info: { id: "anthropic", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-adapter-claude",
+            model_info: { id: "bedrock", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-converse-claude",
+            model_info: { id: "bedrock-converse", mode: "chat", litellm_provider: "bedrock_converse" },
+            litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+          },
+          {
+            model_name: "vertex-claude",
+            model_info: { id: "vertex", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "custom-claude",
+            model_info: { id: "custom", mode: "chat", litellm_provider: "custom" },
+            litellm_params: { model: "custom/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "known-nonclaude-prefix",
+            model_info: { id: "known-prefix", mode: "chat" },
+            litellm_params: { model: "openai/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "anthropic-unprefixed-claude",
+            model_info: { id: "anthropic-unprefixed", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "claude-3-5-sonnet-20241022" },
+          },
+          {
+            model_name: "bedrock-unprefixed-claude",
+            model_info: {
+              id: "bedrock-unprefixed",
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            },
+          },
+          {
+            model_name: "adapter-only-anthropic",
+            model_info: { id: "adapter-only", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "internal/private" },
+          },
+          {
+            model_name: "adapter-absent-claude",
+            model_info: { id: "adapter-absent", mode: "chat" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "anthropic-nonclaude",
+            model_info: { id: "anthropic-nonclaude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "bedrock-nova-claude-base",
+            model_info: {
+              id: "nova-conflict",
+              mode: "chat",
+              litellm_provider: "bedrock",
+              base_model: "anthropic/claude-3-5-sonnet-20241022",
+            },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "azure-claude-base",
+            model_info: {
+              id: "azure-conflict",
+              mode: "chat",
+              litellm_provider: "anthropic",
+              base_model: "vertex_ai/claude-sonnet-4@20250514",
+            },
+            litellm_params: { model: "azure/deployment-x" },
+          },
+          {
+            model_name: "missing-mode-claude",
+            model_info: { id: "missing-mode", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "bedrock-nova",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "bedrock-converse-llama",
+            model_info: { id: "llama", mode: "chat", litellm_provider: "bedrock_converse" },
+            litellm_params: { model: "bedrock/meta.llama3-3-70b-instruct-v1:0" },
+          },
+          {
+            model_name: "bedrock-mistral",
+            model_info: { id: "mistral", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/mistral.mistral-large-2402-v1:0" },
+          },
+          {
+            model_name: "bedrock-titan",
+            model_info: { id: "titan", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.titan-text-premier-v1:0" },
+          },
+          {
+            model_name: "bedrock-cohere",
+            model_info: { id: "cohere", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/cohere.command-r-plus-v1:0" },
+          },
+          {
+            model_name: "vertex-llama",
+            model_info: { id: "vertex-llama", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/meta/llama-3.1-405b-instruct-maas" },
+          },
+          {
+            model_name: "vertex-mistral",
+            model_info: { id: "vertex-mistral", mode: "chat", litellm_provider: "vertex_ai" },
+            litellm_params: { model: "vertex_ai/mistral-large@2411" },
+          },
+          {
+            model_name: "redacted-bedrock",
+            model_info: { id: "redacted-bedrock", mode: "chat", litellm_provider: "bedrock" },
+          },
+          {
+            model_name: "redacted-anthropic",
+            model_info: { id: "redacted-anthropic", mode: "chat", litellm_provider: "anthropic" },
+          },
+          {
+            model_name: "mixed-claude-nova-forward",
+            model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+          {
+            model_name: "mixed-claude-nova-forward",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "mixed-claude-nova-reverse",
+            model_info: { id: "nova", mode: "chat", litellm_provider: "bedrock" },
+            litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+          },
+          {
+            model_name: "mixed-claude-nova-reverse",
+            model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+            litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map(({ id, api }) => [id, api])).toEqual([
+      ["bedrock-claude", "anthropic-messages"],
+      ["mixed-route", "openai-completions"],
+      ["unknown-route", "openai-completions"],
+      ["claude-responses", "openai-responses"],
+      ["claude-public-only", "openai-completions"],
+      ["contradicted-claude", "openai-completions"],
+      ["anthropic-claude", "anthropic-messages"],
+      ["bedrock-adapter-claude", "anthropic-messages"],
+      ["bedrock-converse-claude", "anthropic-messages"],
+      ["vertex-claude", "anthropic-messages"],
+      ["custom-claude", "openai-completions"],
+      ["known-nonclaude-prefix", "openai-completions"],
+      // Claude 3.5 predates the bundled catalog, so its Messages requirements are
+      // unknown and the group reduces to Chat rather than guessing a thinking shape.
+      ["anthropic-unprefixed-claude", "openai-completions"],
+      ["bedrock-unprefixed-claude", "openai-completions"],
+      ["adapter-only-anthropic", "openai-completions"],
+      ["adapter-absent-claude", "openai-completions"],
+      ["anthropic-nonclaude", "openai-completions"],
+      ["bedrock-nova-claude-base", "openai-completions"],
+      ["azure-claude-base", "openai-completions"],
+      ["missing-mode-claude", "openai-completions"],
+      ["bedrock-nova", "openai-completions"],
+      ["bedrock-converse-llama", "openai-completions"],
+      ["bedrock-mistral", "openai-completions"],
+      ["bedrock-titan", "openai-completions"],
+      ["bedrock-cohere", "openai-completions"],
+      ["vertex-llama", "openai-completions"],
+      ["vertex-mistral", "openai-completions"],
+      ["redacted-bedrock", "openai-completions"],
+      ["redacted-anthropic", "openai-completions"],
+      ["mixed-claude-nova-forward", "openai-completions"],
+      ["mixed-claude-nova-reverse", "openai-completions"],
+    ]);
+    expect(result.models[0]?.compat).toEqual({ forceAdaptiveThinking: true, supportsStrictTools: true });
   });
 });
 
@@ -2069,7 +2338,10 @@ describe("family evidence authority", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.compat).toMatchObject({ cacheControlFormat: "anthropic" });
+    expect(result.models[0]).toMatchObject({
+      api: "anthropic-messages",
+      compat: { forceAdaptiveThinking: true, supportsStrictTools: true },
+    });
   });
 });
 
