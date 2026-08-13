@@ -23,10 +23,10 @@ pi -e npm:pi-provider-litellm
 
 ```bash
 git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extensions/pi-provider-litellm
-cd ~/.pi/agent/extensions/pi-provider-litellm
-npm ci
-npm run clean && npm run build
 ```
+
+Pi loads the TypeScript source entrypoint declared in `package.json` `pi.extensions`, so a source install needs no
+build step and no `node_modules`. Install dependencies only to run the test suite or local checks.
 
 </details>
 
@@ -259,7 +259,7 @@ npm run check
 npm run clean && npm run build
 ```
 
-`npm run check` runs Biome, type checking, and the Vitest suite. Runtime changes must be built before local Pi smoke checks because the extension entrypoint is `./dist/index.js`.
+`npm run check` runs Biome, type checking, the Vitest suite, and the supply-chain package-content guard. Pi installs and local smoke checks load the shipped `src/index.ts` entrypoint directly; `dist/` is verification output only.
 
 Before changing package contents or dependency policy, also run:
 
@@ -268,7 +268,7 @@ npm run supply-chain:guard
 npm pack --dry-run
 ```
 
-The published npm package should contain only `dist`, `README.md`, and `LICENSE`.
+The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs.
 
 ## Release
 

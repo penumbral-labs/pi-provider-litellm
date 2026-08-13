@@ -117,11 +117,11 @@ export function moonshotPolicy(modelId: string, strictToolRepair = false): LiteL
   };
 }
 
-// Ported from pr/route-group-authority (7d6e39b): api-aware compat belongs to
-// the multi-protocol core, which owns the per-API compat union. Returning an
-// empty object for Responses dropped `supportsDeveloperRole: false` for
-// Moonshot-backed routes (pi-ai reads it in openai-responses-shared.js) and left
-// the level map with a compat that appears to carry effort, i.e. fail-open.
+// API-aware compat belongs to the multi-protocol core, which owns the per-API
+// compat union. Returning an empty object for Responses dropped
+// `supportsDeveloperRole: false` for Moonshot-backed routes (pi-ai reads it in
+// openai-responses-shared.js) and left the level map with a compat that appears
+// to carry effort, i.e. fail-open.
 export function buildCompat(modelId: string, semantic?: FamilyEvidence): DiscoveredModel["compat"] {
   // Contradictory deployment evidence is not an invitation to guess from the
   // route name; such a group only gets vendor-neutral compatibility.
@@ -197,6 +197,10 @@ function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
 
 export function enrichCachedModel(input: Model<Api>): Model<Api> {
   const restored = restoreCachedModelPolicy(input);
+  // Messages compatibility is the serializer contract selected during discovery.
+  // Re-running it through the OpenAI gate would inject Chat-only fields and make
+  // an offline cache read differ from the model that was persisted online.
+  if (restored.api === "anthropic-messages") return restored;
   // A model stored by a release that predates the transmissibility gate carries
   // whatever level map that release published, so the gate applies to the cached
   // map on the way in — not only to catalog metadata on the way out, which every

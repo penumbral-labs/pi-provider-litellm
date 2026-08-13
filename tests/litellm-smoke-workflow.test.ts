@@ -155,7 +155,11 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Run interactive Pi terminal smoke");
     expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");
     expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
-    expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
+    expect(workflow).toContain("./node_modules/.bin/pi -e . --list-models litellm");
+    expect(workflow).toContain('p.pi.extensions=["./src/does-not-exist.ts"]');
+    expect(workflow).toContain('PI_CODING_AGENT_DIR="$list_models_dir"');
+    expect(workflow).not.toContain("-e ./dist/index.js");
+    expect(workflow).not.toContain("npm run build");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
@@ -273,7 +277,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow.slice(initializeStart, terminalStart)).toContain(agentDir);
     expect(workflow.slice(initializeStart, terminalStart)).toContain('mkdir -p "$PI_CODING_AGENT_DIR"');
     expect(workflow.slice(terminalStart, cliStart)).toContain(agentDir);
-    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(agentDir);
+    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(
+      `export PI_CODING_AGENT_DIR="\${{ runner.temp }}/pi-cli-smoke"`,
+    );
     expect(workflow.slice(cliStart)).not.toContain('rm -rf "$PI_CODING_AGENT_DIR"');
   });
 
