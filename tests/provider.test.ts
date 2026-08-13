@@ -206,6 +206,57 @@ describe("createLiteLLMProvider", () => {
     }
   });
 
+  it.each([
+    {
+      name: "Moonshot compat evidence under a neutral route name",
+      id: "internal-reasoning-route",
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsStrictMode: false,
+        maxTokensField: "max_tokens" as const,
+      },
+      policy: { normalizeStrictToolMessages: false, normalizeThinkTags: true },
+    },
+    {
+      name: "a Moonshot-looking route name with generic compat evidence",
+      id: "kimi-k2.6",
+      compat: { supportsStore: false },
+      policy: undefined,
+    },
+    {
+      name: "an unknown route with no usable evidence",
+      id: "mystery-route",
+      compat: { supportsStore: false },
+      policy: undefined,
+    },
+  ])("derives the cached request policy from $name", async ({ id, compat, policy }) => {
+    // Cache entries predating request policies carry none, so only the
+    // response-side conclusion is re-derived from stored compatibility evidence.
+    // The fingerprint cannot prove unanimous deployment-family authority.
+    const cached: Model<Api> = { ...native(id), compat };
+    const value = controller();
+
+    await value.refreshModels?.(context(store([cached]), false));
+
+    const restored = value.getModels()[0] as Model<Api> & { litellmPolicy?: unknown };
+    expect(restored.litellmPolicy).toEqual(policy);
+  });
+
+  it("never overwrites a request policy already stored on a cached model", async () => {
+    const cached = {
+      ...native("kimi-k2.6"),
+      compat: { supportsStore: false },
+      litellmPolicy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
+    } as Model<Api>;
+    const value = controller();
+
+    await value.refreshModels?.(context(store([cached]), false));
+
+    expect(value.getModels()).toEqual([cached]);
+  });
+
   it("keeps unknown stale cached models unchanged offline", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const cached = { ...native("unknown-model"), name: "unknown-model (no metadata)" };

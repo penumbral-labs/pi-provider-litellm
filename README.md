@@ -154,7 +154,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default |
-| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata (for ids that carry provider evidence, including bare Anthropic aliases) and defaults |
+| `LITELLM_MODELS_DEV` | enabled | Set to `0` to disable models.dev metadata enrichment, including its cache and network request; `/v1/models` still uses Pi catalog metadata for provider-qualified ids and conservative defaults otherwise |
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
@@ -193,7 +193,7 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
 
-This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
+This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh. One route is configured as two deployments sharing a `model_name`, so the workflow proves LiteLLM really returns a row per deployment carrying `model_info.id`, `mode`, `supported_openai_params`, and `allowed_openai_params` — the upstream contract deployment-group reduction depends on.
 
 ## Development
 
@@ -228,32 +228,39 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
-### Deployment groups
+### Deployment groups and metadata evidence
 
-One public `model_name` on a LiteLLM proxy may be load-balanced across several deployments with different backends, regions, or model versions. `/model/info` returns one row per deployment, and those rows are reduced into a single Pi model conservatively:
+`/model/info` returns one row per deployment, so several rows can share a `model_name`. Those rows are reduced to a single model using the least capable value from each deployment: the smallest context window and max tokens, the highest price, vision and reasoning only when every deployment reports them, and Pi catalog metadata only when the deployments agree on which backend serves the route.
 
-- The Responses API is selected only when every deployment explicitly reports Responses mode; anything mixed or unknown uses Chat Completions.
-- A capability such as vision or reasoning is advertised only when every deployment resolves to `true`.
-- Context and output limits are the minimum across deployments.
-- Displayed prices are the maximum across deployments, and only when every deployment resolves that price field.
+Reasoning controls come from deployment evidence rather than the route name, and no thinking level is ever offered that the model's compatibility evidence cannot actually put on the wire. Chat and Responses discovery share that rule: an explicit vendor `supportsReasoningEffort: false` conclusion leaves both APIs with no selectable level, even though the Chat-only flag itself is not copied into Responses compatibility metadata.
 
-### Metadata authority
+For backends whose reasoning contract is recognized — the Kimi K2.5/K2.6, K2.7 Code and K3 generations, and DeepSeek V4 — a level is offered only when a deployment parameter can carry it. The carrying parameter is generation-specific, and **every** deployment in the group must declare it, because the group reduces to the parameters they all accept:
 
-Catalog metadata (limits, pricing, modalities, reasoning levels) is adopted only from evidence the proxy actually reports — `litellm_params.model`, `model_info.base_model`, or the deployment's adapter. A public route name is not backend evidence for a deployment group, because an operator can point any route at any model. It is still used in two narrower places: when a group reduces to exactly one routable deployment the route name remains the only available catalog hint, and request-compatibility flags are still derived from the route id as they were before. The hint itself is now bounded by the same rule as everything else, so a single-deployment route with an unqualified id no longer resolves where it once did. Two consequences are visible in the model list:
+| Recognized backend | Carrying parameter |
+|---|---|
+| Kimi K2.5 / K2.6 | `thinking` |
+| Kimi K2.7 Code | `thinking` (thinking cannot be switched off) |
+| Kimi K3 | `reasoning_effort` |
+| DeepSeek V4 | `thinking`, `reasoning_effort`, or both |
 
-- When a route's deployments supply missing or conflicting provider evidence — they name different providers, or one names a provider and another names nothing usable — catalog metadata is withheld for the whole group rather than guessed. A one-line diagnostic naming the affected routes is written to stderr once per process, so a persistent misconfiguration is announced rather than repeated on every background refresh. If the router supplies complete prices, the model name remains unsuffixed even though limits and other catalog-derived metadata are still conservative; the diagnostic is the visible indication that authority was withheld.
-- An unqualified or ambiguous id is left unknown instead of being matched against every provider catalog, which previously allowed a bare id such as `gpt-4o` to inherit another provider's limits and pricing. Bare Anthropic aliases (`opus-4-7`, `sonnet-4.6`, `fable-5`) remain an explicit exception and still resolve.
+Without that evidence the route is reported as reasoning-capable with no selectable level, rather than offering levels that would be silently dropped. Other Kimi generations have no recognized contract, so they fail closed the same way; a carrier is never guessed from the route name or from vendor documentation. Backends outside these families keep whatever the Pi catalog describes and use the standard `reasoning_effort` field.
 
-A model whose price evidence is incomplete is suffixed so unknown cost is never presented as free:
+Declaring the parameter your backend accepts, on every deployment of the route, is the config-side fix.
+
+Two suffixes can appear in a displayed model name. Which one you see depends on the discovery source, not on how many deployments a route has:
 
 | Suffix | Meaning |
 |---|---|
-| ` (incomplete metadata)` | A reduced `/model/info` group without complete price evidence, or a `/health` route the Pi catalog does not resolve. Permanent: this metadata is never re-derived from the model id, including on cached reads. |
-| ` (no metadata)` | An evidence-free `/v1/models` model. Pi catalog metadata may be filled in later from the model id, including for cached entries. |
+| `(incomplete metadata)` | A reduced `/model/info` group without complete price evidence, at any deployment count. Kept as the conservative floor and never enriched, because a deployment's metadata cannot be re-derived from the route name. LiteLLM omits the cache-price fields for backends that have no cache pricing, so this appears on ordinary routes that are otherwise fully described. |
+| `(no metadata)` | An evidence-free `/v1/models` model, where deployments are not exposed at all. Enriched from the Pi catalog on a later read if the id becomes resolvable — and only while its cached compatibility settings can actually carry what the catalog offers. |
 
-A `/health` route the catalog does resolve keeps its plain catalog name, because its metadata is real.
+Catalog enrichment needs a provider it can trust. On `/model/info` those signals are the deployment's `litellm_params.model` and `model_info.base_model`, resolved through `model_info.litellm_provider`; on the `/v1/models` fallback it is `owned_by` or a provider-qualified id such as `openai/gpt-5.5`. Recognized Anthropic aliases (`sonnet-4-6`, `opus-5`, dated snapshots) are also resolved, because they canonicalize onto a single Anthropic catalog id.
 
-A reduced `/model/info` group or a `/health` model restored from `models-store.json` while offline produces the same requests as it did immediately after discovery. `/v1/models` models are the deliberate exception: their sentinel authorizes bounded later enrichment, so a cached entry can gain catalog metadata on a subsequent read.
+A route name never overrides deployment evidence. It is used as a fallback in two bounded cases: when a route reduces to exactly one deployment and nothing else identified the backend, and when no deployment identifies a backend family at all — in which case a Kimi- or Claude-shaped route name can select catalog metadata, reasoning controls, token-field compatibility, or response-only `<think>` normalization. A route name never authorizes Moonshot strict tool-message repair, because that changes outbound assistant messages. The repair requires every deployment in the route group to identify the Moonshot/Kimi family. A route named only `mistral-large-latest` matches no catalog id and stays on conservative defaults.
+
+When deployments disagree about which backend serves a route, or when only some of them identify one, catalog limits, pricing, and reasoning metadata are withheld for the whole group. Disagreements where at least one deployment resolved a provider are additionally reported on stderr with a list bounded to three affected route names. If only some deployments identify Moonshot/Kimi, strict tool-message repair is withheld and a warning names at most three affected routes. Both diagnostics are deduplicated once per process per route: refreshes do not repeat a persistent warning, but a newly affected route is still reported. Cached models created before this policy existed also keep that outbound repair off until a successful refresh records unanimous deployment evidence.
+
+Discovery falls back from `/model/info` to `/v1/models` to `/health`, and capability shrinks along that path because the available evidence does. Only `/model/info` exposes complete deployment groups; `/health` reports one deployment at a time and is not reduced across a route's deployments, so a multi-deployment route discovered that way reflects whichever deployment `/health` listed first. Prefer a key that can read `/model/info` when reasoning controls matter.
 
 ## Troubleshooting
 
@@ -263,6 +270,9 @@ A reduced `/model/info` group or a `/health` model restored from `models-store.j
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| Model shows as reasoning-capable but no thinking level can be selected | The route has no usable reasoning-control evidence. For a recognized backend, add its carrying parameter (see [the table above](#deployment-groups-and-metadata-evidence)) to `supported_openai_params` or `allowed_openai_params` on **every** deployment of the route. Other backends have no recognized contract and stay closed by design |
+| Warning says strict tool-message repair was withheld | At least one route deployment identifies Moonshot/Kimi but another does not. Declare a Moonshot/Kimi backend model on **every** deployment in the group; renaming the public route is not enough. Until then, Moonshot tool calls on that route may fail |
+| Model name ends in `(no metadata)` or `(incomplete metadata)` | Deployment pricing is incomplete and no catalog entry matched — see [Deployment groups and metadata evidence](#deployment-groups-and-metadata-evidence) |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |

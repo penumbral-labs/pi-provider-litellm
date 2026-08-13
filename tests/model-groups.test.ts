@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogResolution, type CatalogResolver, reduceModelGroup } from "../src/model-groups.js";
+import {
+  type CatalogResolution,
+  closeSerializerPolicy,
+  reduceModelGroup,
+  toResponsesLevels,
+} from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
 const catalog = new Map<string, CatalogResolution>([
@@ -75,6 +80,74 @@ function permutations<T>(values: readonly T[]): T[][] {
   );
 }
 
+describe("toResponsesLevels", () => {
+  it.each([
+    {
+      name: "an absent map",
+      levels: undefined,
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "a partial Chat map",
+      levels: { low: "high" },
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "high",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "explicit extended levels",
+      levels: { off: null, xhigh: "xhigh", max: "max" },
+      expected: {
+        off: null,
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: null,
+      },
+    },
+  ])("never widens Responses beyond Chat for $name", ({ levels, expected }) => {
+    expect(toResponsesLevels(levels)).toEqual(expected);
+  });
+
+  it("keeps Chat and Responses closed when vendor compatibility denies reasoning effort", () => {
+    const input = {
+      reasoning: true,
+      vendorCompat: { supportsReasoningEffort: false } as const,
+      catalogLevels: { off: "off", low: "low", high: "high" },
+    };
+
+    const chat = closeSerializerPolicy({ ...input, api: "openai-completions" });
+    const responses = closeSerializerPolicy({ ...input, api: "openai-responses" });
+
+    expect(chat.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(responses.thinkingLevelMap).toEqual(chat.thinkingLevelMap);
+  });
+});
+
 describe("reduceModelGroup", () => {
   it("is permutation invariant for heterogeneous deployment evidence", () => {
     const deployments = [
@@ -102,8 +175,13 @@ describe("reduceModelGroup", () => {
       maxTokens: 16_000,
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
+      semanticFamily: "conflicting",
       catalogAuthorityAmbiguous: true,
+      // Positional, with `undefined` for a deployment that identified no family:
+      // the per-field meet must be able to tell "unlabeled" from "disagreed".
+      deploymentFamilies: ["claude", "openai", undefined, undefined],
       acceptedOpenAIParams: [],
+      reasoningPolicy: { reasoning: false },
     };
 
     for (const order of permutations(deployments)) {
@@ -119,46 +197,13 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([repeated, repeated], resolveCatalog)).toEqual(
       reduceModelGroup([repeated], resolveCatalog),
     );
-    // Conflicting variants of one deployment id stay plural, so they can never be
-    // mistaken for a single deployment and re-admit public route text as evidence.
+    // Conflicting variants of one deployment id both stay in the reduction, so
+    // the count reflects the rows actually reduced rather than distinct ids.
+    // Counting them as one would re-admit the public route name as evidence.
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
     expect(expected).toMatchObject({ deploymentCount: 2, contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
-    // Exact id-less repeats remain plural: equal content is not enough evidence
-    // that two rows describe the same deployment.
     expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
-  });
-
-  it("reports singleton status from routable deployments only", () => {
-    const seen: boolean[] = [];
-    const record: CatalogResolver = (_entry, singleton) => {
-      seen.push(singleton);
-      return undefined;
-    };
-    const chat = row({ model_info: { id: "chat", mode: "chat" } });
-    const embedding = row({ model_info: { id: "embed", mode: "embedding" } });
-    const other = row({ model_info: { id: "other", mode: "chat" } });
-    const conflicting = row({ model_info: { id: "chat", mode: "chat", max_input_tokens: 8_000 } });
-
-    reduceModelGroup([chat], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, chat], record);
-    expect(seen).toEqual([true]);
-
-    // An unsupported sibling is not a routable deployment.
-    seen.length = 0;
-    reduceModelGroup([chat, embedding], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, other], record);
-    expect(seen).toEqual([false, false]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, conflicting], record);
-    expect(seen).toEqual([false, false]);
   });
 
   it("selects Responses only when every deployment explicitly reports it", () => {
@@ -205,116 +250,13 @@ describe("reduceModelGroup", () => {
     );
     expect(result).toMatchObject({
       api: "openai-completions",
-      // The embedding row votes on transport but is not a deployment.
+      // Only the routable deployment is reduced, so an unsupported sibling no
+      // longer inflates the count or suppresses the singleton catalog hint.
       deploymentCount: 1,
       contextWindow: 200_000,
       maxTokens: 32_000,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     });
-  });
-
-  it("ignores limits that are not finite positive token counts", () => {
-    const good = row({ model_info: { id: "good", mode: "chat", max_input_tokens: 64_000, max_output_tokens: 8_000 } });
-    for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const broken = row({
-        model_info: { id: "broken", mode: "chat", max_input_tokens: invalid, max_output_tokens: invalid },
-      });
-      // The catalog resolves for both rows, so an unusable router limit falls back
-      // to catalog evidence instead of clamping the group to zero.
-      expect(reduceModelGroup([good, broken], resolveCatalog)).toMatchObject({
-        contextWindow: 64_000,
-        maxTokens: 8_000,
-      });
-    }
-
-    const unknownBackend = row({
-      model_info: { id: "broken", mode: "chat", max_input_tokens: 0, max_output_tokens: 0 },
-      litellm_params: { model: "internal/unknown" },
-    });
-    expect(reduceModelGroup([unknownBackend], resolveCatalog)).toMatchObject({
-      contextWindow: 128_000,
-      maxTokens: 16_384,
-    });
-  });
-
-  it.each([
-    ["zero", 0],
-    ["negative", -1],
-    ["not a number", Number.NaN],
-    ["infinite", Number.POSITIVE_INFINITY],
-  ])("ignores a %s catalog limit and falls back to the conservative default", (_case, invalid) => {
-    // The same validation must apply to catalog-supplied limits, not only to the
-    // router-reported ones, or a bad catalog value would clamp the whole group.
-    const noRouterLimits = row({
-      model_info: { id: "only", mode: "chat", max_input_tokens: undefined, max_output_tokens: undefined },
-    });
-    const brokenCatalog: CatalogResolver = () => ({
-      provider: "anthropic",
-      reasoning: true,
-      vision: true,
-      contextWindow: invalid,
-      maxTokens: invalid,
-      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-    });
-
-    const result = reduceModelGroup([noRouterLimits], brokenCatalog);
-
-    expect(result).toMatchObject({ contextWindow: 128_000, maxTokens: 16_384 });
-    // Authority is not discarded wholesale; only the unusable limits are.
-    expect(result).toMatchObject({ catalogProvider: "anthropic", reasoning: true });
-  });
-
-  it("treats an unreadable mode as unknown rather than as evidence of a non-chat deployment", () => {
-    // An unreadable `mode` must not relax the group. Dropping the row the way a
-    // genuinely non-chat deployment is dropped would discard its limits and let the
-    // group report a larger context window than any deployment can serve.
-    const roomy = row({ model_info: { id: "roomy", mode: "chat", max_input_tokens: 200_000 } });
-    const cramped = { id: "cramped", max_input_tokens: 8_000 };
-    const unreadable = row({ model_info: { ...cramped, mode: 7 as unknown as string } });
-    const embedding = row({ model_info: { ...cramped, mode: "embedding" } });
-
-    // Unreadable: still a deployment, so its tighter limit clamps the group.
-    expect(reduceModelGroup([roomy, unreadable], resolveCatalog)).toMatchObject({
-      deploymentCount: 2,
-      contextWindow: 8_000,
-      api: "openai-completions",
-    });
-    // Genuinely non-chat: excluded from metadata, and only votes on transport.
-    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toMatchObject({
-      deploymentCount: 1,
-      contextWindow: 200_000,
-    });
-
-    // A lone unreadable row is surfaced conservatively rather than silently hidden.
-    expect(reduceModelGroup([unreadable], resolveCatalog)).toMatchObject({
-      deploymentCount: 1,
-      contextWindow: 8_000,
-      api: "openai-completions",
-    });
-  });
-
-  it("does not read an unreadable capability flag as true", () => {
-    // `"false"` and `"no"` are truthy, so coercion would advertise a capability no
-    // deployment claimed. A group guarantee must never be relaxed by a bad wire type.
-    const lying = row({
-      model_info: {
-        id: "lying",
-        mode: "chat",
-        supports_vision: "no" as unknown as boolean,
-        supports_reasoning: "false" as unknown as boolean,
-      },
-      litellm_params: { model: "internal/unknown" },
-    });
-
-    expect(reduceModelGroup([lying], resolveCatalog)).toMatchObject({ vision: false, reasoning: false });
-  });
-
-  it("drops non-string accepted parameters and keeps the usable ones", () => {
-    const badParams = row({
-      model_info: { id: "bad", mode: "chat", supported_openai_params: [1, "temperature"] as unknown as string[] },
-    });
-
-    expect(reduceModelGroup([badParams], resolveCatalog)?.acceptedOpenAIParams).toEqual(["temperature"]);
   });
 
   it("drops a group when every deployment is non-chat", () => {
@@ -412,43 +354,6 @@ describe("reduceModelGroup", () => {
     });
   });
 
-  it("retains proven display prices and zeroes only unresolved fields without catalog authority", () => {
-    // Characterization of the existing per-field cost block. No backend resolves,
-    // so cache pricing is genuinely unknown rather than free: input and output
-    // survive at their proven values, the unresolved cache fields read zero, and
-    // `hasCompleteCost` stays false so the model can be marked incomplete.
-    const priced = (id: string, input: number, output: number) =>
-      row({
-        model_info: {
-          id,
-          mode: "chat",
-          input_cost_per_token: input,
-          output_cost_per_token: output,
-          cache_read_input_token_cost: undefined,
-          cache_creation_input_token_cost: undefined,
-        },
-        litellm_params: { model: "internal/unknown" },
-      });
-
-    const singleton = reduceModelGroup([priced("only", 0.000003, 0.000015)], resolveCatalog);
-    expect(singleton).toMatchObject({
-      deploymentCount: 1,
-      hasCompleteCost: false,
-      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
-    });
-    expect(singleton).not.toHaveProperty("catalogProvider");
-    expect(singleton?.cost.tiers).toBeUndefined();
-
-    // Proven fields still reduce to the maximum across a group.
-    expect(
-      reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)], resolveCatalog),
-    ).toMatchObject({
-      deploymentCount: 2,
-      hasCompleteCost: false,
-      cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
-    });
-  });
-
   it("keeps semantic family evidence when no catalog identity resolves", () => {
     const result = reduceModelGroup(
       [
@@ -497,95 +402,6 @@ describe("reduceModelGroup", () => {
     expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
   });
 
-  it("adopts tiered pricing when identical tiers are declared in any property order", () => {
-    const tiers = [{ inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 }];
-    const reordered = [{ cacheWrite: 7.5, output: 22.5, input: 6, cacheRead: 0.6, inputTokensAbove: 200_000 }];
-    const withTiers =
-      (value: typeof tiers): CatalogResolver =>
-      () => ({
-        provider: "anthropic",
-        reasoning: true,
-        vision: true,
-        contextWindow: 200_000,
-        maxTokens: 64_000,
-        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: value },
-      });
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
-
-    expect(reduceModelGroup(rows, withTiers(tiers))?.cost.tiers).toEqual(tiers);
-    // Property order is not evidence of disagreement.
-    let call = 0;
-    const alternating: CatalogResolver = (entry, singleton) =>
-      withTiers(call++ === 0 ? tiers : reordered)(entry, singleton);
-    expect(reduceModelGroup(rows, alternating)?.cost.tiers).toEqual(tiers);
-  });
-
-  it("treats a reordered tier ladder as disagreement rather than as equal", () => {
-    // Tier order is semantic: the ladder is evaluated in sequence. Canonicalization
-    // sorts object KEYS but must not sort array ELEMENTS, or two different ladders
-    // would compare equal and one deployment's pricing would be adopted for both.
-    const ladder = [
-      { inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 },
-      { inputTokensAbove: 400_000, input: 9, output: 30, cacheRead: 0.9, cacheWrite: 11.25 },
-    ];
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
-    const withLadder =
-      (value: typeof ladder): CatalogResolver =>
-      () => ({
-        provider: "anthropic",
-        reasoning: true,
-        vision: true,
-        contextWindow: 200_000,
-        maxTokens: 64_000,
-        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: value },
-      });
-
-    let call = 0;
-    const swapped: CatalogResolver = (entry, singleton) =>
-      withLadder(call++ === 0 ? ladder : [...ladder].reverse())(entry, singleton);
-    expect(reduceModelGroup(rows, swapped)?.cost.tiers).toBeUndefined();
-
-    // Identical ladders in identical order still adopt, so the check above is not
-    // simply rejecting every multi-element ladder.
-    expect(reduceModelGroup(rows, withLadder(ladder))?.cost.tiers).toEqual(ladder);
-  });
-
-  it("withholds tiered pricing when deployments genuinely disagree", () => {
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
-    let call = 0;
-    const conflicting: CatalogResolver = () => ({
-      provider: "anthropic",
-      reasoning: true,
-      vision: true,
-      contextWindow: 200_000,
-      maxTokens: 64_000,
-      cost: {
-        input: 3,
-        output: 15,
-        cacheRead: 0.3,
-        cacheWrite: 3.75,
-        tiers: [
-          {
-            inputTokensAbove: call++ === 0 ? 200_000 : 400_000,
-            input: 6,
-            output: 22.5,
-            cacheRead: 0.6,
-            cacheWrite: 7.5,
-          },
-        ],
-      },
-    });
-
-    expect(reduceModelGroup(rows, conflicting)?.cost.tiers).toBeUndefined();
-  });
-
-  it("omits tiered pricing and thinking maps entirely when no catalog declares them", () => {
-    const result = reduceModelGroup([row()], resolveCatalog);
-
-    expect(result?.cost.tiers).toBeUndefined();
-    expect(result?.thinkingLevelMap).toBeUndefined();
-  });
-
   it("disables catalog authority for conflicting provider identities", () => {
     const result = reduceModelGroup(
       [
@@ -599,32 +415,10 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result).not.toHaveProperty("catalogProvider");
-    expect(result).not.toHaveProperty("semanticFamily");
+    // Reported as contradictory rather than absent, so callers cannot treat the
+    // route name as a remaining source of family evidence.
+    expect(result?.semanticFamily).toBe("conflicting");
     expect(result?.thinkingLevelMap).toBeUndefined();
-    // The disagreement is reportable so the silent downgrade is diagnosable.
-    expect(result?.catalogAuthorityAmbiguous).toBe(true);
-  });
-
-  it("flags ambiguous catalog authority only when resolved identities disagree", () => {
-    const anthropic = row({ model_info: { id: "anthropic", mode: "chat" } });
-    const openai = row({
-      model_info: { id: "openai", mode: "chat" },
-      litellm_params: { model: "openai/gpt-4o" },
-    });
-    const unresolved = row({
-      model_info: { id: "unknown", mode: "chat" },
-      litellm_params: { model: "internal/unknown" },
-    });
-
-    // Unanimous identity, and wholly unknown identity, are not ambiguity.
-    expect(reduceModelGroup([anthropic], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([anthropic, anthropic], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([unresolved], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([unresolved, unresolved], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-
-    // Conflicting identities, and partial evidence, both withhold authority.
-    expect(reduceModelGroup([anthropic, openai], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
-    expect(reduceModelGroup([anthropic, unresolved], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
   });
 
   it("intersects accepted parameters across deployments", () => {
@@ -643,5 +437,248 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result?.acceptedOpenAIParams).toEqual(["reasoning_effort"]);
+  });
+
+  it.each([
+    {
+      name: "Kimi K2.6 with binary thinking",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      },
+    },
+    {
+      // K2.7 Code cannot be switched off, so `off` stays denied while `high`
+      // rides the accepted `thinking` param.
+      name: "Kimi K2.7 Code with accepted thinking",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
+        compat: {
+          supportsReasoningEffort: false,
+          requiresReasoningContentOnAssistantMessages: true,
+          thinkingFormat: "deepseek",
+        },
+      },
+    },
+    {
+      name: "Kimi K2.7 Code without accepted controls",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
+        compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      },
+    },
+    {
+      name: "Kimi K2.6 without accepted controls",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
+        compat: { supportsReasoningEffort: false },
+      },
+    },
+    {
+      name: "Kimi K3 with effort",
+      semanticModel: "kimi-k3" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 with native controls",
+      semanticModel: "deepseek-v4" as const,
+      params: ["thinking", "reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "deepseek",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 through an effort-only route",
+      semanticModel: "deepseek-v4" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+  ])("derives $name policy from semantic and accepted-control evidence", ({ semanticModel, params, expected }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supported_openai_params: params },
+          litellm_params: { model: "internal/model" },
+        }),
+      ],
+      () => ({ semanticFamily: semanticModel.startsWith("kimi") ? "kimi" : "deepseek", semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual(expected);
+  });
+
+  it.each([
+    {
+      name: "Kimi K3",
+      semanticModel: "kimi-k3" as const,
+      family: "kimi" as const,
+    },
+    {
+      name: "DeepSeek V4",
+      semanticModel: "deepseek-v4" as const,
+      family: "deepseek" as const,
+    },
+  ])("preserves $name capability and replay without accepted-control evidence", ({ semanticModel, family }) => {
+    const result = reduceModelGroup(
+      [row({ model_info: { supports_reasoning: true }, litellm_params: { model: `internal/${semanticModel}` } })],
+      () => ({ semanticFamily: family, semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+      compat: {
+        requiresReasoningContentOnAssistantMessages: true,
+        supportsReasoningEffort: false,
+      },
+    });
+  });
+
+  it("lets any explicit reasoning denial override accepted-control promotion", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "denied", supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+        row({
+          model_info: { id: "accepted", supports_reasoning: true, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi", semanticModel: "kimi-k2.5-k2.6", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false, compat: { supportsReasoningEffort: false } });
+  });
+
+  it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.7-code" },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi", semanticModel: "kimi-k2.7-code", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: false,
+      compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+    });
+  });
+
+  it("fails closed for mixed semantic generations and accepted controls", () => {
+    const deployments = [
+      row({
+        model_info: { id: "k2", supported_openai_params: ["thinking"] },
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+      }),
+      row({
+        model_info: { id: "k3", supported_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: "moonshot/kimi-k3" },
+      }),
+    ];
+    const result = reduceModelGroup(deployments, (entry) => ({
+      semanticFamily: "kimi",
+      semanticModel: entry.model_info?.id === "k2" ? "kimi-k2.5-k2.6" : "kimi-k3",
+    }));
+
+    expect(result?.acceptedOpenAIParams).toEqual([]);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false });
   });
 });

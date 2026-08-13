@@ -17,7 +17,6 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import {
   discoverModels,
   isGpt55Model,
-  isMoonshotModel,
   normalizeBaseUrl,
   shouldSuppressReasoningContent,
 } from "./discover.js";
@@ -781,18 +780,6 @@ function prepareLiteLLMRequestPayload(
 ): Record<string, unknown> | undefined {
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
-  const update = (key: string, value: unknown): void => {
-    if (payload[key] !== undefined) return;
-    next ??= { ...payload };
-    next[key] = value;
-  };
-
-  if (openAIApi === "openai-completions" && modelId && shouldSuppressReasoningContent(modelId)) {
-    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
-      if (key !== "thinking") update(key, value);
-    }
-  }
-
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
@@ -826,7 +813,7 @@ function prepareLiteLLMRequestPayload(
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
   // must carry string content, and tool results must be plain text.
-  if (openAIApi === "openai-completions" && modelId && isMoonshotModel(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && modelPolicy?.normalizeStrictToolMessages) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -875,8 +862,9 @@ function prepareLiteLLMRequestPayload(
 function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !shouldSuppressReasoningContent(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || !modelPolicy?.normalizeThinkTags) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1215,9 +1203,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
+    const model = ctx.modelRegistry?.find(event.message.provider, event.message.model);
+    const modelPolicy = (model as (typeof model & { litellmPolicy?: LiteLLMModelPolicy }) | undefined)?.litellmPolicy;
+    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames, modelPolicy);
     if (!message) return;
     return { message };
   });

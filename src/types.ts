@@ -10,7 +10,16 @@ export type LiteLLMRuntimeAuth = {
   headers?: Record<string, string>;
 };
 
-export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
+export interface LiteLLMModelPolicy {
+  normalizeStrictToolMessages: boolean;
+  // Moonshot routes can inline reasoning as `<think>` text in the visible answer.
+  // Discovery carries the conclusion so hooks do not re-derive it from route names.
+  normalizeThinkTags: boolean;
+}
+
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl"> & {
+  litellmPolicy?: LiteLLMModelPolicy;
+};
 
 export type DiscoveredModel = {
   [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;

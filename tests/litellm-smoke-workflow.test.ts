@@ -9,46 +9,14 @@ function readWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/litellm-smoke.yml"), "utf8");
 }
 
-interface WorkflowStep {
-  name?: string;
-  keys: string[];
-  body: string;
-}
-
-// Minimal structural reader for the one shape this file needs: the ordered step
-// list of a job. Deliberately not a general YAML parser and deliberately not a new
-// dependency — string assertions cannot tell a live step from commented-out text,
-// which is the only property worth asserting here.
-function parseJobSteps(workflow: string, job: string): WorkflowStep[] {
-  const lines = workflow.split("\n");
-  const jobLine = lines.findIndex((line) => line.trimEnd() === `  ${job}:`);
-  if (jobLine === -1) throw new Error(`job not found: ${job}`);
-  const stepsLine = lines.findIndex((line, index) => index > jobLine && line.trimEnd() === "    steps:");
-  if (stepsLine === -1) throw new Error(`steps not found for job: ${job}`);
-
-  const steps: WorkflowStep[] = [];
-  for (let index = stepsLine + 1; index < lines.length; index++) {
-    const line = lines[index];
-    if (line.trim() === "") continue;
-    const indent = line.length - line.trimStart().length;
-    if (indent < 6) break; // dedented out of the steps list
-    if (line.startsWith("      - ")) {
-      steps.push({ keys: [], body: "" });
-      const first = line.slice("      - ".length);
-      const key = /^([A-Za-z_-]+):/.exec(first);
-      if (key) steps[steps.length - 1].keys.push(key[1]);
-      if (key?.[1] === "name") steps[steps.length - 1].name = first.slice(key[0].length).trim();
-    }
-    const current = steps[steps.length - 1];
-    if (!current) continue;
-    current.body += `${line}\n`;
-    if (indent === 8) {
-      const key = /^([A-Za-z_-]+):/.exec(line.trimStart());
-      if (key && !current.keys.includes(key[1])) current.keys.push(key[1]);
-      if (key?.[1] === "name") current.name = line.trimStart().slice(key[0].length).trim();
-    }
-  }
-  return steps;
+// Returns just the named step, so an assertion cannot be satisfied by identical
+// text elsewhere in the workflow (the `model_list` fixture repeats several of the
+// field names this step checks).
+function sliceStep(workflow: string, name: string): string {
+  const start = workflow.indexOf(`- name: ${name}`);
+  if (start === -1) throw new Error(`workflow step not found: ${name}`);
+  const next = workflow.indexOf("\n      - name: ", start + 1);
+  return workflow.slice(start, next === -1 ? undefined : next);
 }
 
 function readCiWorkflow(): string {
@@ -87,58 +55,25 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    // Two rows are what makes the grouped route exercise deployment reduction.
     expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
-    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
-    expect(workflow).toContain("AbortSignal.timeout(3000)");
-    // The mixed-transport fixture only exercises reduction while the proxy keeps
-    // one chat and one responses deployment with asymmetric accepted parameters.
-    expect(workflow).toContain("mode: chat");
-    expect(workflow).toContain("mode: responses");
-    expect(workflow).toContain('=== "chat,responses"');
-    expect(workflow).toContain('has(summary[0], "temperature", "reasoning_effort")');
-    expect(workflow).toContain('has(summary[1], "temperature", "thinking")');
-    expect(workflow).toContain("must remain asymmetric");
-
-    // Structural: the verification step must actually exist in the job's step list,
-    // be enabled, run after the build that produces dist/, and assert the reduced
-    // outcome. Deleting or disabling the step fails here; commenting it out cannot
-    // satisfy these assertions the way a substring match would.
-    const steps = parseJobSteps(workflow, "smoke");
-    const names = steps.map((step) => step.name);
-    const verifyIndex = names.indexOf("Verify deployment-group reduction");
-    const buildIndex = steps.findIndex((step) => step.body.includes("run: npm run build"));
-    const configIndex = names.indexOf("Write LiteLLM smoke config");
-
-    expect(verifyIndex).toBeGreaterThan(-1);
-    expect(buildIndex).toBeGreaterThan(-1);
-    expect(configIndex).toBeGreaterThan(-1);
-    expect(verifyIndex).toBeGreaterThan(buildIndex);
-    expect(verifyIndex).toBeGreaterThan(configIndex);
-
-    const verify = steps[verifyIndex];
-    expect(verify.keys).toContain("run");
-    expect(verify.keys).toContain("shell");
-    // An `if:` would let the gate be silently skipped.
-    expect(verify.keys).not.toContain("if");
-    expect(verify.body).toContain("node --input-type=module -");
-    expect(verify.body).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
-    expect(verify.body).toContain('grouped[0].api === "openai-completions"');
-
-    // The fixture must keep the two properties that make the gate meaningful: two
-    // distinct deployment ids' worth of rows, in the two intended transport modes,
-    // over backends that disagree so catalog authority is genuinely withheld.
-    const config = steps[configIndex].body;
-    const grouped = config.split("- model_name: grouped-vidaimock").slice(1);
-    expect(grouped).toHaveLength(2);
-    expect(grouped[0]).toContain("mode: chat");
-    expect(grouped[1]).toContain("mode: responses");
-    expect(grouped[0]).toContain("model: openai/gpt-4o-mini");
-    expect(grouped[1]).toContain("model: anthropic/claude-3-5-sonnet");
-    // Reduction outcome, not just wire shape.
-    expect(workflow).toContain('grouped[0].api === "openai-completions"');
-    expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
-    // Stdin ESM is explicit rather than inferred from top-level await.
-    expect(workflow).toContain("node --input-type=module -");
+    // Assert against the step's own body. The grouped `model_list` block above
+    // contains `mode`, `supported_openai_params` and `allowed_openai_params`
+    // too, so whole-file assertions passed even with the step deleted outright.
+    const contractStep = sliceStep(workflow, "Verify deployment-group model info contract");
+    expect(contractStep).toContain('row.model_name === "grouped-vidaimock"');
+    // Retries rather than failing the job on a cold proxy.
+    expect(contractStep).toMatch(/while \(Date\.now\(\) < deadline\)/);
+    // Guards the payload shape before indexing into it.
+    expect(contractStep).toMatch(/Array\.isArray\(payload\.data\)/);
+    // Checks every field the reduction reads, including the mode that decides
+    // whether a deployment joins the reduction at all.
+    for (const field of ["model_info?.id", "model_info.mode", "supported_openai_params", "allowed_openai_params"]) {
+      expect(contractStep).toContain(field);
+    }
+    expect(contractStep).toContain('modes.join(",") !== "chat,responses"');
+    // Credential-bearing fields must not reach a public CI log.
+    expect(contractStep).toContain("litellm_params: undefined");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

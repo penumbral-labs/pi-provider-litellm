@@ -2,6 +2,7 @@ import type { Api, AssistantMessage, AuthContext, Model, Models, Provider } from
 import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { afterEach, vi } from "vitest";
+import type { ModelInfoEntry } from "../../src/types.js";
 import { useHermeticEnv } from "../test-helpers.js";
 
 // Every provider-compat suite imports this module, and each drives real discovery through
