@@ -14,18 +14,13 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import {
-  discoverModels,
-  isGpt55Model,
-  normalizeBaseUrl,
-  shouldSuppressReasoningContent,
-} from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
+import type { DiscoveryOptions, LiteLLMModelPolicy, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -777,6 +772,7 @@ function prepareLiteLLMRequestPayload(
   modelId: string | undefined,
   api: Api | undefined,
   sessionId: string | undefined,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): Record<string, unknown> | undefined {
   const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
