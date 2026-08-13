@@ -576,16 +576,28 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
 // Withholding a repair a Moonshot deployment demonstrably needs is the safe
 // choice for its unidentified sibling, but it is not a free one: tool calls to
 // the Moonshot deployment can fail. Say so rather than letting the group look
-// fully supported.
+// fully supported. As with catalog-authority diagnostics, persistent routes are
+// reported once per process while newly observed routes still get one bounded
+// line. Deduplicate the input too, since fallback expansion may repeat a route.
+const reportedWithheldRepairRoutes = new Set<string>();
+
 function reportWithheldToolRepair(routes: readonly string[]): void {
-  if (routes.length === 0) return;
-  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
-  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  const unreported = [...new Set(routes)].filter((route) => !reportedWithheldRepairRoutes.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reportedWithheldRepairRoutes.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
   process.stderr.write(
-    `LiteLLM discovery: ${routes.length} route group(s) look Moonshot-backed but not every deployment evidences ` +
+    `LiteLLM discovery: ${unreported.length} route group(s) look Moonshot-backed but not every deployment evidences ` +
       `it; strict tool-message repair is withheld because it rewrites outbound messages and is unproven for a ` +
       `deployment that has not identified its backend. Moonshot tool calls on these routes may fail until every ` +
       `deployment declares its backend: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
+function reportWithheldToolRepairForModels(models: readonly DiscoveredModel[]): void {
+  reportWithheldToolRepair(
+    models.filter((model) => model.litellmPolicy?.normalizeStrictToolMessages === false).map((model) => model.id),
   );
 }
 
@@ -795,7 +807,9 @@ async function discoverFromHealth(
       return model;
     }),
   );
-  return models.filter((model): model is DiscoveredModel => model !== undefined);
+  const discovered = models.filter((model): model is DiscoveredModel => model !== undefined);
+  reportWithheldToolRepairForModels(discovered);
+  return discovered;
 }
 
 function deduplicateModels(models: DiscoveredModel[]): DiscoveredModel[] {
@@ -855,7 +869,9 @@ export async function discoverModels(
         models = [...models.filter((m) => !m.id.includes("*")), ...expanded.filter((m) => !seen.has(m.id))];
       }
     }
-    return { source: "model_info", models: deduplicateModels(models) };
+    const deduplicated = deduplicateModels(models);
+    reportWithheldToolRepairForModels(deduplicated);
+    return { source: "model_info", models: deduplicated };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
@@ -878,5 +894,7 @@ export async function discoverModels(
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
     .filter((m): m is DiscoveredModel => m !== undefined);
-  return { source: "models_list", models: deduplicateModels(models) };
+  const deduplicated = deduplicateModels(models);
+  reportWithheldToolRepairForModels(deduplicated);
+  return { source: "models_list", models: deduplicated };
 }

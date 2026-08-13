@@ -2122,10 +2122,40 @@ describe("cache-read and Responses paths honour the transmissibility gate", () =
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    // Responses mode must not drop the Moonshot block: pi-ai reads
-    // supportsDeveloperRole on that path, and an empty compat also looks like
-    // one that can carry effort, which fail-opens the level map.
+    // Responses mode keeps its shared vendor restriction and must also honor the
+    // Chat-only effort denial as authority for offering no selectable level.
     expect(result.models[0]?.compat).toMatchObject({ supportsDeveloperRole: false });
+    expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "/v1/models",
+      fetch: async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith("/model/info")) return jsonResponse(403, {});
+        if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id: "moonshotai/kimi-k3" }] });
+        throw new Error(`unexpected URL: ${url}`);
+      },
+    },
+    {
+      name: "/health",
+      fetch: async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith("/model/info") || url.endsWith("/v1/models")) return jsonResponse(403, {});
+        if (url.endsWith("/health")) {
+          return jsonResponse(200, { healthy_endpoints: [{ model: "moonshotai/kimi-k3" }] });
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      },
+    },
+  ])("keeps vendor-denied fallback catalog levels closed through $name", async ({ fetch }) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(fetch);
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.reasoning).toBe(true);
+    expect(result.models[0]?.compat).toMatchObject({ supportsReasoningEffort: false });
     expect(getSupportedThinkingLevels(nativeModel(result.models[0]))).toEqual([]);
   });
 
@@ -2194,6 +2224,82 @@ describe("cache-read and Responses paths honour the transmissibility gate", () =
     expect(reports[0]).toContain("(+1 more)");
     // Only public route ids, never credentials or litellm_params.
     expect(reports[0]).not.toMatch(/sk-|api_key/);
+  });
+
+  it("bounds and deduplicates withheld strict-tool-repair diagnostics", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const rows = (routes: string[]) =>
+      routes.flatMap((route) => [
+        {
+          model_name: route,
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+          model_info: { id: `${route}-kimi`, mode: "chat", litellm_provider: "moonshot" },
+        },
+        {
+          model_name: route,
+          litellm_params: { model: "internal/unidentified" },
+          model_info: { id: `${route}-unknown`, mode: "chat" },
+        },
+      ]);
+    const discoverInfo = async (routes: string[]) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: rows(routes) }));
+      await discoverModels("https://litellm.example.com", "sk-test", {});
+      vi.mocked(globalThis.fetch).mockRestore();
+    };
+
+    await discoverInfo(["repair-a", "repair-b", "repair-c", "repair-d"]);
+    await discoverInfo(["repair-a", "repair-b", "repair-c", "repair-d"]);
+    await discoverInfo(["repair-a", "repair-new"]);
+
+    const reports = writes.filter((line) => line.includes("strict tool-message repair is withheld"));
+    expect(reports).toHaveLength(2);
+    expect(reports[0]).toContain("4 route group(s)");
+    expect(reports[0]).toContain("repair-a, repair-b, repair-c (+1 more)");
+    expect(reports[0]).not.toContain("repair-d");
+    expect(reports[1]).toContain("1 route group(s)");
+    expect(reports[1]).toContain("repair-new");
+    expect(reports[1]).not.toContain("repair-a");
+    expect(reports.join("\n")).not.toMatch(/sk-|api_key|repair-a-kimi/);
+  });
+
+  it.each([
+    {
+      source: "/v1/models",
+      fetch: async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith("/model/info")) return jsonResponse(403, {});
+        if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id: "kimi-diagnostic-list" }] });
+        throw new Error(`unexpected URL: ${url}`);
+      },
+    },
+    {
+      source: "/health",
+      fetch: async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith("/model/info") || url.endsWith("/v1/models")) return jsonResponse(403, {});
+        if (url.endsWith("/health")) {
+          return jsonResponse(200, { healthy_endpoints: [{ model: "kimi-diagnostic-health" }] });
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      },
+    },
+  ])("reports the withheld route-name repair through $source", async ({ fetch, source }) => {
+    const writes: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(fetch);
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    const reports = writes.filter((line) => line.includes("strict tool-message repair is withheld"));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain(source === "/health" ? "kimi-diagnostic-health" : "kimi-diagnostic-list");
   });
 });
 

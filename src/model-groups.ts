@@ -322,15 +322,18 @@ export function closeSerializerPolicy(input: {
   const { api, reasoning, vendorCompat, semanticCompat, semanticLevels, catalogLevels, denyLevels } = input;
   if (api === "openai-responses") {
     // Chat compat fields are not part of the Responses compat union, so only the
-    // shared ones travel. The Responses serializer emits `reasoning.effort`
-    // whenever the model reasons, so the carrier is inherent to the API.
+    // shared request-shape fields travel. The vendor's explicit effort denial is
+    // still authoritative even though it cannot be copied into Responses compat:
+    // no level may be offered for that API when the backend rejected the carrier.
     const shared = vendorCompat as OpenAICompat | undefined;
     const compat: DiscoveredModel["compat"] = {
       ...(shared?.supportsDeveloperRole === false ? { supportsDeveloperRole: false } : {}),
       ...(shared?.supportsStrictMode === false ? { supportsStrictMode: false } : {}),
     };
     if (!reasoning) return { reasoning, compat };
-    if (denyLevels) return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+    if (denyLevels || shared?.supportsReasoningEffort === false) {
+      return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+    }
     return { reasoning, thinkingLevelMap: toResponsesLevels(semanticLevels ?? catalogLevels), compat };
   }
   // A model with no compat at all keeps none: fabricating an empty object here

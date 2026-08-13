@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogResolution, reduceModelGroup, toResponsesLevels } from "../src/model-groups.js";
+import {
+  type CatalogResolution,
+  closeSerializerPolicy,
+  reduceModelGroup,
+  toResponsesLevels,
+} from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
 const catalog = new Map<string, CatalogResolution>([
@@ -118,6 +123,28 @@ describe("toResponsesLevels", () => {
     },
   ])("never widens Responses beyond Chat for $name", ({ levels, expected }) => {
     expect(toResponsesLevels(levels)).toEqual(expected);
+  });
+
+  it("keeps Chat and Responses closed when vendor compatibility denies reasoning effort", () => {
+    const input = {
+      reasoning: true,
+      vendorCompat: { supportsReasoningEffort: false } as const,
+      catalogLevels: { off: "off", low: "low", high: "high" },
+    };
+
+    const chat = closeSerializerPolicy({ ...input, api: "openai-completions" });
+    const responses = closeSerializerPolicy({ ...input, api: "openai-responses" });
+
+    expect(chat.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(responses.thinkingLevelMap).toEqual(chat.thinkingLevelMap);
   });
 });
 
