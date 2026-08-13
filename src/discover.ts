@@ -15,6 +15,7 @@ import {
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
+  wireString,
 } from "./model-groups.js";
 import type {
   DiscoveredModel,
@@ -300,15 +301,15 @@ const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   vertex_ai: "google-vertex",
 };
 
-function adapterCatalogProvider(adapter: string | undefined): BuiltinProvider | undefined {
-  const normalized = adapter?.trim().toLowerCase();
+function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
+  const normalized = wireString(adapter)?.trim().toLowerCase();
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
-  const routingModel = entry.litellm_params?.model?.trim() || undefined;
-  const baseModel = entry.model_info?.base_model?.trim() || undefined;
+  const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
+  const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
   // A routing model and a declared base model that name different families
@@ -555,17 +556,20 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
 
 const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
 
-// Withholding catalog authority is safe but invisible: the route silently reports
-// default limits and zero cost. This is a safety-relevant degradation, so it is
-// reported once per discovery regardless of LITELLM_VERBOSE_DISCOVERY, and
-// carries only a count and bounded public route ids.
+// Keyed by route so persistent ambiguity is reported once per process while a
+// newly observed route still receives a bounded diagnostic.
+const reportedAmbiguousRoutes = new Set<string>();
+
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
-  if (routes.length === 0) return;
-  const hidden = routes.length - AMBIGUOUS_AUTHORITY_SAMPLE;
-  const sample = routes.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reportedAmbiguousRoutes.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
   process.stderr.write(
-    `LiteLLM discovery: ${routes.length} route group(s) have conflicting deployment provider identity; ` +
-      `catalog limits, pricing, and reasoning metadata are withheld: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+    `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
+      `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
+      `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
   );
 }
 
@@ -669,7 +673,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  const named = entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId };
+  const named = wireString(entry.model_name) || !fallbackId ? entry : { ...entry, model_name: fallbackId };
   // `/health` detail lookups are per deployment, not complete route groups, so
   // they stay on Chat. Rewriting the mode before reduction keeps the deployment
   // on the ordinary Chat path, so vendor and reasoning-replay compatibility are
@@ -697,12 +701,14 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = entry.model;
+  const id = wireString(entry.model);
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
   return {
     id,
-    name: catalogModel?.name ?? id,
+    // Health route text is not later cache authority. Unknown routes therefore
+    // use the permanent reduced-evidence marker, never the fallback sentinel.
+    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
     // Same evidence quality as the `/v1/models` fallback — a route name and
     // nothing else — so it closes the same catalog map the same way.
     ...closeSerializerPolicy({
@@ -724,10 +730,11 @@ function mapFromModelsList(
   entry: ModelsListEntry,
   modelsDev: ModelsDevResponse | undefined,
 ): DiscoveredModel | undefined {
-  const id = entry.id;
+  const id = wireString(entry.id);
   if (!id) return undefined;
-  const catalogModel = findCatalogModel(id, entry.owned_by);
-  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
+  const ownedBy = wireString(entry.owned_by);
+  const catalogModel = findCatalogModel(id, ownedBy);
+  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, ownedBy));
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
@@ -810,10 +817,11 @@ export async function discoverModels(
   if (infoResult.ok) {
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
-      if (!entry.model_name) continue;
-      const group = groups.get(entry.model_name) ?? [];
+      const route = wireString(entry.model_name);
+      if (!route) continue;
+      const group = groups.get(route) ?? [];
       group.push(entry);
-      groups.set(entry.model_name, group);
+      groups.set(route, group);
     }
     const ambiguousRoutes: string[] = [];
     const withheldRepairRoutes: string[] = [];

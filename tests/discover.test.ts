@@ -1901,7 +1901,7 @@ describe("discoverModels fallback to /health", () => {
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
     expect(result.models[1]).toMatchObject({
-      name: "anthropic/claude-3-5-sonnet",
+      name: "anthropic/claude-3-5-sonnet (incomplete metadata)",
       contextWindow: 128000,
       maxTokens: 16384,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
@@ -2186,7 +2186,7 @@ describe("cache-read and Responses paths honour the transmissibility gate", () =
     await discoverModels("https://litellm.example.com", "sk-test", {});
     stderr.mockRestore();
 
-    const reports = writes.filter((line) => line.includes("conflicting deployment provider identity"));
+    const reports = writes.filter((line) => line.includes("missing or conflicting deployment provider evidence"));
     expect(reports).toHaveLength(1);
     expect(reports[0]).toContain("4 route group(s)");
     expect(reports[0]).toContain("(+1 more)");
