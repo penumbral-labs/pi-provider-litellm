@@ -1319,6 +1319,7 @@ describe("discoverModels response-mode models", () => {
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
     expect(result.models[0]?.compat).not.toHaveProperty("forceAdaptiveThinking");
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
   it("keeps authoritative Chat compatibility when /health downgrades protocol selection", async () => {

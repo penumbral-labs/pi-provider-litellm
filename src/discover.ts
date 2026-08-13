@@ -654,9 +654,10 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   );
   if (!model) return undefined;
   // A `/health` detail row is one deployment, not a complete route group, so it is not
-  // sufficient evidence to route natively. Downgrade to Chat Completions and rebuild
-  // compat for that transport, dropping every Messages-only field.
-  if (!entry.model_name) delete model.thinkingLevelMap;
+  // sufficient evidence to expose route-wide thinking controls or route natively.
+  // Downgrade to Chat Completions and rebuild compat for that transport, dropping every
+  // Messages-only field.
+  delete model.thinkingLevelMap;
   if (model.api === "openai-completions") return model;
   const sourceApi = model.api;
   const downgradedCompat = sourceApi === "anthropic-messages" ? undefined : model.compat;
