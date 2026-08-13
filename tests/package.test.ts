@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { checkSupplyChain } from "../scripts/supply-chain-guard.js";
 import { importSpecifiers, initImportSpecifiers } from "./import-specifiers.js";
+import { hermeticChildEnv } from "./test-helpers.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -145,14 +146,13 @@ describe("pi package compatibility", () => {
     const listModels = async (cwd: string): Promise<string> => {
       const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
         cwd,
-        env: {
-          ...process.env,
+        env: hermeticChildEnv({
           PI_CODING_AGENT_DIR: agentDir,
           LITELLM_HEADERS: "{bad json",
           LITELLM_OFFLINE: "1",
           LITELLM_BASE_URL: "https://proxy.invalid",
           LITELLM_API_KEY: "sk-not-a-real-key",
-        },
+        }),
       });
       return `${stdout}${stderr}`;
     };
@@ -226,14 +226,13 @@ describe("pi package compatibility", () => {
 
       const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
         cwd: fixture,
-        env: {
-          ...process.env,
+        env: hermeticChildEnv({
           PI_CODING_AGENT_DIR: agentDir,
           LITELLM_HEADERS: "{bad json",
           LITELLM_OFFLINE: "1",
           LITELLM_BASE_URL: "https://proxy.invalid",
           LITELLM_API_KEY: "sk-not-a-real-key",
-        },
+        }),
       });
       const output = `${stdout}${stderr}`;
 
@@ -255,11 +254,13 @@ describe("pi package compatibility", () => {
       ),
     );
 
-    // A scanner bug that returned nothing would make `every` vacuously true, so require
-    // that the scan actually found the imports this package is built from. The oracle
-    // itself is pinned by tests/import-specifiers.test.ts.
+    // A scanner bug that returned nothing would make the allowlist vacuously true, so
+    // require every shipped module to yield at least one specifier. The oracle itself is
+    // pinned by tests/import-specifiers.test.ts.
     expect(sourceFiles.length).toBeGreaterThan(0);
-    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(sourceFiles.length);
+    for (const [file, specifiers] of imports) {
+      expect(specifiers.length, `${file}: no module specifiers found`).toBeGreaterThan(0);
+    }
 
     const allowed = new Set([
       "@earendil-works/pi-ai",

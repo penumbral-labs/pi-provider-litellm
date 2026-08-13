@@ -45,6 +45,7 @@
 ## Smoke And CI
 
 - CI runs `npm ci` and `npm run prepublishOnly`.
+- The release workflow invokes `npm run prepublishOnly` explicitly before `npm publish`, so the publish gate still runs when npm lifecycle scripts are disabled.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
@@ -57,7 +58,7 @@
 - Local release prep should keep `package.json` and `package-lock.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
 - Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag.
 - The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only.
-- `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files; update tests before changing that policy.
+- `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files, and requires every allowlisted source file to ship; update tests before changing that policy.
 
 ## Package Metadata
 

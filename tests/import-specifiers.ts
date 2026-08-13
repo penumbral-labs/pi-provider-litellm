@@ -21,8 +21,8 @@ const FORBIDDEN_RESOLVERS = [
   /\bimport\.meta\.resolve\s*\(/,
 ];
 
-// Replaces the contents of comments and string/template literals with spaces, preserving
-// length, so a regex scan sees only executable text.
+// Replaces the contents of comments, regexes, and string/template literals with spaces,
+// preserving length, so a regex scan sees only executable text.
 function blankNonCode(source: string): string {
   let out = "";
   let index = 0;
@@ -55,11 +55,47 @@ function blankNonCode(source: string): string {
       continue;
     }
 
+    if (quote === "/" && startsRegexLiteral(source, index)) {
+      let cursor = index + 1;
+      let inCharacterClass = false;
+      while (cursor < source.length) {
+        if (source[cursor] === "\\") {
+          cursor += 2;
+          continue;
+        }
+        if (source[cursor] === "[") inCharacterClass = true;
+        else if (source[cursor] === "]") inCharacterClass = false;
+        else if (source[cursor] === "/" && !inCharacterClass) {
+          cursor += 1;
+          while (/[a-z]/i.test(source[cursor] ?? "")) cursor += 1;
+          break;
+        }
+        cursor += 1;
+      }
+      out += source.slice(index, cursor).replace(/[^\n]/g, " ");
+      index = cursor;
+      continue;
+    }
+
     out += source[index];
     index += 1;
   }
 
   return out;
+}
+
+// JavaScript decides whether `/` starts a regex from the preceding token. Resolver calls in
+// this package are only rejected, never executed, so this small lexical predicate only needs
+// to keep regex contents from changing comment/string state in the policy scan.
+function startsRegexLiteral(source: string, slashIndex: number): boolean {
+  const prefix = source.slice(0, slashIndex).trimEnd();
+  if (prefix === "") return true;
+
+  const previous = prefix.at(-1) ?? "";
+  if ("([{:;,=!?&|+-*%^~<>".includes(previous)) return true;
+
+  const word = /[A-Za-z_$][\w$]*$/.exec(prefix)?.[0];
+  return word !== undefined && /^(?:await|case|delete|in|instanceof|of|return|throw|typeof|void|yield)$/.test(word);
 }
 
 let ready: Promise<void> | undefined;

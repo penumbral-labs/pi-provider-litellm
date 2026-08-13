@@ -86,7 +86,7 @@ async function readCredentials(path: string): Promise<GoogleCredentials | null> 
 }
 
 // Single ADC resolution path: locate the file, read it, and either return usable
-// authorized_user credentials or warn once with the specific reason they are not.
+// authorized_user credentials or warn with the specific reason they are not.
 async function resolveAuthorizedUserAdc(): Promise<AuthorizedUserCredentials | null> {
   const adcPath = getAdcPath();
   if (!adcPath) {

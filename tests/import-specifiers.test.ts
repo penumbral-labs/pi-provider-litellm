@@ -57,6 +57,8 @@ describe("importSpecifiers", () => {
     ["eval", 'eval("import(\\"pkg\\")");'],
     ["new Function", 'new Function("return import(\\"pkg\\")");'],
     ["import.meta.resolve", 'import.meta.resolve("pkg");'],
+    ["resolver after a regex containing quotes", 'const re = /[`"]+/; require("pkg");'],
+    ["resolver after a regex containing comment markers", 'const re = /\\/\\/* not a comment/; eval("1");'],
   ] as const)("rejects %s as a forbidden resolver", ([, source]) => {
     expect(importSpecifiers(source)).toContain(FORBIDDEN_RESOLVER);
   });
@@ -70,6 +72,7 @@ describe("importSpecifiers", () => {
     ["a single-quoted message", "const hint = 'createRequire() is not allowed';"],
     ["a template message", "const hint = `new Function() is rejected`;"],
     ["an error string", 'throw new Error("import.meta.resolve() is unsupported here");'],
+    ["a regex literal", 'const pattern = /require\\("pkg"\\)|eval\\("1"\\)/;'],
     ["an identifier that merely contains the word", "const requiredFields = [1];\nconst evaluate = () => 1;"],
   ] as const)("does not read %s as a forbidden resolver", ([, source]) => {
     expect(importSpecifiers(source)).toEqual([]);
