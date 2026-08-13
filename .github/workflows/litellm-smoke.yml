@@ -39,7 +39,7 @@ jobs:
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
-      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=absent vidaimock-responses=present grouped-vidaimock=present
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=present vidaimock-responses=present grouped-vidaimock=present
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100

@@ -168,9 +168,8 @@ canonical identifiers are looked up in the adapter's own catalog, so a decorated
 Bedrock provider identity, prices, limits, and thinking levels. A route whose backend has no entry in the bundled catalog
 at all (Vertex Claude today) still carries compatibility while its identity and pricing stay withheld.
 
-LiteLLM does not currently return `x-litellm-response-cost` on `/v1/messages`, so a Claude route on native Messages
-reports the discovered static estimate rather than LiteLLM's actual computed cost. Chat Completions and Responses
-requests still take actual cost from that header when LiteLLM returns it.
+LiteLLM returns `x-litellm-response-cost` on `/v1/messages`, so native Messages routes use the same actual-cost reporting
+path as Chat Completions and Responses. If an older proxy omits that header, Pi retains the discovered static estimate.
 
 ## Model catalog authority
 
