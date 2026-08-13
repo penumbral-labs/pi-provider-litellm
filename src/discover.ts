@@ -8,10 +8,10 @@ import {
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
-  effectiveDeploymentCount,
   type MessagesBackendCompat,
   reduceModelGroup,
   type SemanticFamily,
+  wireString,
 } from "./model-groups.js";
 import type {
   DiscoveredModel,
@@ -324,14 +324,22 @@ function resolveClaudeBackendIdentity(
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
-  const adapter = entry.model_info?.litellm_provider?.trim().toLowerCase();
+  const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   const adapterProvider = adapterCatalogProvider(adapter);
-  const routingModel = entry.litellm_params?.model?.trim() || undefined;
-  const baseModel = entry.model_info?.base_model?.trim() || undefined;
+  const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
+  const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
-  const conflictingFamilies = routingFamily !== undefined && baseFamily !== undefined && routingFamily !== baseFamily;
-  const family = routingFamily ?? baseFamily;
+  // A recognized adapter catalog entry is contrary evidence even when the family
+  // classifier does not name it (for example Bedrock Nova). It must outrank a
+  // Claude-looking base_model rather than letting the base relabel the backend.
+  const routingCatalog = routingModel ? resolveCatalogModel(routingModel, undefined, adapterProvider) : undefined;
+  const conflictingFamilies =
+    routingModel !== undefined &&
+    baseFamily !== undefined &&
+    ((routingFamily !== undefined && routingFamily !== baseFamily) ||
+      (routingCatalog !== undefined && semanticFamily(routingCatalog.model.id) !== baseFamily));
+  const family = routingFamily ?? (routingCatalog ? semanticFamily(routingCatalog.model.id) : undefined) ?? baseFamily;
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   const backendIdentity = resolveClaudeBackendIdentity(
     adapter,
@@ -576,25 +584,41 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfoGroup(entries: readonly ModelInfoEntry[]): DiscoveredModel | undefined {
-  // Exact repeats of an identified deployment are one effective deployment;
-  // anonymous rows remain distinct because LiteLLM provides no identity to dedupe.
-  const deploymentCount = effectiveDeploymentCount(entries);
-  const singleton = deploymentCount === 1;
-  const reduced = reduceModelGroup(entries, (entry) => {
+const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
+const reportedAmbiguousRoutes = new Set<string>();
+
+function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
+  const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reportedAmbiguousRoutes.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(
+    `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
+      `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
+      `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
+function mapFromModelInfoGroup(
+  entries: readonly ModelInfoEntry[],
+  ambiguousRoutes?: string[],
+): DiscoveredModel | undefined {
+  const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved || !singleton) return resolved;
-    const id = entry.model_name;
+    const id = wireString(entry.model_name);
     const catalog = id ? resolveCatalogModel(id) : undefined;
     if (!catalog) return undefined;
     return catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model);
   });
   if (!reduced) return undefined;
-  const incompleteMetadataName =
-    deploymentCount > 1 ? `${reduced.id} (incomplete metadata)` : `${reduced.id} (no metadata)`;
+  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   const shared = {
     id: reduced.id,
-    name: reduced.hasCompleteCost ? reduced.id : incompleteMetadataName,
+    // Reduced groups never borrow the fallback ` (no metadata)` sentinel, which
+    // authorizes catalog re-derivation from route text during offline cache reads.
+    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
     input: (reduced.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
@@ -625,7 +649,9 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  const model = mapFromModelInfo(entry.model_name || !fallbackId ? entry : { ...entry, model_name: fallbackId });
+  const model = mapFromModelInfo(
+    wireString(entry.model_name) || !fallbackId ? entry : { ...entry, model_name: fallbackId },
+  );
   if (!model) return undefined;
   // A `/health` detail row is one deployment, not a complete route group, so it is not
   // sufficient evidence to route natively. Downgrade to Chat Completions and rebuild
@@ -645,20 +671,19 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = entry.model;
+  const id = wireString(entry.model);
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
   return {
     id,
-    name: catalogModel?.name ?? id,
+    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
     reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat: buildCompat(id),
+    compat: buildCompat(id, "openai-completions"),
   };
 }
 
@@ -739,12 +764,17 @@ export async function discoverModels(
   if (infoResult.ok) {
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
-      if (!entry.model_name) continue;
-      const group = groups.get(entry.model_name) ?? [];
+      const route = wireString(entry.model_name);
+      if (!route) continue;
+      const group = groups.get(route) ?? [];
       group.push(entry);
-      groups.set(entry.model_name, group);
+      groups.set(route, group);
     }
-    let models = [...groups.values()].map(mapFromModelInfoGroup).filter((m): m is DiscoveredModel => m !== undefined);
+    const ambiguousRoutes: string[] = [];
+    let models = [...groups.values()]
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .filter((m): m is DiscoveredModel => m !== undefined);
+    reportAmbiguousCatalogAuthority(ambiguousRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in

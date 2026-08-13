@@ -690,7 +690,7 @@ describe("discoverModels via /model/info", () => {
       expect(discovered.models[0]).toMatchObject({ id: "team-claude", api: "openai-completions" });
       expect(discovered.models[0]?.contextWindow).toBe(128_000);
       expect(discovered.models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-      expect(discovered.models[0]?.name).toBe("team-claude (no metadata)");
+      expect(discovered.models[0]?.name).toBe("team-claude (incomplete metadata)");
     },
   );
 
@@ -819,7 +819,7 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
-      name: "foundry-route (no metadata)",
+      name: "foundry-route (incomplete metadata)",
       reasoning: false,
       contextWindow: 128_000,
     });
@@ -834,7 +834,7 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "gpt-4o",
-      name: "gpt-4o (no metadata)",
+      name: "gpt-4o (incomplete metadata)",
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -2102,7 +2102,7 @@ describe("discoverModels fallback to /health", () => {
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
     expect(result.models[1]).toMatchObject({
-      name: "anthropic/claude-3-5-sonnet",
+      name: "anthropic/claude-3-5-sonnet (incomplete metadata)",
       contextWindow: 128000,
       maxTokens: 16384,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },

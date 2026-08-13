@@ -33,7 +33,7 @@ export interface CatalogResolution {
   cost?: DiscoveredModel["cost"];
 }
 
-export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | undefined;
+export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => CatalogResolution | undefined;
 
 export interface ReducedModelGroup {
   id: string;
@@ -49,6 +49,7 @@ export interface ReducedModelGroup {
   catalogProvider?: string;
   semanticFamily?: SemanticFamily;
   messagesCompat?: MessagesBackendCompat;
+  catalogAuthorityAmbiguous?: boolean;
   acceptedOpenAIParams: string[];
 }
 
@@ -57,42 +58,50 @@ const CHAT_STYLE_MODE_PATTERN = /^chat$/i;
 const COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 type CostField = (typeof COST_FIELDS)[number];
 
-function normalizedMode(mode: string | null | undefined): "chat" | "responses" | "unknown" | "unsupported" {
+export function wireString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function wireBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
-  const value = mode.trim();
+  const value = wireString(mode)?.trim();
+  if (value === undefined) return "unknown";
   if (RESPONSES_MODE_PATTERN.test(value)) return "responses";
   if (CHAT_STYLE_MODE_PATTERN.test(value)) return "chat";
   return "unsupported";
 }
 
-// Key-order-independent serialization, so logically equal metadata is never read as
-// disagreement just because two resolutions built the same object in a different order.
-function stableJson(value: unknown): string {
-  const sortValue = (inner: unknown): unknown => {
-    if (Array.isArray(inner)) return inner.map(sortValue);
-    if (typeof inner !== "object" || inner === null) return inner;
-    return Object.fromEntries(
-      Object.entries(inner)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, sortValue(child)]),
-    );
-  };
-  return JSON.stringify(sortValue(value));
+const MAX_CANONICAL_DEPTH = 12;
+
+function sortValue(value: unknown, depth = 0): unknown {
+  if (depth >= MAX_CANONICAL_DEPTH) return JSON.stringify(value);
+  if (Array.isArray(value)) return value.map((child) => sortValue(child, depth + 1));
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, sortValue(child, depth + 1)]),
+  );
+}
+
+function stableJson(value: unknown): string | undefined {
+  return value === undefined ? undefined : JSON.stringify(sortValue(value));
 }
 
 function stableEntry(entry: ModelInfoEntry): string {
-  return stableJson(entry);
+  return JSON.stringify(sortValue(entry));
 }
 
-function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
-  deployments: ModelInfoEntry[];
-  deploymentCount: number;
-} {
+function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
   const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];
   for (const entry of entries) {
     const signature = stableEntry(entry);
-    const id = entry.model_info?.id?.trim();
+    const id = wireString(entry.model_info?.id)?.trim();
     if (id) {
       const variants = identified.get(id) ?? new Map<string, ModelInfoEntry>();
       variants.set(signature, entry);
@@ -103,7 +112,7 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
   }
   // Conflicting rows for one deployment remain in the reduction so their
   // disagreement fails closed, while exact repeats stay idempotent.
-  const deployments = [
+  return [
     ...[...identified.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .flatMap(([, variants]) =>
@@ -111,15 +120,15 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): {
       ),
     ...anonymous.sort((left, right) => left.signature.localeCompare(right.signature)).map(({ entry }) => entry),
   ];
-  return { deployments, deploymentCount: identified.size + anonymous.length };
 }
 
-export function effectiveDeploymentCount(entries: readonly ModelInfoEntry[]): number {
-  return uniqueDeployments(entries.filter((entry) => entry.model_name)).deploymentCount;
+function explicitLimit(value: number | undefined): number | undefined {
+  return value === undefined || !Number.isFinite(value) || value <= 0 ? undefined : value;
 }
 
-function normalizeParams(params: readonly string[] | undefined): Set<string> {
-  return new Set(params?.map((param) => param.trim()).filter(Boolean));
+function normalizeParams(params: unknown): Set<string> {
+  if (!Array.isArray(params)) return new Set();
+  return new Set(params.map((param) => wireString(param)?.trim()).filter((param): param is string => Boolean(param)));
 }
 
 function acceptedParams(entry: ModelInfoEntry): Set<string> {
@@ -169,13 +178,12 @@ export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  const unique = uniqueDeployments(entries.filter((entry) => entry.model_name));
-  const candidates = unique.deployments;
+  const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
   if (candidates.length === 0) return undefined;
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
-  const catalogs = deployments.map(resolveCatalog);
+  const catalogs = deployments.map((entry) => resolveCatalog(entry, deployments.length === 1));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const backendSemanticFamily = unanimous(catalogs.map((catalog) => catalog?.backendIdentity?.semanticFamily));
@@ -185,21 +193,28 @@ export function reduceModelGroup(
   // equal policy expressed in a different order still counts as agreement.
   const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
+  const catalogAuthorityAmbiguous =
+    catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
   const reasoning = deployments.every(
-    (entry, index) => entry.model_info?.supports_reasoning ?? catalogAuthority[index]?.reasoning ?? false,
+    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning ?? false,
   );
   const vision = deployments.every(
-    (entry, index) => entry.model_info?.supports_vision ?? catalogAuthority[index]?.vision ?? false,
+    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision ?? false,
   );
   const contextWindow = min(
     deployments.map(
       (entry, index) =>
-        entry.model_info?.max_input_tokens ?? catalogAuthority[index]?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        explicitLimit(entry.model_info?.max_input_tokens) ??
+        explicitLimit(catalogAuthority[index]?.contextWindow) ??
+        DEFAULT_CONTEXT_WINDOW,
     ),
   );
   const maxTokens = min(
     deployments.map(
-      (entry, index) => entry.model_info?.max_output_tokens ?? catalogAuthority[index]?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      (entry, index) =>
+        explicitLimit(entry.model_info?.max_output_tokens) ??
+        explicitLimit(catalogAuthority[index]?.maxTokens) ??
+        DEFAULT_MAX_TOKENS,
     ),
   );
 
@@ -215,11 +230,11 @@ export function reduceModelGroup(
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
   if (hasCompleteCost && catalogProvider) {
-    const tiers = unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.cost?.tiers)));
-    if (tiers && tiers !== JSON.stringify(undefined)) cost.tiers = JSON.parse(tiers);
+    const tiers = unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.cost?.tiers)));
+    if (tiers) cost.tiers = JSON.parse(tiers);
   }
   const thinkingLevelMap = catalogProvider
-    ? unanimous(catalogAuthority.map((catalog) => JSON.stringify(catalog?.thinkingLevelMap)))
+    ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
     : undefined;
 
   // Native Messages needs positive, unanimous compatibility evidence, not just a
@@ -237,7 +252,7 @@ export function reduceModelGroup(
 
   return {
     id: deployments[0]?.model_name as string,
-    deploymentCount: unique.deploymentCount,
+    deploymentCount: deployments.length,
     api,
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
@@ -249,6 +264,7 @@ export function reduceModelGroup(
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
+    ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     acceptedOpenAIParams: intersectParams(deployments),
   };
 }
