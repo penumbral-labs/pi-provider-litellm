@@ -3,22 +3,27 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
+import {
+  type CatalogResolution,
+  catalogResolution,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  reduceModelGroup,
+  type SemanticFamily,
+  wireString,
+} from "./model-groups.js";
 import type {
   DiscoveredModel,
-  DiscoveredModelFor,
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
   ModelInfoEntry,
   ModelInfoResponse,
-  ModelProtocol,
   ModelsListEntry,
   ModelsListResponse,
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-const DEFAULT_MAX_TOKENS = 16_384;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 28 * 24 * 60 * 60 * 1000;
@@ -56,16 +61,6 @@ export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
 }
 
-const RESPONSES_MODE_PATTERN = /^responses?$/i;
-
-function isResponsesMode(mode: string | null | undefined): boolean {
-  return mode != null && RESPONSES_MODE_PATTERN.test(mode);
-}
-
-function isChatStyleMode(mode: string | null | undefined): boolean {
-  return mode == null || mode === "chat" || isResponsesMode(mode);
-}
-
 // Matches both the conventional `anthropic/...` prefix and aliases that
 // LiteLLM deployments commonly assign to Anthropic-backed routes (e.g.
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
@@ -91,25 +86,7 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-// Returns the `api` + `compat` pair for one protocol as a single ModelProtocol
-// value. Callers spread the result rather than setting the two fields separately,
-// so no call site has to remember the pairing. See ModelProtocol in types.ts for
-// what the type system does and does not catch here.
-export function modelProtocol(modelId: string, mode?: string | null): ModelProtocol {
-  return isResponsesMode(mode)
-    ? { api: "openai-responses", compat: responsesCompat(modelId) }
-    : { api: "openai-completions", compat: completionsCompat(modelId) };
-}
-
-export function responsesCompat(modelId: string): DiscoveredModelFor<"openai-responses">["compat"] {
-  // Responses defaults supportsDeveloperRole to true, but Moonshot routes apply
-  // strict OpenAI schema validation and reject the developer role. Responses also
-  // defaults supportsStrictMode to false already, and supportsStore /
-  // maxTokensField / cacheControlFormat do not exist on this protocol.
-  return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
-}
-
-export function completionsCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
+export function buildCompat(modelId: string): DiscoveredModel["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -127,32 +104,45 @@ export function completionsCompat(modelId: string): DiscoveredModelFor<"openai-c
 
 function toKnownProvider(provider: string | undefined): BuiltinProvider | undefined {
   if (!provider) return undefined;
-  const normalized = provider.toLowerCase();
+  const normalized = provider.trim().toLowerCase();
   return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
-function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
-  const prefixProvider = toKnownProvider(id.split("/")[0]);
+// Anthropic recognition is derived from the single `catalogLookupIds` rule so a
+// second alias pattern cannot drift away from it. Every Anthropic catalog id and
+// every alias that maps onto one is canonicalized to a `claude-` lookup id,
+// including single-number names and dated snapshots.
+function catalogProviderCandidates(lookupIds: readonly string[], id: string, ownedBy?: string): BuiltinProvider[] {
+  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
+  if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
+  return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
+}
+
+function resolveCatalogModel(
+  id: string,
+  ownedBy?: string,
+): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  const candidates = [toKnownProvider(ownedBy), prefixProvider, lookupIds.length > 1 ? "anthropic" : undefined].filter(
-    (provider): provider is BuiltinProvider => provider !== undefined,
-  );
-
-  for (const provider of candidates) {
-    const match = findCatalogModelInProvider(provider, lookupIds);
-    if (match) return match;
+  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy)) {
+    const model = findCatalogModelInProvider(provider, lookupIds);
+    if (model) return { provider, model };
   }
-
-  for (const provider of getProviders()) {
-    const match = findCatalogModelInProvider(provider, lookupIds);
-    if (match) return match;
-  }
-
   return undefined;
 }
 
+function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
+  return resolveCatalogModel(id, ownedBy)?.model;
+}
+
 export function enrichCachedModel(model: Model<Api>): Model<Api> {
-  // ponytail: legacy cache lacks field provenance; add per-field cache provenance if strict preservation becomes necessary.
+  // ponytail: legacy cache lacks field provenance; add per-field cache provenance if
+  // strict preservation becomes necessary. The two-marker contract below is the
+  // workaround for that absence, so this deferral is still open, not resolved.
+  //
+  // This sentinel is emitted only by the evidence-free `/v1/models` fallback, so
+  // re-deriving catalog metadata from the model id here cannot re-authorize a
+  // reduced `/model/info` group whose catalog authority was withheld. Reduced
+  // groups carry the distinct ` (incomplete metadata)` marker instead.
   if (
     !model.name.endsWith(" (no metadata)") ||
     model.reasoning ||
@@ -206,23 +196,55 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
-function mapModelInfoCost(
-  info: NonNullable<ModelInfoEntry["model_info"]>,
-  fallback?: DiscoveredModel["cost"],
-): NonNullable<DiscoveredModel["cost"]> {
-  return {
-    input: info.input_cost_per_token !== undefined ? info.input_cost_per_token * 1_000_000 : (fallback?.input ?? 0),
-    output: info.output_cost_per_token !== undefined ? info.output_cost_per_token * 1_000_000 : (fallback?.output ?? 0),
-    cacheRead:
-      info.cache_read_input_token_cost !== undefined
-        ? info.cache_read_input_token_cost * 1_000_000
-        : (fallback?.cacheRead ?? 0),
-    cacheWrite:
-      info.cache_creation_input_token_cost !== undefined
-        ? info.cache_creation_input_token_cost * 1_000_000
-        : (fallback?.cacheWrite ?? 0),
-    ...(fallback?.tiers ? { tiers: fallback.tiers } : {}),
-  };
+function semanticFamily(id: string): SemanticFamily | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
+  if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
+  if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
+  if (/(?:^|[./_-])(?:openai|gpt|o\d)(?:$|[./_:-])/.test(value)) return "openai";
+  return undefined;
+}
+
+const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
+  anthropic: "anthropic",
+  azure: "azure-openai-responses",
+  azure_ai: "azure-openai-responses",
+  bedrock: "amazon-bedrock",
+  bedrock_converse: "amazon-bedrock",
+  deepseek: "deepseek",
+  fireworks_ai: "fireworks",
+  gemini: "google",
+  moonshot: "moonshotai",
+  nvidia_nim: "nvidia",
+  openai: "openai",
+  together_ai: "together",
+  vertex_ai: "google-vertex",
+};
+
+function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
+  const normalized = wireString(adapter)?.trim().toLowerCase();
+  return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
+}
+
+export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
+  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
+    .map((candidate) => wireString(candidate)?.trim())
+    .filter((candidate): candidate is string => Boolean(candidate));
+  // Provider identity and semantic family must describe the same backend, so a
+  // resolution reports the family of the candidate that resolved it (or of the
+  // catalog model itself) rather than a family borrowed from a sibling candidate.
+  let unresolvedFamily: SemanticFamily | undefined;
+  for (const candidate of candidates) {
+    const family = semanticFamily(candidate);
+    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    if (resolved) {
+      return catalogResolution(resolved.provider, family ?? semanticFamily(resolved.model.id), resolved.model);
+    }
+    unresolvedFamily ??= family;
+  }
+  return unresolvedFamily ? { semanticFamily: unresolvedFamily } : undefined;
 }
 
 function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?: string; modelId: string } {
@@ -432,46 +454,100 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Discov
   return metadata;
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
-  const id = entry.model_name;
-  if (!id) return undefined;
-  const info = entry.model_info ?? {};
-  if (!isChatStyleMode(info.mode)) return undefined;
-  const catalogModel = findCatalogModel(id);
+const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
+
+// Reported routes, so a persistent misconfiguration is announced once rather than on
+// every background refresh and every `/model` open. Keyed by route rather than a
+// single flag so a newly ambiguous route is still reported. Mirrors the once-per-
+// process diagnostic set in src/index.ts.
+const reportedAmbiguousRoutes = new Set<string>();
+
+// Withholding catalog authority can be invisible in the model name when the router
+// supplies complete prices; limits and other catalog-derived metadata may still use
+// conservative defaults. Report that degradation regardless of
+// LITELLM_VERBOSE_DISCOVERY, carrying only a count and bounded public route ids.
+function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
+  const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reportedAmbiguousRoutes.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(
+    // "missing or conflicting": the group is also withheld when one deployment
+    // resolves a provider and another supplies no usable backend evidence at all,
+    // which points at a different fix than a genuine provider conflict.
+    `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
+      `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
+      `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  );
+}
+
+function mapFromModelInfoGroup(
+  entries: readonly ModelInfoEntry[],
+  ambiguousRoutes?: string[],
+): DiscoveredModel | undefined {
+  const reduced = reduceModelGroup(entries, (entry, singleton) => {
+    const resolved = resolveModelInfoCatalog(entry);
+    if (resolved || !singleton) return resolved;
+    // Exactly one routable deployment: the public route name is the only
+    // remaining hint, and using it preserves upstream singleton behavior.
+    // `reduceModelGroup` only passes rows whose route name is a readable string.
+    const id = entry.model_name;
+    const catalog = id ? resolveCatalogModel(id) : undefined;
+    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
+  });
+  if (!reduced) return undefined;
+  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   return {
-    id,
-    name: id,
-    reasoning: info.supports_reasoning ?? false,
-    ...(catalogModel?.thinkingLevelMap ? { thinkingLevelMap: catalogModel.thinkingLevelMap } : {}),
-    input: info.supports_vision ? ["text", "image"] : ["text"],
-    cost: mapModelInfoCost(info, catalogModel?.cost),
-    contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    ...modelProtocol(id, info.mode),
+    id: reduced.id,
+    // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
+    // catalog re-derivation from the model id during offline cache reads.
+    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
+    reasoning: reduced.reasoning,
+    ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
+    input: reduced.vision ? ["text", "image"] : ["text"],
+    cost: reduced.cost,
+    contextWindow: reduced.contextWindow,
+    maxTokens: reduced.maxTokens,
+    api: reduced.api,
+    compat: buildCompat(reduced.id),
   };
 }
 
+function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
+  return mapFromModelInfoGroup([entry]);
+}
+
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
+  // Branch on the readable name, not the raw field: an unreadable one must fall back
+  // to the `/health` route name rather than discarding a model the route could name.
+  if (wireString(entry.model_name) || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
+  // A thinking-level map is a per-generation control, and `/health` supplies only
+  // route text for it. Other catalog metadata on this path is unchanged.
   if (model) delete model.thinkingLevelMap;
   return model;
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = entry.model;
+  const id = wireString(entry.model);
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
   return {
     id,
-    name: catalogModel?.name ?? id,
+    // `/health` route text is never authorized for later cache re-enrichment, so
+    // an unresolved route is marked permanently rather than borrowing the
+    // `/v1/models` sentinel or presenting unknown cost as free.
+    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
     reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    // A thinking-level map is a per-generation control, and route text is the only
+    // input here, so no map is derived. Other catalog metadata is unchanged.
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    ...modelProtocol(id),
+    api: "openai-completions",
+    compat: buildCompat(id),
   };
 }
 
@@ -479,10 +555,11 @@ function mapFromModelsList(
   entry: ModelsListEntry,
   modelsDev: ModelsDevResponse | undefined,
 ): DiscoveredModel | undefined {
-  const id = entry.id;
+  const id = wireString(entry.id);
   if (!id) return undefined;
-  const catalogModel = findCatalogModel(id, entry.owned_by);
-  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
+  const ownedBy = wireString(entry.owned_by);
+  const catalogModel = findCatalogModel(id, ownedBy);
+  const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, ownedBy));
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
@@ -492,7 +569,8 @@ function mapFromModelsList(
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    ...modelProtocol(id),
+    api: "openai-completions",
+    compat: buildCompat(id),
   };
 }
 
@@ -549,17 +627,20 @@ export async function discoverModels(
   progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
-    const entries = new Map<string, ModelInfoEntry>();
+    const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
-      if (!entry.model_name) continue;
-      const previous = entries.get(entry.model_name);
-      entries.set(entry.model_name, {
-        ...previous,
-        ...entry,
-        model_info: { ...previous?.model_info, ...entry.model_info },
-      });
+      // A route without a readable public name cannot be grouped or addressed.
+      const route = wireString(entry.model_name);
+      if (!route) continue;
+      const group = groups.get(route) ?? [];
+      group.push(entry);
+      groups.set(route, group);
     }
-    let models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
+    const ambiguousRoutes: string[] = [];
+    let models = [...groups.values()]
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .filter((m): m is DiscoveredModel => m !== undefined);
+    reportAmbiguousCatalogAuthority(ambiguousRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in

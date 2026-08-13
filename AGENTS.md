@@ -19,15 +19,25 @@
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; conservative deployment-group reduction lives in `src/model-groups.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
-- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json`; keep fallback metadata tests current.
+- The `/v1/models` fallback enriches metadata from the Pi catalog and `https://models.dev/api.json` for ids that carry provider evidence — a known provider prefix, `owned_by`, or a bare Anthropic alias that canonicalizes to a `claude-` catalog id. Other unqualified ids stay unknown instead of being matched against every provider catalog. Keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
 - The only agent-dir file this extension writes is `litellm-models-dev.json`, a models.dev metadata cache with a 28-day TTL.
 - Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, blank fields are rejected, and service accounts warn and fail closed.
 - `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.
+
+## Deployment Groups And Metadata Authority
+
+- `/model/info` returns one row per deployment. Rows sharing a `model_name` are reduced by `reduceModelGroup` before any transport, capability, limit, price, or compatibility decision. Never shallow-merge them.
+- `reduceModelGroup` is pure and table-tested with an injected catalog resolver. Keep fetch, environment, clock, and provider scans out of it.
+- A public route name is not backend evidence for a deployment group. It is still used in exactly two narrower places, both deliberate: as a catalog hint when the group reduces to exactly one routable deployment (the resolver's `singleton` argument), and as the input to `buildCompat`, which derives request-compatibility flags from the route id exactly as the baseline did. Do not widen either, and do not describe route text as wholly unused.
+- Model-name suffixes are a behavioral contract, not decoration. ` (no metadata)` marks an evidence-free `/v1/models` model and authorizes `enrichCachedModel` to re-derive catalog metadata from the model id. ` (incomplete metadata)` marks a reduced `/model/info` group with incomplete price evidence, or an unresolved `/health` route, and is permanent: neither is ever re-authorized from the model id. A `/health` route the catalog resolves keeps its plain name. Adding a producer of either suffix is a contract change.
+- Discovery and offline rehydration must produce identical models for `/model/info` groups and `/health` routes; `tests/provider.test.ts` covers those round trips. A hand-built cached model is not a round-trip test. `/v1/models` models are the intentional exception, since their sentinel permits bounded later enrichment.
+- Three separate classifiers recognize Anthropic models, and they are intentionally distinct. `catalogLookupIds` canonicalizes ids and aliases and is the sole input to *Anthropic* candidacy specifically; provider candidacy overall also uses `owned_by` and the id prefix, which must not be removed. `semanticFamily` recognizes the Claude family for reduction evidence. `ANTHROPIC_MODEL_PATTERN` drives `cacheControlFormat: "anthropic"` in `buildCompat`, without which prompt caching silently no-ops. Do not collapse them into one, and do not assume changing one is safe: any change to Anthropic recognition needs coordinated tests across all three.
+- Withholding catalog authority is safe but invisible, so it emits a bounded stderr diagnostic that ignores `LITELLM_VERBOSE_DISCOVERY`, once per process per affected route rather than once per discovery. Keep such diagnostics to counts and public route ids, and describe the cause as missing *or* conflicting provider evidence — a group is also withheld when one deployment names a provider and another names nothing usable.
 
 ## LiteLLM Request Hooks
 

@@ -1,16 +1,15 @@
-import {
-  type Api,
-  type Credential,
-  createModels,
-  createProvider,
-  type Model,
-  type ProviderAuth,
-  type ProviderModelsStore,
-  type RefreshModelsContext,
+import type {
+  Api,
+  Credential,
+  Model,
+  ProviderAuth,
+  ProviderModelsStore,
+  RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { discoverModels } from "../src/discover.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
-import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, ModelProtocol } from "../src/types.js";
+import type { DiscoveryResult } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -20,23 +19,6 @@ vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
 }));
 
 const credential: Credential = { type: "api_key", key: "secret" };
-
-function credentialStore(entries: Record<string, Credential>) {
-  return {
-    read: vi.fn(async (provider: string) => entries[provider]),
-    list: vi.fn(async () => []),
-    modify: vi.fn(
-      async (provider: string, update: (current: Credential | undefined) => Promise<Credential | undefined>) => {
-        const next = await update(entries[provider]);
-        if (next) entries[provider] = next;
-        return entries[provider];
-      },
-    ),
-    delete: vi.fn(async (provider: string) => {
-      delete entries[provider];
-    }),
-  };
-}
 const auth: ProviderAuth = {
   apiKey: { name: "API key", resolve: async () => ({ auth: { apiKey: "secret" } }) },
 };
@@ -57,55 +39,8 @@ const discovered = (id: string): DiscoveryResult => ({
   ],
 });
 
-// Compile-time pairing assertions. Each @ts-expect-error IS the test: typecheck
-// fails if the annotated line stops being an error, i.e. if the union stops
-// rejecting a cross-protocol compat pairing.
-//
-// String values need `as const`. Without it the literal widens and TypeScript
-// reports a widening error (TS2322) instead of the pairing error (TS2353), which
-// would satisfy @ts-expect-error for the wrong reason.
-{
-  const responsesWithCompletionsField: DiscoveredModel = {
-    ...discovered("responses").models[0],
-    api: "openai-responses",
-    compat: {
-      // @ts-expect-error maxTokensField is an OpenAI-completions field.
-      maxTokensField: "max_tokens" as const,
-    },
-  };
-  const responsesWithCacheControl: DiscoveredModel = {
-    ...discovered("responses").models[0],
-    api: "openai-responses",
-    compat: {
-      // @ts-expect-error cacheControlFormat is an OpenAI-completions field.
-      cacheControlFormat: "anthropic" as const,
-    },
-  };
-  // A ModelProtocol cannot be assembled from mismatched halves either, which is
-  // what makes the discovery builders structurally safe rather than merely careful.
-  const mismatchedProtocol: ModelProtocol = {
-    api: "openai-responses",
-    // @ts-expect-error completions compat cannot pair with the Responses protocol.
-    compat: { supportsStore: false, maxTokensField: "max_tokens" as const },
-  };
-  void responsesWithCompletionsField;
-  void responsesWithCacheControl;
-  void mismatchedProtocol;
-}
-
-// `api` must stay required and span exactly the protocols the registry implements.
-expectTypeOf<DiscoveredModel["api"]>().toEqualTypeOf<LiteLLMApi>();
-// Every ModelProtocol member must carry both fields, so a builder cannot omit one.
-expectTypeOf<ModelProtocol>().toExtend<{ api: LiteLLMApi }>();
-
 function native(id: string): Model<"openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
-}
-
-// Mirrors a model pi assembles from ~/.pi/agent/models.json, where `api` is
-// copied verbatim from user config and is not constrained to our protocols.
-function foreignApiModel(id: string, api = "google-generative-ai"): Model<LiteLLMApi> {
-  return { ...native(id), api } as unknown as Model<LiteLLMApi>;
 }
 
 function store(initial?: readonly Model<Api>[]) {
@@ -149,7 +84,6 @@ function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[
     baseUrl: "https://proxy.example/v1",
     auth,
     discover: vi.fn(async () => discovered("fresh")),
-    resolveCredentialRoot: ({ requestBaseUrl }) => requestBaseUrl ?? "https://proxy.example",
     ...overrides,
   });
 }
@@ -166,24 +100,18 @@ describe("toNativeModels", () => {
     ]);
   });
 
-  it("derives each protocol base from one normalized proxy root", () => {
-    const baseModel = discovered("model").models[0];
-    const models = toNativeModels("litellm", "https://proxy.example/v1/", [
-      baseModel,
-      { ...baseModel, id: "responses", api: "openai-responses", compat: {} },
+  it("preserves a discovered Responses API and defaults missing APIs to Completions", () => {
+    const [responses, completions] = toNativeModels("litellm", "https://proxy.example/v1", [
+      { ...discovered("responses").models[0], api: "openai-responses" },
+      discovered("completions").models[0],
     ]);
 
-    expect(models.map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
-      { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
-      { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
-    ]);
+    expect(responses.api).toBe("openai-responses");
+    expect(completions.api).toBe("openai-completions");
   });
 });
 
 describe("createLiteLLMProvider", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
   it("delegates native store restoration directly to createProvider", async () => {
     const modelsStore = store([native("stored")]);
     const value = controller();
@@ -233,6 +161,23 @@ describe("createLiteLLMProvider", () => {
       }),
     ]);
     expect(discover).not.toHaveBeenCalled();
+  });
+
+  it("preserves conservative qualified-route metadata offline", async () => {
+    const cached: Model<Api> = {
+      ...native("openai/gpt-5.5"),
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    };
+    const value = controller();
+
+    await value.refreshModels?.(context(store([cached]), false));
+
+    expect(value.getModels()).toEqual([cached]);
   });
 
   it("keeps partially enriched stale cached aliases unchanged offline", async () => {
@@ -305,183 +250,6 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
-  it("reprojects stored models to the matching active credential host", () => {
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/v1" });
-    const baseModel = discovered("model").models[0];
-    const models = toNativeModels("litellm", "https://proxy.example", [
-      baseModel,
-      { ...baseModel, id: "responses", api: "openai-responses", compat: {} },
-    ]);
-
-    expect(value.filterModels?.(models, credential).map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
-      { api: "openai-completions", baseUrl: "https://proxy.example/v1" },
-      { api: "openai-responses", baseUrl: "https://proxy.example/v1" },
-    ]);
-  });
-
-  it("derives the request base from the active root, not the cached model path", () => {
-    // Same host, different path prefix, as a multi-tenant proxy produces. The cached
-    // path must not survive: this fails if the reprojection reads model.baseUrl.
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/tenant-a" });
-    const cached = { ...native("tenant"), baseUrl: "https://proxy.example/tenant-b/v1" };
-
-    expect(value.filterModels?.([cached], credential)?.map((model) => model.baseUrl)).toEqual([
-      "https://proxy.example/tenant-a/v1",
-    ]);
-  });
-
-  it("derives the request scheme from the active root", () => {
-    // Host matches, scheme does not. The active credential decides, so a cached
-    // http entry cannot downgrade an https proxy.
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    const cached = { ...native("scheme"), baseUrl: "http://proxy.example/v1" };
-
-    expect(value.filterModels?.([cached], credential)?.map((model) => model.baseUrl)).toEqual([
-      "https://proxy.example/v1",
-    ]);
-  });
-
-  it("drops a cached model whose URL uses a non-http scheme", () => {
-    // Host and port match; only the scheme differs. Without the http(s) restriction
-    // the host comparison alone would accept this.
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    const cached = { ...native("ws"), baseUrl: "ws://proxy.example/v1" };
-
-    expect(value.filterModels?.([cached], credential)).toEqual([]);
-  });
-
-  it("names the placeholder host rather than staleness for a cached placeholder model", () => {
-    // Both the placeholder branch and the stale-host branch would hide this model, so
-    // only the message distinguishes them. The placeholder wording is the actionable
-    // one, and it is what README documents for this row.
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
-    const cached = { ...native("ph"), baseUrl: "https://litellm.example.com/v1" };
-
-    expect(value.filterModels?.([cached], credential)).toEqual([]);
-    expect(String(stderr.mock.calls.at(-1)?.[0])).toContain("Cached model uses a placeholder LiteLLM model host");
-  });
-
-  it("reports a repeated diagnostic only once per provider instance", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
-    const stale = { ...native("stale"), baseUrl: "https://old.example/v1" };
-
-    expect(value.filterModels?.([stale], credential)).toEqual([]);
-    expect(value.filterModels?.([stale], credential)).toEqual([]);
-
-    expect(stderr.mock.calls.filter(([line]) => String(line).includes("stale LiteLLM model host"))).toHaveLength(1);
-  });
-
-  it("treats a differing port as a different host", () => {
-    // The likeliest real mismatch: a local proxy moved port. Port is part of the
-    // host comparison, so the cached entry is dropped rather than repointed.
-    const value = controller({ resolveCredentialRoot: () => "http://localhost:8000" });
-    const cached = { ...native("port"), baseUrl: "http://localhost:4000/v1" };
-
-    expect(value.filterModels?.([cached], credential)).toEqual([]);
-  });
-
-  it("blocks a cached path mismatch on the request path too", () => {
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/tenant-a" });
-    const cached = { ...native("tenant"), baseUrl: "https://proxy.example/tenant-b/v1" };
-
-    // Same host, so the model is usable, but the URL must come from the active root.
-    const streamed = value.stream(cached, { messages: [] });
-    void streamed;
-
-    expect(apiSpies.completions).toHaveBeenCalledWith(
-      expect.objectContaining({ baseUrl: "https://proxy.example/tenant-a/v1" }),
-      expect.anything(),
-      undefined,
-    );
-  });
-
-  it("filters stale LiteLLM models without taking down other providers", async () => {
-    const models = createModels({
-      credentials: credentialStore({
-        litellm: { type: "api_key", key: "secret", env: { LITELLM_BASE_URL: "https://active.example" } },
-        other: { type: "api_key", key: "other" },
-      }),
-    });
-    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
-    await value.refreshModels?.(context(store([native("stored")]), false));
-    models.setProvider(value);
-    models.setProvider(
-      createProvider({
-        id: "other",
-        auth: { apiKey: { name: "Other", resolve: async () => ({ auth: { apiKey: "other" } }) } },
-        models: [{ ...native("other"), provider: "other" }],
-        api: { stream: apiSpies.completions, streamSimple: apiSpies.completions },
-      }),
-    );
-
-    await expect(models.getAvailable()).resolves.toEqual([expect.objectContaining({ provider: "other", id: "other" })]);
-  });
-
-  it("rejects placeholder hosts as cached request targets", () => {
-    const storedPlaceholder = controller({ resolveCredentialRoot: () => "https://active.example" });
-    const placeholder = toNativeModels("litellm", "https://litellm.example.com", discovered("stored").models);
-
-    expect(storedPlaceholder.filterModels?.(placeholder, credential)).toEqual([]);
-
-    const activePlaceholder = controller({ resolveCredentialRoot: () => "https://litellm.example.com" });
-    expect(activePlaceholder.filterModels?.([native("stored")], credential)).toEqual([]);
-  });
-
-  it("drops models declaring an unsupported protocol without throwing out of filterModels", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-
-    expect(value.filterModels?.([foreignApiModel("gemini"), native("valid")], credential)).toEqual([native("valid")]);
-    expect(stderr).toHaveBeenCalledWith(
-      'LiteLLM (litellm): LiteLLM model gemini declares unsupported protocol "google-generative-ai"; ' +
-        'set "api" to one of openai-completions, openai-responses in models.json\n',
-    );
-  });
-
-  it("keeps other providers available when a LiteLLM model declares an unsupported protocol", async () => {
-    vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const models = createModels({
-      credentials: credentialStore({
-        litellm: { type: "api_key", key: "secret", env: { LITELLM_BASE_URL: "https://proxy.example" } },
-        other: { type: "api_key", key: "other" },
-      }),
-    });
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    await value.refreshModels?.(context(store([foreignApiModel("gemini")]), false));
-    models.setProvider(value);
-    models.setProvider(
-      createProvider({
-        id: "other",
-        auth: { apiKey: { name: "Other", resolve: async () => ({ auth: { apiKey: "other" } }) } },
-        models: [{ ...native("other"), provider: "other" }],
-        api: { stream: apiSpies.completions, streamSimple: apiSpies.completions },
-      }),
-    );
-
-    await expect(models.getAvailable()).resolves.toEqual([expect.objectContaining({ provider: "other", id: "other" })]);
-  });
-
-  it("reports the configured env var when no base URL resolves and models are hidden", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => undefined });
-
-    expect(value.filterModels?.([native("hidden"), native("also-hidden")], credential)).toEqual([]);
-    expect(stderr).toHaveBeenCalledWith(
-      "LiteLLM (litellm): 2 model(s) hidden because no LiteLLM base URL is configured; " +
-        "set LITELLM_BASE_URL or run /login litellm\n",
-    );
-  });
-
-  it("stays silent when an unconfigured provider has no models to hide", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const value = controller({ resolveCredentialRoot: () => undefined });
-
-    expect(value.filterModels?.([], credential)).toEqual([]);
-    expect(stderr).not.toHaveBeenCalled();
-  });
-
   it("retains previous models when discovery rejects", async () => {
     const modelsStore = store([native("old")]);
     const discover = vi.fn(async () => {
@@ -527,20 +295,10 @@ describe("createLiteLLMProvider", () => {
     expect(discover).toHaveBeenCalledOnce();
   });
 
-  it("routes Chat Completions models through the Completions API", () => {
-    apiSpies.completions.mockReturnValueOnce({});
-    const value = controller();
-
-    value.stream(native("chat"), { messages: [] });
-
-    expect(apiSpies.completions).toHaveBeenCalledOnce();
-    expect(apiSpies.responses).not.toHaveBeenCalled();
-  });
-
   it("routes Responses models through the Responses API", async () => {
     apiSpies.responses.mockReturnValueOnce({});
     const responseModel = toNativeModels("litellm", "https://proxy.example/v1", [
-      { ...discovered("responses").models[0], api: "openai-responses", compat: {} },
+      { ...discovered("responses").models[0], api: "openai-responses" },
     ])[0];
     const value = controller();
 
@@ -549,79 +307,184 @@ describe("createLiteLLMProvider", () => {
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
+});
 
-  it("blocks stale hosts on stream and streamSimple before protocol dispatch", async () => {
-    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
-
-    expect(() => value.stream(native("resumed"), { messages: [] })).toThrow(
-      /stale LiteLLM model host.*network refresh/i,
-    );
-    expect(() => value.streamSimple(native("default"), { messages: [] })).toThrow(
-      /stale LiteLLM model host.*network refresh/i,
-    );
-    expect(apiSpies.completions).not.toHaveBeenCalled();
+describe("discovery, store, and offline read parity", () => {
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
   });
 
-  it("blocks placeholder and malformed request hosts before protocol dispatch", async () => {
-    const placeholder = controller({ resolveCredentialRoot: () => "https://litellm.example.com" });
-    const malformed = controller({ resolveCredentialRoot: () => "undefined" });
+  let fetchSpy: MockInstance<typeof fetch> | undefined;
 
-    expect(() => placeholder.stream(native("placeholder"), { messages: [] })).toThrow(
-      /placeholder LiteLLM model host.*network refresh/i,
-    );
-    expect(() => malformed.streamSimple(native("malformed"), { messages: [] })).toThrow(
-      /invalid LiteLLM model URL.*network refresh/i,
-    );
-    expect(apiSpies.completions).not.toHaveBeenCalled();
+  function mockModelInfo(data: unknown): void {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+  }
+
+  function liveDiscovery() {
+    return controller({
+      discover: async () => discoverModels("https://proxy.example/v1", "sk-test", { modelsDev: false }),
+    });
+  }
+
+  // A reduced `/model/info` group whose catalog authority was deliberately
+  // withheld must not be re-enriched by the cache path. Rehydration has to
+  // reproduce the discovered model exactly, or offline requests would be built
+  // from metadata the proxy never provided.
+  it.each([
+    [
+      "a singleton whose backend evidence resolves no catalog identity",
+      [
+        {
+          model_name: "openai/gpt-5.5",
+          model_info: { id: "only", mode: "chat" },
+          litellm_params: { model: "openai/gpt-5.5-internal-preview" },
+        },
+      ],
+    ],
+    [
+      "a group whose deployments disagree on backend",
+      [
+        { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
+        {
+          model_name: "openai/gpt-5.5",
+          model_info: { id: "b", mode: "chat" },
+          litellm_params: { model: "internal/mystery" },
+        },
+      ],
+    ],
+    [
+      "conflicting variants of one deployment id",
+      [
+        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+      ],
+    ],
+  ])("rehydrates %s unchanged", async (_case, data) => {
+    mockModelInfo(data);
+    const modelsStore = store();
+
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    expect(discoveredModels[0]?.name).toBe("openai/gpt-5.5 (incomplete metadata)");
+    expect(modelsStore.write).toHaveBeenCalledOnce();
+
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
   });
 
-  it("keeps valid models from a mixed cache and filters malformed URLs", () => {
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    const stale = { ...native("stale"), baseUrl: "https://stale.example/v1" };
-    const malformed = { ...native("malformed"), baseUrl: "undefined" };
+  // Conflicting variants of one deployment id are the case that makes the marker
+  // fix necessary: counting distinct ids would call this group a singleton, which
+  // re-admits the public route name as catalog evidence and lets the model escape
+  // marking entirely. `openai/gpt-5.5` resolves in the Pi catalog (272k context,
+  // reasoning, tiered pricing), so every catalog value below proves it was refused.
+  it("refuses route-name authority for conflicting variants of one deployment id", async () => {
+    mockModelInfo([
+      { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+      { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+    ]);
+    const modelsStore = store();
 
-    expect(value.filterModels?.([native("valid"), stale, malformed], credential)).toEqual([native("valid")]);
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    const model = discoveredModels[0];
+    // 1. No singleton route-name fallback, and 2. conservative metadata.
+    expect(model).toMatchObject({
+      id: "openai/gpt-5.5",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 64_000,
+      maxTokens: 16_384,
+    });
+    expect(model).not.toHaveProperty("thinkingLevelMap");
+    expect(model?.cost.tiers).toBeUndefined();
+    // 3. Marked, using the reduced-group marker rather than the fallback sentinel.
+    expect(model?.name).toBe("openai/gpt-5.5 (incomplete metadata)");
+
+    // 4. Discovery, store, and offline read parity.
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
   });
 
-  it("blocks unsupported protocols on stream before the registry lookup", () => {
+  it("treats exact repeats of one deployment as a single enriched deployment", async () => {
+    // The conflicting-variant rule must not cost us exact-repeat idempotency: one
+    // row and the same row twice are one deployment, and a lone deployment may
+    // still use its route name as a catalog hint.
+    const deployment = { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } };
+    const discoverOnce = async (data: unknown[]) => {
+      mockModelInfo(data);
+      const value = liveDiscovery();
+      await value.refreshModels?.(context(store(), true));
+      return value.getModels();
+    };
+
+    const single = await discoverOnce([deployment]);
+    const repeated = await discoverOnce([deployment, deployment]);
+
+    expect(repeated).toEqual(single);
+    expect(single[0]?.name).toBe("openai/gpt-5.5");
+    expect(single[0]).toMatchObject({ reasoning: true, contextWindow: 272_000 });
+  });
+
+  it("rehydrates an evidence-free /health route unchanged", async () => {
+    // `/health` route text is not authorized for later re-enrichment, so its marker
+    // must be the permanent one and a store round trip must be a no-op.
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.endsWith("/model/info") || url.endsWith("/v1/models")) return new Response(null, { status: 404 });
+      if (url.endsWith("/health")) return json({ healthy_endpoints: [{ model: "totally-unknown-route" }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const modelsStore = store();
+
+    const online = liveDiscovery();
+    await online.refreshModels?.(context(modelsStore, true));
+    const discoveredModels = online.getModels();
+
+    expect(discoveredModels).toHaveLength(1);
+    expect(discoveredModels[0]?.name).toBe("totally-unknown-route (incomplete metadata)");
+    expect(discoveredModels[0]?.name).not.toContain(" (no metadata)");
+
+    const offline = liveDiscovery();
+    await offline.refreshModels?.(context(modelsStore, false));
+
+    expect(offline.getModels()).toEqual(discoveredModels);
+  });
+
+  it("still enriches an evidence-free /v1/models fallback model from the cache", async () => {
+    // The distinction has to cut both ways: the fallback sentinel keeps working.
     const value = controller();
 
-    expect(() => value.stream(foreignApiModel("gemini"), { messages: [] })).toThrow(
-      /declares unsupported protocol "google-generative-ai"/,
+    await value.refreshModels?.(
+      context(
+        store([{ ...native("opus-5"), name: "opus-5 (no metadata)", reasoning: false, maxTokens: 16_384 }]),
+        false,
+      ),
     );
-    expect(() => value.streamSimple(foreignApiModel("gemini"), { messages: [] })).toThrow(
-      /set "api" to one of openai-completions, openai-responses/,
-    );
-    expect(apiSpies.completions).not.toHaveBeenCalled();
-    expect(apiSpies.responses).not.toHaveBeenCalled();
-  });
 
-  it("allows a selectable protocol on the credential host even with no discovered peer", () => {
-    // The guard decides on protocol and host, not on whether discovery produced a model
-    // of that protocol. That is deliberate, and it is also why this provider is not what
-    // contains such a model: Pi only routes to us when we already list its api, so for a
-    // protocol our proxy never exposed, nothing here is consulted. Documented in
-    // README's dispatch table; pinned so the reasoning stays visible.
-    const value = controller({ resolveCredentialRoot: () => "https://proxy.example" });
-    const baseModel = discovered("model").models[0];
-    const onlyResponses = toNativeModels("litellm", "https://proxy.example", [
-      { ...baseModel, id: "responses-only", api: "openai-responses", compat: undefined },
-    ]);
-
-    expect(value.filterModels?.(onlyResponses, credential)?.map((model) => model.baseUrl)).toEqual([
-      "https://proxy.example/v1",
-    ]);
-    expect(() => value.stream(onlyResponses[0], { messages: [] })).not.toThrow();
-  });
-
-  it("rejects a stale-host model on stream and streamSimple before dispatch", () => {
-    // The direct-id and session-restore paths reach stream without passing through
-    // filterModels, so the guard has to reject there too, not only in the listing.
-    const value = controller({ resolveCredentialRoot: () => "https://active.example" });
-    const stale = { ...native("stale"), baseUrl: "https://stale.example/v1" };
-
-    expect(() => value.stream(stale, { messages: [] })).toThrow(/stale LiteLLM model host/);
-    expect(() => value.streamSimple(stale, { messages: [] })).toThrow(/stale LiteLLM model host/);
-    expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(value.getModels()[0]).toMatchObject({ id: "opus-5", reasoning: true });
+    expect(value.getModels()[0]?.name).not.toContain("no metadata");
   });
 });
