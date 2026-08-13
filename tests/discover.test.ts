@@ -2,7 +2,14 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildCompat, discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "../src/discover.js";
+import {
+  completionsCompat,
+  discoverModels,
+  modelProtocol,
+  normalizeBaseUrl,
+  responsesCompat,
+  shouldSuppressReasoningContent,
+} from "../src/discover.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -61,22 +68,61 @@ describe("normalizeBaseUrl", () => {
   });
 });
 
-describe("buildCompat", () => {
+describe("modelProtocol", () => {
+  it("pairs each mode with its own protocol and compatibility shape", () => {
+    expect(modelProtocol("openai/gpt-4o")).toEqual({ api: "openai-completions", compat: { supportsStore: false } });
+    expect(modelProtocol("openai/gpt-4o", "chat")).toEqual({
+      api: "openai-completions",
+      compat: { supportsStore: false },
+    });
+    expect(modelProtocol("openai/gpt-4o", "responses")).toEqual({ api: "openai-responses", compat: undefined });
+  });
+
+  it("carries the Moonshot Responses exception through the paired builder", () => {
+    expect(modelProtocol("moonshotai/kimi-k2", "responses")).toEqual({
+      api: "openai-responses",
+      compat: { supportsDeveloperRole: false },
+    });
+    expect(modelProtocol("moonshotai/kimi-k2")).toEqual({
+      api: "openai-completions",
+      compat: expect.objectContaining({ maxTokensField: "max_tokens" }),
+    });
+  });
+});
+
+describe("responsesCompat", () => {
+  it("suppresses the developer role for Moonshot models only", () => {
+    // Responses defaults supportsDeveloperRole to true, so dropping this flag
+    // sends `developer` to a route that rejects it.
+    expect(responsesCompat("moonshotai/kimi-k2")).toEqual({ supportsDeveloperRole: false });
+    expect(responsesCompat("kimi-k2.6")).toEqual({ supportsDeveloperRole: false });
+    expect(responsesCompat("openai/gpt-4o")).toBeUndefined();
+  });
+
+  it("omits completions-only compatibility fields", () => {
+    // supportsStore and cacheControlFormat are OpenAICompletionsCompat fields and
+    // are never read by the Responses API.
+    expect(responsesCompat("anthropic/claude-sonnet-4-6")).toBeUndefined();
+    expect(responsesCompat("gemini/gemini-2.0-flash")).toBeUndefined();
+  });
+});
+
+describe("completionsCompat", () => {
   it("returns supportsStore: false for non-anthropic models", () => {
-    expect(buildCompat("openai/gpt-4o")).toEqual({ supportsStore: false });
-    expect(buildCompat("gemini/gemini-2.0-flash")).toEqual({ supportsStore: false });
-    expect(buildCompat("gpt-5.5")).toEqual({ supportsStore: false });
+    expect(completionsCompat("openai/gpt-4o")).toEqual({ supportsStore: false });
+    expect(completionsCompat("gemini/gemini-2.0-flash")).toEqual({ supportsStore: false });
+    expect(completionsCompat("gpt-5.5")).toEqual({ supportsStore: false });
   });
 
   it("adds Moonshot-compatible tool calling flags for Kimi models", () => {
-    expect(buildCompat("kimi-k2.6")).toEqual({
+    expect(completionsCompat("kimi-k2.6")).toEqual({
       supportsStore: false,
       supportsDeveloperRole: false,
       supportsReasoningEffort: false,
       supportsStrictMode: false,
       maxTokensField: "max_tokens",
     });
-    expect(buildCompat("moonshotai/kimi-k2")).toEqual({
+    expect(completionsCompat("moonshotai/kimi-k2")).toEqual({
       supportsStore: false,
       supportsDeveloperRole: false,
       supportsReasoningEffort: false,
@@ -86,7 +132,7 @@ describe("buildCompat", () => {
   });
 
   it("adds cacheControlFormat for anthropic-prefixed models", () => {
-    expect(buildCompat("anthropic/claude-3-5-sonnet")).toEqual({
+    expect(completionsCompat("anthropic/claude-3-5-sonnet")).toEqual({
       supportsStore: false,
       cacheControlFormat: "anthropic",
     });
@@ -94,7 +140,7 @@ describe("buildCompat", () => {
 
   it("adds cacheControlFormat for bare Claude aliases", () => {
     for (const id of ["claude-3-5-sonnet", "opus-4.7", "sonnet-4.6", "haiku-4.5"]) {
-      expect(buildCompat(id)).toEqual({
+      expect(completionsCompat(id)).toEqual({
         supportsStore: false,
         cacheControlFormat: "anthropic",
       });
@@ -102,23 +148,23 @@ describe("buildCompat", () => {
   });
 
   it("adds cacheControlFormat for routed Anthropic aliases", () => {
-    expect(buildCompat("google/claude-sonnet-4-6")).toEqual({
+    expect(completionsCompat("google/claude-sonnet-4-6")).toEqual({
       supportsStore: false,
       cacheControlFormat: "anthropic",
     });
   });
 
   it("does not match non-Anthropic tokens that start with Anthropic family names", () => {
-    expect(buildCompat("openai/sonnetic-gpt")).toEqual({ supportsStore: false });
-    expect(buildCompat("vendor/opusflow")).toEqual({ supportsStore: false });
+    expect(completionsCompat("openai/sonnetic-gpt")).toEqual({ supportsStore: false });
+    expect(completionsCompat("vendor/opusflow")).toEqual({ supportsStore: false });
   });
 
   it("matches case-insensitively", () => {
-    expect(buildCompat("Opus-4.7")).toEqual({
+    expect(completionsCompat("Opus-4.7")).toEqual({
       supportsStore: false,
       cacheControlFormat: "anthropic",
     });
-    expect(buildCompat("CLAUDE-3-5-SONNET")).toEqual({
+    expect(completionsCompat("CLAUDE-3-5-SONNET")).toEqual({
       supportsStore: false,
       cacheControlFormat: "anthropic",
     });
@@ -391,6 +437,27 @@ describe("discoverModels response-mode models", () => {
       contextWindow: 272000,
       maxTokens: 128000,
     });
+  });
+
+  it("pairs a Moonshot response-mode route with Responses-shaped compatibility", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "moonshotai/kimi-k2", model_info: { mode: "responses", supports_reasoning: true } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "moonshotai/kimi-k2",
+      api: "openai-responses",
+      compat: { supportsDeveloperRole: false },
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsStore");
   });
 
   it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {

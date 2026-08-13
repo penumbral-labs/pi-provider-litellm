@@ -5,11 +5,13 @@ import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
 import type {
   DiscoveredModel,
+  DiscoveredModelFor,
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
   ModelInfoEntry,
   ModelInfoResponse,
+  ModelProtocol,
   ModelsListEntry,
   ModelsListResponse,
 } from "./types.js";
@@ -89,7 +91,25 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+// Returns the `api` + `compat` pair for one protocol as a single ModelProtocol
+// value. Callers spread the result rather than setting the two fields separately,
+// so no call site has to remember the pairing. See ModelProtocol in types.ts for
+// what the type system does and does not catch here.
+export function modelProtocol(modelId: string, mode?: string | null): ModelProtocol {
+  return isResponsesMode(mode)
+    ? { api: "openai-responses", compat: responsesCompat(modelId) }
+    : { api: "openai-completions", compat: completionsCompat(modelId) };
+}
+
+export function responsesCompat(modelId: string): DiscoveredModelFor<"openai-responses">["compat"] {
+  // Responses defaults supportsDeveloperRole to true, but Moonshot routes apply
+  // strict OpenAI schema validation and reject the developer role. Responses also
+  // defaults supportsStrictMode to false already, and supportsStore /
+  // maxTokensField / cacheControlFormat do not exist on this protocol.
+  return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
+}
+
+export function completionsCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -417,7 +437,6 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
-  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
   return {
     id,
@@ -428,8 +447,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
+    ...modelProtocol(id, info.mode),
   };
 }
 
@@ -453,7 +471,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
   };
 }
 
@@ -474,7 +492,7 @@ function mapFromModelsList(
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
   };
 }
 

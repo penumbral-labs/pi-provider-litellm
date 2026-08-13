@@ -24,7 +24,7 @@ import {
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider } from "./provider.js";
+import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -92,6 +92,40 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
 function cleanConfig(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed && trimmed !== "undefined" ? trimmed : undefined;
+}
+
+function resolveSanitizedCredentialRoot(
+  definition: ProviderDefinition,
+  credential?: Credential,
+  requestBaseUrl?: string,
+): string | undefined {
+  const credentialBaseUrl =
+    credential?.type === "oauth"
+      ? cleanConfig(typeof credential.baseUrl === "string" ? credential.baseUrl : undefined)
+      : credential?.type === "api_key"
+        ? cleanConfig(credential.env?.[ENV_BASE_URL])
+        : undefined;
+  const baseUrl =
+    credentialBaseUrl ??
+    cleanConfig(requestBaseUrl) ??
+    cleanConfig(definition.baseUrl) ??
+    (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  if (!baseUrl) return undefined;
+  try {
+    const normalized = normalizeBaseUrl(baseUrl);
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+    return normalized;
+  } catch {
+    throw new Error("Invalid LiteLLM base URL; a network refresh with a valid URL is required");
+  }
+}
+
+function requireNonPlaceholderCredentialRoot(root: string): string {
+  if (isPlaceholderHost(new URL(root).host)) {
+    throw new Error("LiteLLM credentials use a placeholder host; a network refresh with a real base URL is required");
+  }
+  return root;
 }
 
 function stringSetting(value: unknown): string | undefined {
@@ -440,18 +474,45 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
   return definitions;
 }
 
+// Rejects a typed proxy URL at the prompt rather than storing it. A credential
+// carrying a scheme-less or non-http(s) root fails on every later turn, far from
+// the place the value was entered, so the clean error belongs here.
+function requireLoginBaseUrl(rawBaseUrl: string): string {
+  const normalized = normalizeBaseUrl(rawBaseUrl);
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(
+      `"${rawBaseUrl}" is not a valid URL; include the scheme, for example https://litellm.your-domain.com`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    // `localhost:4000` parses as a `localhost:` scheme rather than failing above, so
+    // this branch is what a missing scheme actually lands on.
+    throw new Error(
+      `"${rawBaseUrl}" must use http or https; include the scheme, for example https://litellm.your-domain.com`,
+    );
+  }
+  if (isPlaceholderHost(parsed.host)) {
+    throw new Error(`"${rawBaseUrl}" is the documentation placeholder; enter your own LiteLLM proxy URL`);
+  }
+  return normalized;
+}
+
 async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredential> {
   const rawBaseUrl = (
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
-      placeholder: "https://litellm.example.com",
+      placeholder: "https://litellm.your-domain.com",
     })
   ).trim();
   if (!rawBaseUrl) throw new Error("Base URL is required");
+  const baseUrl = requireLoginBaseUrl(rawBaseUrl);
   const key = (await interaction.prompt({ type: "secret", message: "Enter API key:" })).trim();
   if (!key) throw new Error("Both base URL and API key are required");
-  return { type: "api_key", key, env: { [ENV_BASE_URL]: normalizeBaseUrl(rawBaseUrl) } };
+  return { type: "api_key", key, env: { [ENV_BASE_URL]: baseUrl } };
 }
 
 async function loginOAuth(interaction: AuthInteraction, headers?: Record<string, string>): Promise<OAuthCredential> {
@@ -459,11 +520,11 @@ async function loginOAuth(interaction: AuthInteraction, headers?: Record<string,
     await interaction.prompt({
       type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
-      placeholder: "https://litellm.example.com",
+      placeholder: "https://litellm.your-domain.com",
     })
   ).trim();
   if (!rawBaseUrl) throw new Error("Base URL is required");
-  const baseUrl = normalizeBaseUrl(rawBaseUrl);
+  const baseUrl = requireLoginBaseUrl(rawBaseUrl);
   interaction.notify({
     type: "auth_url",
     url: `${baseUrl}/sso/key/generate`,
@@ -574,7 +635,6 @@ async function resolveApiKeyAuth(
   return {
     auth: {
       apiKey: creds.apiKey,
-      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
@@ -582,7 +642,10 @@ async function resolveApiKeyAuth(
   };
 }
 
-function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
+function createProviderAuth(
+  definition: ProviderDefinition,
+  rememberOAuthRuntimeRoot: (apiKey: string, root: string) => void,
+): ProviderAuth {
   return {
     apiKey: {
       name: `${definition.displayName} API key`,
@@ -628,11 +691,22 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
             ...(await refreshLiteLLM(credential, signal)),
             type: "oauth" as const,
           }),
-          toAuth: async (credential) => ({
-            apiKey: credential.access,
-            baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
-            headers: resolveHeaders(definition),
-          }),
+          // Deliberately returns no baseUrl. Pi overwrites model.baseUrl with
+          // auth.baseUrl before dispatch, which would replace a stale cached host with
+          // the credential root and make the host comparison in provider.ts compare the
+          // credential against itself -- silently repointing a stale model instead of
+          // rejecting it. The root is still resolved here so an unusable credential
+          // fails at login/refresh time, and it is remembered against this access token
+          // for the guarded request path and the Skills/MCP surfaces to reproject from.
+          toAuth: async (credential) => {
+            const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
+            if (!baseUrl) throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+            rememberOAuthRuntimeRoot(credential.access, baseUrl);
+            return {
+              apiKey: credential.access,
+              headers: resolveHeaders(definition),
+            };
+          },
         }
       : undefined,
   };
@@ -705,6 +779,7 @@ function prepareLiteLLMRequestPayload(
   api: Api | undefined,
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
+  const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
     if (payload[key] !== undefined) return;
@@ -712,7 +787,7 @@ function prepareLiteLLMRequestPayload(
     next[key] = value;
   };
 
-  if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && shouldSuppressReasoningContent(modelId)) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
       if (key !== "thinking") update(key, value);
     }
@@ -721,7 +796,7 @@ function prepareLiteLLMRequestPayload(
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
-    api !== "openai-responses" &&
+    openAIApi === "openai-completions" &&
     modelId &&
     isGpt55Model(modelId) &&
     Array.isArray(payload.tools) &&
@@ -751,7 +826,7 @@ function prepareLiteLLMRequestPayload(
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
   // must carry string content, and tool results must be plain text.
-  if (modelId && isMoonshotModel(modelId)) {
+  if (openAIApi === "openai-completions" && modelId && isMoonshotModel(modelId)) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -762,7 +837,11 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
+  if (
+    (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
+    modelId &&
+    GEMINI_MODEL_PATTERN.test(modelId)
+  ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -785,7 +864,7 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (sessionId) {
+  if ((openAIApi === "openai-completions" || openAIApi === "openai-responses") && sessionId) {
     next ??= { ...payload };
     next.litellm_session_id = sessionId;
   }
@@ -872,27 +951,31 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function requestBaseUrl(definition: ProviderDefinition): string {
-    const baseUrl =
-      cleanConfig(definition.baseUrl) ??
-      (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined) ??
-      "https://litellm.example.com";
-    return `${normalizeBaseUrl(baseUrl)}/v1`;
+    try {
+      return `${resolveSanitizedCredentialRoot(definition) ?? normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
+    } catch {
+      return `${normalizeBaseUrl(DEFAULT_LITELLM_BASE_URL)}/v1`;
+    }
   }
 
   async function authForCredential(definition: ProviderDefinition, credential: Credential) {
     if (credential.type === "oauth") {
-      const baseUrl =
-        typeof credential.baseUrl === "string"
-          ? normalizeBaseUrl(credential.baseUrl)
-          : normalizeBaseUrl(requestBaseUrl(definition));
-      return { baseUrl, apiKey: credential.access, headers: resolveHeaders(definition) };
+      const baseUrl = resolveSanitizedCredentialRoot(definition, credential);
+      if (!baseUrl) throw new Error(`no LiteLLM base URL for ${definition.name}. Run /login litellm again.`);
+      return {
+        baseUrl: requireNonPlaceholderCredentialRoot(baseUrl),
+        apiKey: credential.access,
+        headers: resolveHeaders(definition),
+      };
     }
     const resolved = await resolveApiKeyAuth(definition, { env: async (name) => process.env[name] }, credential);
     if (!resolved?.auth.apiKey) {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
+    const baseUrl = resolveSanitizedCredentialRoot(definition, credential, resolved.env?.[ENV_BASE_URL]);
+    if (!baseUrl) throw new Error(`no LiteLLM base URL for ${definition.name}. Run /login litellm or set env vars.`);
     return {
-      baseUrl: normalizeBaseUrl(resolved.auth.baseUrl ?? requestBaseUrl(definition)),
+      baseUrl: requireNonPlaceholderCredentialRoot(baseUrl),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
@@ -901,6 +984,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+  // The host an OAuth login resolved, bound to the access token it was resolved for.
+  // Request paths and the Skills/MCP surfaces receive no Credential, and OAuth
+  // credentials contribute no request env, so this is the only credential-derived
+  // source of a root for them. Token-keyed so a different credential cannot read it,
+  // and cleared when a non-OAuth credential resolves so it cannot outlive /logout.
+  // Only the default provider enables OAuth, so one slot is sufficient.
+  let oauthRuntimeRoot: { apiKey: string; root: string } | undefined;
+  const rememberOAuthRuntimeRoot = (apiKey: string, root: string): void => {
+    oauthRuntimeRoot = { apiKey, root };
+  };
+  const oauthRuntimeRootFor = (apiKey: string | undefined): string | undefined =>
+    apiKey && oauthRuntimeRoot?.apiKey === apiKey ? oauthRuntimeRoot.root : undefined;
+  const reportedRuntimeAuthFailures = new Set<string>();
+  const reportRuntimeAuthOnce = (message: string): void => {
+    if (reportedRuntimeAuthFailures.has(message)) return;
+    reportedRuntimeAuthFailures.add(message);
+    process.stderr.write(`LiteLLM (${PROVIDER_NAME}): ${message}\n`);
+  };
 
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
@@ -910,23 +1011,46 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
+  // Returns undefined rather than throwing when the configured base URL is absent,
+  // malformed, or still the placeholder. This runs from before_agent_start on every
+  // turn, including turns that never touch LiteLLM, so a configuration problem here
+  // must not surface as a per-turn extension error. filterModels already reports the
+  // reason once per session, and the LiteLLM tool surfaces raise their own error via
+  // resolveDefaultRuntimeAuth.
+  // Containment wraps the ENTIRE derivation, including getProviderAuth. Pi resolves
+  // credentials inside that call, which runs our own oauth.toAuth, so a stored
+  // credential with an invalid root throws from there rather than from the validator
+  // we call directly. This runs from before_agent_start on every turn, including
+  // turns that never touch LiteLLM, so nothing here may escape: filterModels owns
+  // the model-list explanation and resolveDefaultRuntimeAuth owns the tool-surface
+  // error. The reason is reported once so a real misconfiguration is not silent.
   async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
-    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
-    if (!auth) return undefined;
-    const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
-    const apiKey = auth.auth.apiKey;
-    if (!baseUrl || !apiKey) return undefined;
-    const headers = Object.fromEntries(
-      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-    return {
-      baseUrl: normalizeBaseUrl(baseUrl),
-      apiKey,
-      headers: Object.keys(headers).length > 0 ? headers : undefined,
-    };
+    try {
+      const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
+      if (!auth) return undefined;
+      const apiKey = auth.auth.apiKey;
+      if (!apiKey) return undefined;
+      const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
+      const root = resolveSanitizedCredentialRoot(
+        definitions[0],
+        undefined,
+        auth.auth.baseUrl ?? auth.env?.[ENV_BASE_URL] ?? oauthRuntimeRootFor(apiKey),
+      );
+      if (!root || isPlaceholderHost(new URL(root).host)) return undefined;
+      const headers = Object.fromEntries(
+        Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
+      return {
+        baseUrl: normalizeBaseUrl(root),
+        apiKey,
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+      };
+    } catch (error) {
+      reportRuntimeAuthOnce(error instanceof Error ? error.message : String(error));
+      return undefined;
+    }
   }
 
   async function resolveDefaultRuntimeAuth(ctx?: ExtensionContext): Promise<LiteLLMRuntimeAuth> {
@@ -994,11 +1118,28 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   for (const definition of definitions) {
+    const providerAuth = createProviderAuth(definition, rememberOAuthRuntimeRoot);
+    const apiKeyAuth = providerAuth.apiKey;
+    if (apiKeyAuth) {
+      const apiKeyResolve = apiKeyAuth.resolve;
+      apiKeyAuth.resolve = async (input) => {
+        // Resolving an api key means OAuth is no longer the active credential, so the
+        // remembered SSO root must not survive the transition.
+        oauthRuntimeRoot = undefined;
+        return apiKeyResolve(input);
+      };
+    }
     const provider = createLiteLLMProvider({
       id: definition.name,
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
-      auth: createProviderAuth(definition),
+      auth: providerAuth,
+      // An explicit per-request base URL always wins; the remembered SSO root only
+      // fills the gap where OAuth supplies no request env, ahead of configured and
+      // environment defaults. Ordering the memo first made a stale root outrank the
+      // live credential and wedged the provider until restart.
+      resolveCredentialRoot: ({ credential, requestBaseUrl, apiKey }) =>
+        resolveSanitizedCredentialRoot(definition, credential, requestBaseUrl ?? oauthRuntimeRootFor(apiKey)),
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);

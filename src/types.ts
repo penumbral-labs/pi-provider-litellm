@@ -10,9 +10,24 @@ export type LiteLLMRuntimeAuth = {
   headers?: Record<string, string>;
 };
 
-export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
-  api?: LiteLLMApi;
-};
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
+
+export type DiscoveredModel = {
+  [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
+}[LiteLLMApi];
+
+// The `api` and `compat` fields of one protocol, carried together. Model builders
+// spread a single ModelProtocol value instead of assigning the two fields
+// separately, so no call site can mismatch them: the pairing is fixed by whichever
+// union member the builder returned.
+//
+// This is enforced at runtime by the modelProtocol and discovery-mapping tests, not
+// by the type system in general. A mismatched *fresh literal* is rejected, but the
+// two OpenAI compat types share enough optional members to be mutually assignable,
+// so a mismatch assembled from typed values or a widened variable typechecks.
+export type ModelProtocol = {
+  [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
+}[LiteLLMApi];
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];

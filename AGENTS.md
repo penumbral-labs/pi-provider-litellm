@@ -64,3 +64,10 @@
 
 - Keep the Pi gallery image URL in `package.json` exactly as declared unless the user asks to change it.
 - Do not include gallery assets in the npm package unless explicitly requested; verify packaging with `npm pack --dry-run` when package contents change.
+
+## Protocols And Model Hosts
+
+- `src/protocols.ts` owns protocol request-base projection. Keep protocol selection paired with its compat metadata.
+- Validate LiteLLM request hosts and reject placeholder or stale cached hosts before sending credentials.
+- Bind remembered OAuth hosts to the credential that established them; explicit request hosts rank first.
+- Keep payload rewrites on a positive API allowlist so Chat/Responses rewrites cannot leak to Messages.
