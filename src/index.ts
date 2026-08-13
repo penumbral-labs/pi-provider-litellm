@@ -1184,6 +1184,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ctx.model?.id,
       ctx.model?.api,
       sessionId,
+      (ctx.model as typeof ctx.model & { litellmPolicy?: LiteLLMModelPolicy }).litellmPolicy,
     );
   });
 
