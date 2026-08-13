@@ -235,6 +235,11 @@ describe("native provider stream compatibility", () => {
       repaired: false,
     },
     {
+      source: "a singleton route-name catalog hint",
+      rows: [{ model_name: "kimi-k2.6", model_info: { id: "a", mode: "chat" } }],
+      repaired: false,
+    },
+    {
       source: "a Moonshot deployment beside an unidentified one",
       rows: [
         { model_name: "mixed", litellm_params: { model: "moonshot/kimi-k2.6" }, model_info: { id: "a", mode: "chat" } },
@@ -392,10 +397,10 @@ describe("native provider stream compatibility", () => {
     for (const field of absent) expect(offline.requests[0]).not.toHaveProperty(field);
   });
 
-  it("repairs strict tool messages for a cached Moonshot model stored without a request policy", async () => {
-    // Shape written by releases that gated strict repair on the model id, before
-    // discovery attached a request policy: no policy, but the Moonshot compat
-    // block those releases produced is still there to be read as evidence.
+  it("does not infer strict tool repair authority from legacy cached compat", async () => {
+    // Shape written by releases that predate the request policy. The Moonshot
+    // compat fingerprint recovers response normalization, but it cannot prove
+    // every deployment in the route group identified the Moonshot family.
     const modelsStore = new InMemoryModelsStore();
     await modelsStore.write("litellm", {
       models: [
@@ -462,9 +467,12 @@ describe("native provider stream compatibility", () => {
       })
       .result();
 
-    expect(model.id).toBe("kimi-k2.6");
+    expect(model).toMatchObject({
+      id: "kimi-k2.6",
+      litellmPolicy: { normalizeStrictToolMessages: false, normalizeThinkTags: true },
+    });
     expect(requests[0]?.messages).toContainEqual(
-      expect.objectContaining({ role: "assistant", content: "", tool_calls: expect.any(Array) }),
+      expect.objectContaining({ role: "assistant", content: null, tool_calls: expect.any(Array) }),
     );
     expect(requests[0]?.messages).toContainEqual({ role: "tool", tool_call_id: "call_1", content: "result" });
   });

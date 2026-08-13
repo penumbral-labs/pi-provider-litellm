@@ -216,7 +216,7 @@ describe("createLiteLLMProvider", () => {
         supportsStrictMode: false,
         maxTokensField: "max_tokens" as const,
       },
-      policy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
+      policy: { normalizeStrictToolMessages: false, normalizeThinkTags: true },
     },
     {
       name: "a Moonshot-looking route name with generic compat evidence",
@@ -231,8 +231,9 @@ describe("createLiteLLMProvider", () => {
       policy: undefined,
     },
   ])("derives the cached request policy from $name", async ({ id, compat, policy }) => {
-    // Cache entries predating request policies carry none, so the policy is
-    // re-derived from stored compatibility evidence rather than the route name.
+    // Cache entries predating request policies carry none, so only the
+    // response-side conclusion is re-derived from stored compatibility evidence.
+    // The fingerprint cannot prove unanimous deployment-family authority.
     const cached: Model<Api> = { ...native(id), compat };
     const value = controller();
 

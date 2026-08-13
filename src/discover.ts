@@ -99,9 +99,10 @@ export function isGpt55Model(modelId: string): boolean {
 // `normalizeStrictToolMessages` rewrites outbound assistant and tool messages
 // (`content: null` becomes `""`, tool-result arrays become plain strings). Those
 // are substitutions, not removals, and compatibility with a candidate that has
-// not been identified is unproven — so it needs unanimous evidence of the need,
-// and is otherwise withheld with a diagnostic rather than assumed safe.
-export function moonshotPolicy(modelId: string, strictToolRepair = true): LiteLLMModelPolicy {
+// not been identified is unproven — so discovered models enable it only with
+// unanimous deployment-family evidence. Route-name fallbacks may still select
+// response normalization, compatibility, or limits, but never this repair.
+export function moonshotPolicy(modelId: string, strictToolRepair = false): LiteLLMModelPolicy {
   return {
     normalizeStrictToolMessages: strictToolRepair,
     // A route that always reasons streams reasoning content as its own field
@@ -176,11 +177,10 @@ function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
   return openAICompat?.maxTokensField === "max_tokens" && openAICompat.supportsStrictMode === false;
 }
 
-// A cached model written before request policies existed carries none, and
-// startup refreshes offline, so strict tool-message repair would silently stop
-// for it. Re-derive the policy from the compatibility evidence already stored
-// on the model rather than from its route name: the name is not evidence of a
-// backend, and a route that only looks like Kimi never carried this block.
+// A cached model written before request policies existed carries none. Its
+// stored compatibility fingerprint can recover the response-only conclusion,
+// but it cannot prove that every deployment identified Moonshot, so the
+// outbound repair stays disabled until fresh discovery persists that authority.
 function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
   const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
   if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
@@ -601,7 +601,9 @@ function mapFromModelInfoGroup(
     // remaining hint, and using it preserves upstream singleton behavior.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
-    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
+    return catalog
+      ? { ...catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model), routeNameOnly: true }
+      : undefined;
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);

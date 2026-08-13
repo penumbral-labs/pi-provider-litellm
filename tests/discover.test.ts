@@ -148,9 +148,9 @@ describe("buildCompat", () => {
 });
 
 describe("moonshotPolicy", () => {
-  it("unwraps inline think tags for Kimi generations that inline them", () => {
-    expect(moonshotPolicy("kimi-k2.6")).toEqual({ normalizeStrictToolMessages: true, normalizeThinkTags: true });
-    expect(moonshotPolicy("moonshotai/kimi-k2")).toEqual({
+  it("keeps route-name evidence response-only unless deployment evidence authorizes the repair", () => {
+    expect(moonshotPolicy("kimi-k2.6")).toEqual({ normalizeStrictToolMessages: false, normalizeThinkTags: true });
+    expect(moonshotPolicy("moonshotai/kimi-k2", true)).toEqual({
       normalizeStrictToolMessages: true,
       normalizeThinkTags: true,
     });
@@ -158,7 +158,7 @@ describe("moonshotPolicy", () => {
 
   it("leaves forced-thinking generations alone, which stream reasoning as its own field", () => {
     expect(moonshotPolicy("kimi-k2-thinking")).toEqual({
-      normalizeStrictToolMessages: true,
+      normalizeStrictToolMessages: false,
       normalizeThinkTags: false,
     });
   });
@@ -776,8 +776,8 @@ describe("discoverModels via /model/info", () => {
     );
 
     const evidenceFree = await discoverModels("https://litellm.example.com", "sk-test", {});
-    // A route name is not explicit need for rewriting outbound messages, so the
-    // request-side repair is withheld while the response-only one survives.
+    // A singleton route can borrow catalog controls and limits, but its name is
+    // still not deployment-family evidence authorizing an outbound rewrite.
     expect(evidenceFree.models[0]?.litellmPolicy).toEqual({
       normalizeStrictToolMessages: false,
       normalizeThinkTags: true,
@@ -1194,7 +1194,7 @@ describe("discoverModels fallback to /v1/models", () => {
         expect.objectContaining({
           id: "kimi-k2.6",
           name: "kimi-k2.6 (no metadata)",
-          litellmPolicy: { normalizeStrictToolMessages: true, normalizeThinkTags: true },
+          litellmPolicy: { normalizeStrictToolMessages: false, normalizeThinkTags: true },
         }),
         expect.objectContaining({ id: "grok-4.5", name: "grok-4.5 (no metadata)" }),
       ]),
@@ -2154,10 +2154,12 @@ describe("cache-read and Responses paths honour the transmissibility gate", () =
     const listed = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     // A forced-thinking route streams reasoning as its own field, so no path may
-    // decide to unwrap `<think>` while another decides not to.
-    expect(grouped.models[0]?.litellmPolicy).toEqual(moonshotPolicy(id));
+    // decide to unwrap `<think>` while another decides not to. Only the grouped
+    // path has deployment evidence that can authorize the outbound repair.
+    expect(grouped.models[0]?.litellmPolicy).toEqual(moonshotPolicy(id, true));
     expect(listed.models[0]?.litellmPolicy).toEqual(moonshotPolicy(id));
-    expect(moonshotPolicy(id).normalizeThinkTags).toBe(false);
+    expect(grouped.models[0]?.litellmPolicy?.normalizeThinkTags).toBe(false);
+    expect(listed.models[0]?.litellmPolicy?.normalizeThinkTags).toBe(false);
   });
 
   it("reports withheld catalog authority once with bounded route ids", async () => {

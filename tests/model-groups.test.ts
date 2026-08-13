@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogResolution, reduceModelGroup } from "../src/model-groups.js";
+import { type CatalogResolution, reduceModelGroup, toResponsesLevels } from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
 const catalog = new Map<string, CatalogResolution>([
@@ -74,6 +74,52 @@ function permutations<T>(values: readonly T[]): T[][] {
     permutations([...values.slice(0, index), ...values.slice(index + 1)]).map((rest) => [value, ...rest]),
   );
 }
+
+describe("toResponsesLevels", () => {
+  it.each([
+    {
+      name: "an absent map",
+      levels: undefined,
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "a partial Chat map",
+      levels: { low: "high" },
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "high",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "explicit extended levels",
+      levels: { off: null, xhigh: "xhigh", max: "max" },
+      expected: {
+        off: null,
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: null,
+      },
+    },
+  ])("never widens Responses beyond Chat for $name", ({ levels, expected }) => {
+    expect(toResponsesLevels(levels)).toEqual(expected);
+  });
+});
 
 describe("reduceModelGroup", () => {
   it("is permutation invariant for heterogeneous deployment evidence", () => {

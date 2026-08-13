@@ -27,6 +27,9 @@ export interface CatalogResolution {
   provider?: string;
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
+  // A singleton route-name catalog hint may supply bounded metadata, but it is
+  // not deployment evidence and therefore cannot authorize outbound repairs.
+  routeNameOnly?: boolean;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -229,7 +232,9 @@ function deniesChatEffort(compat: OpenAICompat | undefined): boolean {
 }
 
 // Translates a Chat-shaped map into Responses efforts, denying any level with no
-// valid Responses value instead of letting it through verbatim.
+// valid Responses value instead of letting it through verbatim. pi-ai treats an
+// absent xhigh/max entry as unsupported (unlike the standard levels), so the
+// translation must preserve that distinction rather than widening the map.
 export function toResponsesLevels(
   levels: DiscoveredModel["thinkingLevelMap"] | undefined,
 ): NonNullable<DiscoveredModel["thinkingLevelMap"]> {
@@ -241,8 +246,11 @@ export function toResponsesLevels(
       translated.off = chat === null ? null : "none";
       continue;
     }
-    // pi-ai passes an absent level through as its own name, so an absent entry
-    // is only advertisable when the name itself is a valid effort.
+    if (chat === undefined && (level === "xhigh" || level === "max")) {
+      translated[level] = null;
+      continue;
+    }
+    // pi-ai passes an absent standard level through as its own name.
     const candidate = chat === undefined ? level : chat;
     translated[level] = candidate !== null && RESPONSES_EFFORTS.has(candidate) ? candidate : null;
   }
@@ -601,7 +609,7 @@ export function reduceModelGroup(
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     deploymentFamilies: catalogs.map((catalog) =>
-      catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,
+      catalog?.routeNameOnly || catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,
     ),
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
