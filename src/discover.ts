@@ -462,10 +462,10 @@ const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
 // process diagnostic set in src/index.ts.
 const reportedAmbiguousRoutes = new Set<string>();
 
-// Withholding catalog authority is safe but invisible: the route silently reports
-// default limits and zero cost. This is a safety-relevant degradation, so it is
-// reported regardless of LITELLM_VERBOSE_DISCOVERY, and carries only a count and
-// bounded public route ids.
+// Withholding catalog authority can be invisible in the model name when the router
+// supplies complete prices; limits and other catalog-derived metadata may still use
+// conservative defaults. Report that degradation regardless of
+// LITELLM_VERBOSE_DISCOVERY, carrying only a count and bounded public route ids.
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
   if (unreported.length === 0) return;

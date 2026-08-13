@@ -24,6 +24,8 @@ export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => Cat
 
 export interface ReducedModelGroup {
   id: string;
+  // Reported for downstream request-policy consumers; discovery currently uses
+  // the same count only while deciding whether route text is a catalog hint.
   deploymentCount: number;
   api: "openai-completions" | "openai-responses";
   reasoning: boolean;
@@ -34,10 +36,14 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
+  // Reported for downstream request-policy consumers; discovery projects the
+  // already-reduced capabilities rather than the family label itself.
   semanticFamily?: SemanticFamily;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
+  // Reported for downstream request-policy consumers; discovery does not yet
+  // project the parameter intersection into the Pi model.
   acceptedOpenAIParams: string[];
 }
 
@@ -99,9 +105,10 @@ function stableEntry(entry: ModelInfoEntry): string {
   return JSON.stringify(sortValue(entry));
 }
 
-// Collapses only EXACT DUPLICATE ROWS, not merely rows repeating a deployment id.
-// Two rows sharing `model_info.id` but differing anywhere else are kept as separate
-// reduction candidates so their disagreement fails closed.
+// For rows with a deployment id, collapses only exact duplicates rather than all
+// rows repeating that id. Id-less rows are never collapsed, even when identical,
+// because there is no deployment identity proving that they describe one target.
+// Conflicting variants therefore stay plural and fail closed.
 function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
   const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];

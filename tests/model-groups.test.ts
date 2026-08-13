@@ -124,6 +124,8 @@ describe("reduceModelGroup", () => {
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
     expect(expected).toMatchObject({ deploymentCount: 2, contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
+    // Exact id-less repeats remain plural: equal content is not enough evidence
+    // that two rows describe the same deployment.
     expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
   });
 

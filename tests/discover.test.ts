@@ -578,6 +578,42 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it("keeps an ambiguous group with complete router pricing unsuffixed and reports withheld authority", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const priced = (id: string, model: string) => ({
+      model_name: "priced-ambiguous-authority",
+      litellm_params: { model },
+      model_info: {
+        id,
+        mode: "chat",
+        input_cost_per_token: 0.000003,
+        output_cost_per_token: 0.000015,
+        cache_read_input_token_cost: 0.0000003,
+        cache_creation_input_token_cost: 0.00000375,
+      },
+    });
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [priced("openai", "openai/gpt-4o"), priced("anthropic", "anthropic/claude-sonnet-4-6")],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({
+      id: "priced-ambiguous-authority",
+      name: "priced-ambiguous-authority",
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("priced-ambiguous-authority");
+    expect(diagnostics[0]).toContain("catalog limits, pricing, and reasoning metadata are withheld");
+  });
+
   it("keeps baseline compatibility metadata for Responses-mode routes", async () => {
     // Compat is derived from the model id alone on this branch. If API-aware compat
     // were reintroduced at the call site, a Responses-mode Moonshot route would
