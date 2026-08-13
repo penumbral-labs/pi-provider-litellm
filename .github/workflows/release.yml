@@ -20,6 +20,10 @@ jobs:
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
+      # Run the gate as an explicit step rather than relying on npm invoking
+      # prepublishOnly: npm skips lifecycle hooks entirely when ignore-scripts is
+      # configured, which would publish with no lint, typecheck, tests or package guard.
+      - run: npm run prepublishOnly
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:

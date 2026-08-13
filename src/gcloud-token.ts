@@ -1,8 +1,8 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 export const CACHE_TTL_MS = 50 * 60 * 1000;
 export const GCLOUD_TOKEN_CACHE_KEY = "gcloud-adc";
@@ -26,27 +26,26 @@ interface ServiceAccountCredentials {
 
 type GoogleCredentials = AuthorizedUserCredentials | ServiceAccountCredentials | { type?: string };
 
+// Blank fields are rejected: an ADC file whose fields are present but empty or
+// whitespace parses cleanly, cannot mint a token, and must not be reported as a usable
+// credential.
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function isAuthorizedUserCredentials(credentials: GoogleCredentials): credentials is AuthorizedUserCredentials {
+  const candidate = credentials as Partial<AuthorizedUserCredentials>;
   return (
     credentials.type === "authorized_user" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_id === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_secret === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).refresh_token === "string"
+    isNonBlankString(candidate.client_id) &&
+    isNonBlankString(candidate.client_secret) &&
+    isNonBlankString(candidate.refresh_token)
   );
 }
 
 export function isGcloudTokenAuthEnabled(): boolean {
   const raw = process.env.LITELLM_GCLOUD_TOKEN_AUTH;
   return raw !== undefined && raw !== "" && raw !== "0";
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-export function getGcloudTokenCommand(): string {
-  const cliPath = fileURLToPath(new URL("./gcloud-token-cli.js", import.meta.url));
-  return `!${shellQuote(process.execPath)} ${shellQuote(cliPath)}`;
 }
 
 function getAdcPath(): string | null {
@@ -59,11 +58,23 @@ function getAdcPath(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
-function getCredentialsCacheKey(credentials: GoogleCredentials): string | null {
-  if (isAuthorizedUserCredentials(credentials)) {
-    return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${credentials.client_id}:${credentials.refresh_token}`;
-  }
-  return null;
+// Random per process, never exported, never logged, never written anywhere. A bare digest of
+// a credential is non-reversible but still linkable: anyone holding candidate refresh tokens
+// could confirm a match, and the same credential would produce the same value in every
+// process and every heap dump. Salting with process-local entropy removes both -- the
+// fingerprint is meaningless outside this process and cannot be precomputed.
+const IDENTITY_SALT = randomBytes(32);
+
+// Identifies the credential without retaining it. The refresh token participates so that
+// re-running `gcloud auth application-default login` invalidates the cached access token.
+// Stable for a given credential within one process, and unrelated across processes.
+export function gcloudCredentialFingerprint(clientId: string, refreshToken: string): string {
+  return createHmac("sha256", IDENTITY_SALT).update(`${clientId}\u0000${refreshToken}`).digest("hex").slice(0, 32);
+}
+
+function getCredentialsCacheKey(credentials: AuthorizedUserCredentials): string {
+  const fingerprint = gcloudCredentialFingerprint(credentials.client_id, credentials.refresh_token);
+  return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${fingerprint}`;
 }
 
 async function readCredentials(path: string): Promise<GoogleCredentials | null> {
@@ -74,7 +85,9 @@ async function readCredentials(path: string): Promise<GoogleCredentials | null> 
   }
 }
 
-export async function getGcloudTokenCacheKey(): Promise<string | null> {
+// Single ADC resolution path: locate the file, read it, and either return usable
+// authorized_user credentials or warn with the specific reason they are not.
+async function resolveAuthorizedUserAdc(): Promise<AuthorizedUserCredentials | null> {
   const adcPath = getAdcPath();
   if (!adcPath) {
     console.warn(
@@ -89,16 +102,30 @@ export async function getGcloudTokenCacheKey(): Promise<string | null> {
     return null;
   }
 
-  const cacheKey = getCredentialsCacheKey(credentials);
-  if (cacheKey) return cacheKey;
+  if (isAuthorizedUserCredentials(credentials)) return credentials;
 
   if (credentials.type === "service_account") {
     console.warn("LiteLLM gcloud auth: Service account credentials are not supported; use authorized_user ADC.");
     return null;
   }
 
+  if (credentials.type === "authorized_user") {
+    console.warn(
+      "LiteLLM gcloud auth: authorized_user ADC file is missing client_id, client_secret, or refresh_token.",
+    );
+    return null;
+  }
+
   console.warn(`LiteLLM gcloud auth: Unknown credential type: ${credentials.type ?? "missing"}`);
   return null;
+}
+
+// Reports whether a complete `authorized_user` ADC file is present, emitting the same
+// diagnostics as the token path. This is a check on credential *shape*: whether the
+// refresh token is still honored by Google is only knowable at mint time, and
+// `apiKey.check` deliberately performs no network call.
+export async function hasGcloudAdcCredentials(): Promise<boolean> {
+  return (await resolveAuthorizedUserAdc()) !== null;
 }
 
 async function exchangeRefreshToken(credentials: AuthorizedUserCredentials): Promise<string | null> {
@@ -133,41 +160,19 @@ async function exchangeRefreshToken(credentials: AuthorizedUserCredentials): Pro
 }
 
 export async function getGcloudToken(): Promise<string | null> {
-  const adcPath = getAdcPath();
-  if (!adcPath) {
-    console.warn(
-      "LiteLLM gcloud auth: No Google ADC file found. Set GOOGLE_APPLICATION_CREDENTIALS or run `gcloud auth application-default login`.",
-    );
-    return null;
-  }
-
-  const credentials = await readCredentials(adcPath);
-  if (!credentials) {
-    console.warn(`LiteLLM gcloud auth: Failed to read ADC file: ${adcPath}`);
-    return null;
-  }
+  const credentials = await resolveAuthorizedUserAdc();
+  if (!credentials) return null;
 
   const cacheKey = getCredentialsCacheKey(credentials);
-  if (cacheKey && cachedToken && cachedTokenKey === cacheKey && Date.now() - cachedAt < CACHE_TTL_MS)
-    return cachedToken;
+  if (cachedToken && cachedTokenKey === cacheKey && Date.now() - cachedAt < CACHE_TTL_MS) return cachedToken;
 
-  if (isAuthorizedUserCredentials(credentials)) {
-    const token = await exchangeRefreshToken(credentials);
-    if (token) {
-      cachedToken = token;
-      cachedTokenKey = cacheKey;
-      cachedAt = Date.now();
-    }
-    return token;
+  const token = await exchangeRefreshToken(credentials);
+  if (token) {
+    cachedToken = token;
+    cachedTokenKey = cacheKey;
+    cachedAt = Date.now();
   }
-
-  if (credentials.type === "service_account") {
-    console.warn("LiteLLM gcloud auth: Service account credentials are not supported; use authorized_user ADC.");
-    return null;
-  }
-
-  console.warn(`LiteLLM gcloud auth: Unknown credential type: ${credentials.type ?? "missing"}`);
-  return null;
+  return token;
 }
 
 export function resetGcloudTokenCache(): void {

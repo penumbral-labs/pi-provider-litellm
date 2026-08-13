@@ -23,10 +23,10 @@ pi -e npm:pi-provider-litellm
 
 ```bash
 git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extensions/pi-provider-litellm
-cd ~/.pi/agent/extensions/pi-provider-litellm
-npm ci
-npm run clean && npm run build
 ```
+
+Pi loads the TypeScript source entrypoint declared in `package.json` `pi.extensions`, so a source install needs no
+build step and no `node_modules`. Install dependencies only to run the test suite or the local checks.
 
 </details>
 
@@ -147,7 +147,7 @@ Setting `skills.enabled` to `false` disables the Skills Gateway management tools
 
 | Variable | Default | Effect |
 |---|---|---|
-| `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. Registered as a `!command` provider key; Pi re-runs it on every request (the per-request auth path is uncached), so rotating/short-lived tokens stay fresh. |
+| `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. The extension runs it while resolving request auth, and Pi's per-request auth path is uncached, so rotating/short-lived tokens stay fresh. |
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
@@ -170,7 +170,7 @@ export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_GCLOUD_TOKEN_AUTH=1
 ```
 
-Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. Tokens are cached in memory for 50 minutes and the registered provider key is a Pi `!command`, so request-time auth resolves a fresh token when Pi sends model requests.
+Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. Tokens are refreshed in-process when Pi resolves request auth and cached in memory for 50 minutes.
 
 ## LiteLLM MCP tools
 
@@ -205,7 +205,7 @@ npm run check
 npm run clean && npm run build
 ```
 
-`npm run check` runs Biome, type checking, and the Vitest suite. Runtime changes must be built before local Pi smoke checks because the extension entrypoint is `./dist/index.js`.
+`npm run check` runs Biome, type checking, the Vitest suite, and the supply-chain package-content guard. Pi installs and local smoke checks load the shipped `src/index.ts` entrypoint directly; `dist/` is verification output only.
 
 Before changing package contents or dependency policy, also run:
 
@@ -214,7 +214,7 @@ npm run supply-chain:guard
 npm pack --dry-run
 ```
 
-The published npm package should contain only `dist`, `README.md`, and `LICENSE`.
+The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs.
 
 ## Release
 
