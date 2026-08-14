@@ -271,7 +271,15 @@ export async function createCompatibilityHarness(
     authContext,
   });
   for (const handler of handlers.get("session_start") ?? []) {
-    await handler({ type: "session_start" }, { sessionManager: { getSessionFile: () => options.sessionFile } });
+    await handler(
+      { type: "session_start" },
+      {
+        sessionManager: {
+          getSessionId: () => "provider-compat-session",
+          getSessionFile: () => options.sessionFile,
+        },
+      },
+    );
   }
   const beforeRequestHandlers = handlers.get("before_provider_request") ?? [];
   const composePayloadHook =
