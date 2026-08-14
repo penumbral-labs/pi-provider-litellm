@@ -17,7 +17,6 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { credentialRoot, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost } from "./host-policy.js";
-import { getSessionIdFromFile } from "./litellm.js";
 import {
   createMcpToolDefinitions,
   credentialFingerprint,
@@ -1210,7 +1209,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {
-    sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+    sessionId = ctx.sessionManager.getSessionId();
   });
 
   pi.on("before_provider_request", (event, ctx) => {
