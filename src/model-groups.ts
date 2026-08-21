@@ -4,11 +4,8 @@ import type { DiscoveredModel, ModelInfoEntry } from "./types.js";
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
-export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
-
 export interface CatalogResolution {
   provider?: string;
-  semanticFamily?: SemanticFamily;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -268,14 +265,9 @@ export function reduceModelGroup(
   };
 }
 
-export function catalogResolution(
-  provider: string,
-  semanticFamily: SemanticFamily | undefined,
-  model: Model<Api>,
-): CatalogResolution {
+export function catalogResolution(provider: string, model: Model<Api>): CatalogResolution {
   return {
     provider,
-    semanticFamily,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),

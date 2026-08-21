@@ -531,15 +531,7 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
-  it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "public-route-without-family-text",
-        litellm_params: { model: " azure_ai/DeepSeek-V4 " },
-        model_info: { mode: "chat", litellm_provider: "azure_ai" },
-      }),
-    ).toEqual({ semanticFamily: "deepseek" });
-
+  it("keeps unresolved Azure Foundry backend evidence incomplete", async () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -563,37 +555,32 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("keeps provider identity and semantic family from the same backend candidate", () => {
-    // `litellm_params.model` names a Claude-looking route that resolves nowhere;
-    // `base_model` resolves to OpenAI. The family must describe the backend that
-    // actually supplied the catalog identity, not the sibling candidate.
+  it("uses the backend candidate that supplies catalog authority", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "mixed-evidence",
         litellm_params: { model: "internal/claude-magic" },
         model_info: { mode: "chat", base_model: "openai/gpt-4o" },
       }),
-    ).toMatchObject({ provider: "openai", semanticFamily: "openai" });
+    ).toMatchObject({ provider: "openai" });
 
-    // With no family text on the resolving candidate, the family comes from the
-    // resolved catalog model itself, which is the same entity.
     expect(
       resolveModelInfoCatalog({
         model_name: "aliased",
         litellm_params: { model: "anthropic/opus-4-7" },
         model_info: { mode: "chat" },
       }),
-    ).toMatchObject({ provider: "anthropic", semanticFamily: "claude" });
+    ).toMatchObject({ provider: "anthropic" });
   });
 
-  it("keeps Bedrock catalog authority separate from Claude family identity", () => {
+  it("preserves Bedrock catalog authority", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "bedrock-claude-route",
         litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
         model_info: { mode: "chat", litellm_provider: "bedrock" },
       }),
-    ).toMatchObject({ provider: "amazon-bedrock", semanticFamily: "claude" });
+    ).toMatchObject({ provider: "amazon-bedrock" });
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {

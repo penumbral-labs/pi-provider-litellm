@@ -8,7 +8,6 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   reduceModelGroup,
-  type SemanticFamily,
   wireString,
 } from "./model-groups.js";
 import type {
@@ -170,16 +169,6 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
-function semanticFamily(id: string): SemanticFamily | undefined {
-  const value = id.toLowerCase();
-  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
-  if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
-  if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
-  if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
-  if (/(?:^|[./_-])(?:openai|gpt|o\d)(?:$|[./_:-])/.test(value)) return "openai";
-  return undefined;
-}
-
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
   azure: "azure-openai-responses",
@@ -206,19 +195,11 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  // Provider identity and semantic family must describe the same backend, so a
-  // resolution reports the family of the candidate that resolved it (or of the
-  // catalog model itself) rather than a family borrowed from a sibling candidate.
-  let unresolvedFamily: SemanticFamily | undefined;
   for (const candidate of candidates) {
-    const family = semanticFamily(candidate);
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) {
-      return catalogResolution(resolved.provider, family ?? semanticFamily(resolved.model.id), resolved.model);
-    }
-    unresolvedFamily ??= family;
+    if (resolved) return catalogResolution(resolved.provider, resolved.model);
   }
-  return unresolvedFamily ? { semanticFamily: unresolvedFamily } : undefined;
+  return undefined;
 }
 
 async function fetchJson<T>(
@@ -284,7 +265,7 @@ function mapFromModelInfoGroup(
     // `reduceModelGroup` only passes rows whose route name is a readable string.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
-    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
+    return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
