@@ -7,7 +7,6 @@ const catalog = new Map<string, CatalogResolution>([
     "openai/gpt-4o",
     {
       provider: "openai",
-      semanticFamily: "openai",
       reasoning: false,
       vision: true,
       contextWindow: 128_000,
@@ -19,7 +18,6 @@ const catalog = new Map<string, CatalogResolution>([
     "anthropic/claude-sonnet-4-6",
     {
       provider: "anthropic",
-      semanticFamily: "claude",
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -31,7 +29,6 @@ const catalog = new Map<string, CatalogResolution>([
     "bedrock/anthropic.claude-sonnet-4-6",
     {
       provider: "amazon-bedrock",
-      semanticFamily: "claude",
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -436,7 +433,7 @@ describe("reduceModelGroup", () => {
     });
   });
 
-  it("uses catalog thinking maps for unambiguous identities without a known semantic family", () => {
+  it("uses catalog thinking maps for unambiguous identities", () => {
     const thinkingLevelMap = { low: "low", high: "high" } as const;
     const result = reduceModelGroup([row()], () => ({
       provider: "xai",
