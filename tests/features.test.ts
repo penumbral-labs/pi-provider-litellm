@@ -701,6 +701,36 @@ describe("feature parity", () => {
     });
   });
 
+  it("leaves synthetic Messages payloads unchanged", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const payload = {
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "HIGH",
+      thinking: { type: "enabled", budget_tokens: 1024 },
+    };
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      { payload },
+      { model: { provider: "litellm", id: "kimi-k2.6", api: "anthropic-messages" } },
+    );
+
+    expect(updated).toBeUndefined();
+    expect(payload).toEqual({
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "HIGH",
+      thinking: { type: "enabled", budget_tokens: 1024 },
+    });
+  });
+
   it("leaves Kimi Responses requests unchanged", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
