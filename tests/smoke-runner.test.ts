@@ -413,7 +413,8 @@ describe("runSmoke", () => {
     expect(requestedUrls).toEqual(["http://127.0.0.1:4000/model/info"]);
   });
 
-  it("truncates oversized provider error bodies in failures", async () => {
+  it("does not expose provider response bodies in completion failures", async () => {
+    const echoedSecret = "sk-provider-secret-echo";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) {
@@ -422,7 +423,7 @@ describe("runSmoke", () => {
         });
       }
       if (url.endsWith("/v1/chat/completions")) {
-        return new Response("x".repeat(600), { status: 500 });
+        return jsonResponse(429, { error: `request rejected for ${echoedSecret}` });
       }
       throw new Error(`unexpected URL: ${url}`);
     });
@@ -434,31 +435,11 @@ describe("runSmoke", () => {
         modelIds: ["github-models-openai"],
         timeoutMs: 1000,
       }),
-    ).rejects.toThrow(/returned 500: x{500}$/);
-  });
-
-  it("includes provider response bodies in chat completion failures", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
-        });
-      }
-      if (url.endsWith("/v1/chat/completions")) {
-        return jsonResponse(429, { error: "rate limited" });
-      }
-      throw new Error(`unexpected URL: ${url}`);
+    ).rejects.toSatisfy((error: Error) => {
+      expect(error.message).toBe("/v1/chat/completions for github-models-openai returned 429");
+      expect(error.message).not.toContain(echoedSecret);
+      return true;
     });
-
-    await expect(
-      runSmoke({
-        baseUrl: "http://127.0.0.1:4000",
-        apiKey: "sk-smoke",
-        modelIds: ["github-models-openai"],
-        timeoutMs: 1000,
-      }),
-    ).rejects.toThrow(/\/v1\/chat\/completions for github-models-openai returned 429.*rate limited/);
   });
 });
 

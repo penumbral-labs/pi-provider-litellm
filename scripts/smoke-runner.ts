@@ -96,15 +96,6 @@ export function parseExpectedResponseCost(raw: string | undefined): Map<string, 
   return parsed && new Map([...parsed].map(([modelId, value]) => [modelId, value === "present"]));
 }
 
-async function readErrorBody(response: Response): Promise<string> {
-  try {
-    const body = await response.text();
-    return body ? `: ${body.slice(0, 500)}` : "";
-  } catch {
-    return "";
-  }
-}
-
 export async function smokeCompletion(
   baseUrl: string,
   apiKey: string,
@@ -140,7 +131,7 @@ export async function smokeCompletion(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    throw new Error(`${endpoint} for ${modelId} returned ${response.status}${await readErrorBody(response)}`);
+    throw new Error(`${endpoint} for ${modelId} returned ${response.status}`);
   }
   const data = (await response.json()) as ChatCompletionResponse & ResponsesResponse & MessagesResponse;
   const content =
