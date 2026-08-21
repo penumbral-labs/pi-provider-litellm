@@ -597,7 +597,8 @@ describe("feature parity", () => {
         { reason: "reload" },
         {
           sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
+            getSessionId: () => "123e4567-e89b-12d3-a456-426614174000",
+            getSessionFile: () => join(agentDir, "session.jsonl"),
           },
         },
       );
@@ -611,7 +612,7 @@ describe("feature parity", () => {
     expect(updated).toBeUndefined();
   });
 
-  it("injects LiteLLM session ids into LiteLLM provider requests", async () => {
+  it("uses the canonical Pi session id when the session filename is generic", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -647,7 +648,8 @@ describe("feature parity", () => {
         { reason: "reload" },
         {
           sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
+            getSessionId: () => "123e4567-e89b-12d3-a456-426614174000",
+            getSessionFile: () => join(agentDir, "run-0", "session.jsonl"),
           },
         },
       );
@@ -1189,7 +1191,7 @@ describe("feature parity", () => {
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+      await handler({ reason: "start" }, { sessionManager: { getSessionId: () => "test-session" } });
     }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
