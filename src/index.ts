@@ -29,7 +29,6 @@ import {
   getGcloudTokenCommand,
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
-import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
@@ -1240,7 +1239,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {
-    sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+    sessionId = ctx.sessionManager.getSessionId();
   });
 
   pi.on("before_provider_request", (event, ctx) => {
