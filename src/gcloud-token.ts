@@ -1,4 +1,3 @@
-import { createHmac, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -26,20 +25,12 @@ interface ServiceAccountCredentials {
 
 type GoogleCredentials = AuthorizedUserCredentials | ServiceAccountCredentials | { type?: string };
 
-// Blank fields are rejected: an ADC file whose fields are present but empty or
-// whitespace parses cleanly, cannot mint a token, and must not be reported as a usable
-// credential.
-function isNonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
 function isAuthorizedUserCredentials(credentials: GoogleCredentials): credentials is AuthorizedUserCredentials {
-  const candidate = credentials as Partial<AuthorizedUserCredentials>;
   return (
     credentials.type === "authorized_user" &&
-    isNonBlankString(candidate.client_id) &&
-    isNonBlankString(candidate.client_secret) &&
-    isNonBlankString(candidate.refresh_token)
+    typeof (credentials as Partial<AuthorizedUserCredentials>).client_id === "string" &&
+    typeof (credentials as Partial<AuthorizedUserCredentials>).client_secret === "string" &&
+    typeof (credentials as Partial<AuthorizedUserCredentials>).refresh_token === "string"
   );
 }
 
@@ -58,23 +49,8 @@ function getAdcPath(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
-// Random per process, never exported, never logged, never written anywhere. A bare digest of
-// a credential is non-reversible but still linkable: anyone holding candidate refresh tokens
-// could confirm a match, and the same credential would produce the same value in every
-// process and every heap dump. Salting with process-local entropy removes both -- the
-// fingerprint is meaningless outside this process and cannot be precomputed.
-const IDENTITY_SALT = randomBytes(32);
-
-// Identifies the credential without retaining it. The refresh token participates so that
-// re-running `gcloud auth application-default login` invalidates the cached access token.
-// Stable for a given credential within one process, and unrelated across processes.
-export function gcloudCredentialFingerprint(clientId: string, refreshToken: string): string {
-  return createHmac("sha256", IDENTITY_SALT).update(`${clientId}\u0000${refreshToken}`).digest("hex").slice(0, 32);
-}
-
 function getCredentialsCacheKey(credentials: AuthorizedUserCredentials): string {
-  const fingerprint = gcloudCredentialFingerprint(credentials.client_id, credentials.refresh_token);
-  return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${fingerprint}`;
+  return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${credentials.client_id}:${credentials.refresh_token}`;
 }
 
 async function readCredentials(path: string): Promise<GoogleCredentials | null> {
@@ -106,13 +82,6 @@ async function resolveAuthorizedUserAdc(): Promise<AuthorizedUserCredentials | n
 
   if (credentials.type === "service_account") {
     console.warn("LiteLLM gcloud auth: Service account credentials are not supported; use authorized_user ADC.");
-    return null;
-  }
-
-  if (credentials.type === "authorized_user") {
-    console.warn(
-      "LiteLLM gcloud auth: authorized_user ADC file is missing client_id, client_secret, or refresh_token.",
-    );
     return null;
   }
 
