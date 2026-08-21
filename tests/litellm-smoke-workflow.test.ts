@@ -49,6 +49,11 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    expect(workflow.match(/model_name: grouped-vidaimock/g)).toHaveLength(2);
+    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
+    expect(workflow).toContain('=== "chat,responses"');
+    expect(workflow).toContain('grouped[0].api === "openai-completions"');
+    expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
