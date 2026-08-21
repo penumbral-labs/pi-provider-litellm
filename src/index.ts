@@ -1142,7 +1142,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     while (mcpRegistration) {
       await waitForMcpRegistration(mcpRegistration, signal);
       signal?.throwIfAborted();
-      if (registeredMcpIdentity === identity) return;
+      if (mcpRegistrationFatal || registeredMcpIdentity === identity) return;
     }
     if (registeredMcpIdentity === identity) return;
 

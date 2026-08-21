@@ -378,11 +378,28 @@ describe("extension startup", () => {
     );
   });
 
-  it("keeps partial MCP registrations and stops after a fatal registration refusal", async () => {
+  it("coalesces concurrent MCP refreshes when registration becomes fatal", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     const proxyText = "proxy-description-must-not-leak";
     const refusal = `extension stale ${"x".repeat(500)}`;
     let listCalls = 0;
+    let mcpStarted!: () => void;
+    let releaseMcp!: (response: Response) => void;
+    const started = new Promise<void>((resolve) => {
+      mcpStarted = resolve;
+    });
+    const pendingMcp = new Promise<Response>((resolve) => {
+      releaseMcp = resolve;
+    });
+    const catalogResponse = () =>
+      jsonResponse(200, {
+        tools: ["first", "second", "third"].map((name) => ({
+          name,
+          server_name: "server",
+          description: proxyText,
+          inputSchema: { type: "object", properties: {} },
+        })),
+      });
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) {
@@ -390,14 +407,11 @@ describe("extension startup", () => {
       }
       if (url.endsWith("/mcp-rest/tools/list")) {
         listCalls += 1;
-        return jsonResponse(200, {
-          tools: ["first", "second", "third"].map((name) => ({
-            name,
-            server_name: "server",
-            description: proxyText,
-            inputSchema: { type: "object", properties: {} },
-          })),
-        });
+        if (listCalls === 1) {
+          mcpStarted();
+          return pendingMcp;
+        }
+        return catalogResponse();
       }
       throw new Error(`unexpected URL: ${url}`);
     });
@@ -428,10 +442,15 @@ describe("extension startup", () => {
         .map(([message]) => String(message))
         .filter((message) => message.includes("registration stopped"));
 
-    await refresh();
-    await vi.waitFor(() => expect(listCalls).toBe(1));
+    const firstRefresh = refresh();
+    await started;
+    const secondRefresh = refresh();
+    await Promise.all([firstRefresh, secondRefresh]);
+    releaseMcp(catalogResponse());
     await vi.waitFor(() => expect(registeredNames).toEqual([named("mcp_server_first")]));
     await vi.waitFor(() => expect(fatalLines()).toHaveLength(1));
+
+    // A later refresh must also observe the instance-fatal state rather than retry discovery.
     await refresh();
     await new Promise<void>((resolve) => setImmediate(resolve));
 
