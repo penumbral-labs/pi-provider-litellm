@@ -687,9 +687,8 @@ describe("native Messages route selection", () => {
   });
 
   it("keeps explicit Responses mode authoritative for Claude", () => {
-    const result = reduceModelGroup(
-      [{ model_name: "claude-route", model_info: { id: "a", mode: "responses" } }],
-      () => claude({}),
+    const result = reduceModelGroup([{ model_name: "claude-route", model_info: { id: "a", mode: "responses" } }], () =>
+      claude({}),
     );
 
     expect(result?.api).toBe("openai-responses");
