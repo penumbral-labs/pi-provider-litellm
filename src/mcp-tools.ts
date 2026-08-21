@@ -8,6 +8,7 @@ import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
 const LIST_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
 const MAX_DISCOVERY_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_DISCOVERY_ENTRIES = 10_000;
 const MAX_CALL_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTERED_TOOLS = 512;
 const MAX_DESCRIPTION_BYTES = 4 * 1024;
@@ -318,6 +319,9 @@ export async function discoverMcpTools(
     // entries" would send an operator looking at the wrong thing.
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : undefined;
     if (rawTools === undefined) throw new Error("MCP discovery returned an unexpected body shape");
+    if (rawTools.length > MAX_DISCOVERY_ENTRIES) {
+      throw new Error(`MCP discovery exceeds its ${MAX_DISCOVERY_ENTRIES}-entry limit`);
+    }
     onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
     const tools: LiteLLMMcpTool[] = [];
     const invalid: string[] = [];
@@ -481,7 +485,14 @@ const NAME_KEYED_KEYWORDS = new Set([
 ]);
 
 // Why a supplied schema could not be proven safe to hand to the validator.
-export type SchemaHazard = "regex" | "nonlocal-ref" | "unresolvable-ref" | "ref-cycle" | "budget" | "cycle";
+export type SchemaHazard =
+  | "regex"
+  | "malformed-ref"
+  | "nonlocal-ref"
+  | "unresolvable-ref"
+  | "ref-cycle"
+  | "budget"
+  | "cycle";
 
 // Resolves a JSON pointer fragment against the supplied document. Returns POINTER_MISSING rather
 // than undefined so that a target whose value genuinely is `undefined` cannot be mistaken for a hit.
@@ -584,13 +595,15 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
         if (key === UNSAFE_REGEX_KEY || key === UNSAFE_REGEX_MAP_KEY) return "regex";
         // A pointer outside the supplied document cannot be inspected at all. A local one is only
         // safe if it also resolves to something the validator can use as a schema.
-        if (key === "$ref" && typeof child === "string") {
+        if (key === "$ref") {
+          if (typeof child !== "string") return "malformed-ref";
           if (!child.startsWith("#")) return "nonlocal-ref";
           // Resolve after the complete walk so acceptance cannot depend on whether the referenced
           // schema appeared before or after this `$ref` in object insertion order.
           localRefs.push(child);
         }
-        if ((NONLOCAL_REF_KEYS as readonly string[]).includes(key) && typeof child === "string") {
+        if ((NONLOCAL_REF_KEYS as readonly string[]).includes(key)) {
+          if (typeof child !== "string") return "malformed-ref";
           return "nonlocal-ref";
         }
       }
@@ -708,19 +721,19 @@ export function prepareTools(discovery: McpDiscovery): {
     unique.set(identity, tool);
   }
 
-  const accepted: Array<Omit<PreparedTool, "name">> = [];
+  const accepted: Array<Omit<PreparedTool, "name"> & { degraded?: McpDegradeReason }> = [];
   for (const tool of unique.values()) {
     const built = buildParameters(tool);
     if (typeof built === "string") {
       recordDrop(built, buildPiToolName(tool));
       continue;
     }
-    if (built.degraded) {
-      const labels = degrades.get(built.degraded);
-      if (labels) labels.push(buildPiToolName(tool));
-      else degrades.set(built.degraded, [buildPiToolName(tool)]);
-    }
-    accepted.push({ tool, parameters: built.parameters, syntheticArgsEnvelope: built.syntheticArgsEnvelope });
+    accepted.push({
+      tool,
+      parameters: built.parameters,
+      syntheticArgsEnvelope: built.syntheticArgsEnvelope,
+      degraded: built.degraded,
+    });
   }
 
   const candidates = accepted.slice(0, MAX_REGISTERED_TOOLS);
@@ -734,7 +747,13 @@ export function prepareTools(discovery: McpDiscovery): {
       continue;
     }
     finalNames.add(name);
-    prepared.push({ ...candidate, name });
+    const { degraded, ...preparedCandidate } = candidate;
+    prepared.push({ ...preparedCandidate, name });
+    if (degraded) {
+      const labels = degrades.get(degraded);
+      if (labels) labels.push(name);
+      else degrades.set(degraded, [name]);
+    }
   }
 
   return {

@@ -132,6 +132,21 @@ describe("discoverMcpTools", () => {
     expect(tools.at(-1)?.name).toBe("tool-512");
   });
 
+  it("rejects excessive primitive entry arrays before normalizing or accumulating labels", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        200,
+        Array.from({ length: 10_001 }, () => 0),
+      ),
+    );
+    const progress: string[] = [];
+
+    await expect(
+      discoverMcpToolsRaw("https://litellm.example.com", "sk-test", undefined, (message) => progress.push(message)),
+    ).rejects.toThrow("MCP discovery exceeds its 10000-entry limit");
+    expect(progress).not.toContain("Found 10001 raw MCP tools, normalizing...");
+  });
+
   it("propagates the original discovery cancellation reason", async () => {
     const controller = new AbortController();
     const reason = new Error("refresh cancelled");
@@ -1278,6 +1293,32 @@ describe("loss accounting reconciles to the raw catalog", () => {
     expect(diagnostics).not.toContain("\u001b");
   });
 
+  it("only reports degradation for hazardous tools that survive the registration cap", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          ...Array.from({ length: 512 }, (_, index) => ({
+            name: `safe-${index}`,
+            server_name: "srv",
+            inputSchema: { type: "object", properties: {} },
+          })),
+          {
+            name: "overflow-hazard",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { pattern: "^(a+)+$" } } },
+          },
+        ],
+      }),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    expect(definitions).toHaveLength(512);
+    expect(report.overflow).toBe(1);
+    expect(report.degraded).toEqual([]);
+    expect(report.enveloped).toBe(0);
+  });
+
   it("treats a malformed non-object schema as invalid rather than schemaless", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -1420,6 +1461,10 @@ describe("findSchemaHazard", () => {
     expect(findSchemaHazard({ $recursiveRef: "#" })).toBe("nonlocal-ref");
   });
 
+  it.each(["$ref", "$dynamicRef", "$recursiveRef"])("reports a non-string %s keyword", (keyword) => {
+    expect(findSchemaHazard({ type: "object", properties: { s: { [keyword]: 7 } } })).toBe("malformed-ref");
+  });
+
   it("only resolves local references to nodes visited as schemas", () => {
     expect(
       findSchemaHazard({
@@ -1532,6 +1577,7 @@ describe("every registered schema is safe for the validator that consumes it", (
     },
     { name: "remoteref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $ref: REMOTE } } } },
     { name: "dynref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $dynamicRef: "#m" } } } },
+    { name: "malformedref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $ref: 7 } } } },
     // Pointers that resolve to something that is not a subschema, or not at all.
     {
       name: "refnonschema",
