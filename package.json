@@ -4,7 +4,7 @@
   "description": "LiteLLM proxy provider extension for Pi",
   "type": "module",
   "license": "MIT",
-  "author": "D\u00e1vid Balatoni <balcsida@gmail.com>",
+  "author": "Dávid Balatoni <balcsida@gmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/balcsida/pi-provider-litellm.git"
