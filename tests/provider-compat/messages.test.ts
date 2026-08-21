@@ -1,6 +1,6 @@
 import { type Context, getSupportedThinkingLevels, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { anthropicSseChunk, anthropicTextResponse, createCompatibilityHarness, user } from "./helpers.js";
+import { anthropicSseChunk, anthropicTextResponse, claudeRoute, createCompatibilityHarness, user } from "./helpers.js";
 
 const anthropicRoute = {
   model_name: "claude-opus-5",
@@ -41,14 +41,6 @@ const mixedGenerationRoutes = [
   claudeRoute("anthropic", "anthropic/claude-opus-4-7", "a"),
   claudeRoute("anthropic", "anthropic/claude-opus-4-5", "b"),
 ];
-
-function claudeRoute(adapter: string, backend: string, id?: string) {
-  return {
-    model_name: "team-claude",
-    model_info: { mode: "chat", litellm_provider: adapter, supports_reasoning: true, ...(id ? { id } : {}) },
-    litellm_params: { model: backend },
-  };
-}
 
 const unknownBackendRoute = claudeRoute("bedrock", "bedrock/us.anthropic.claude-invented-9-9-v1:0");
 

@@ -39,7 +39,8 @@ jobs:
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
-      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=absent vidaimock-responses=present grouped-vidaimock=present
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=present vidaimock-responses=present grouped-vidaimock=present
+      LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS: '1'
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
@@ -321,7 +322,8 @@ jobs:
           # The smoke runner posts to /v1/messages itself, so coverage alone cannot
           # prove the extension's native Messages path. Require both that request and
           # the Pi CLI request asserted in the scoped grep above.
-          messages_requests="$(grep -c -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log)"
+          messages_requests="$(grep -c -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log || true)"
+          messages_requests="${messages_requests:-0}"
           echo "captured /v1/messages requests: $messages_requests"
           test "$messages_requests" -ge 2
 

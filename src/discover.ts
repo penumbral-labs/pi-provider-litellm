@@ -111,7 +111,10 @@ function resolveCatalogModel(
   adapterProvider?: BuiltinProvider,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy, adapterProvider)) {
+  const providers = adapterProvider
+    ? [adapterProvider]
+    : catalogProviderCandidates(lookupIds, id, ownedBy, adapterProvider);
+  for (const provider of providers) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -267,6 +270,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     baseFamily !== undefined &&
     ((routingFamily !== undefined && routingFamily !== baseFamily) ||
       (routingCatalog !== undefined && semanticFamily(routingCatalog.model.id) !== baseFamily));
+  if (conflictingFamilies) return undefined;
   const semantic =
     routingFamily ?? (routingCatalog ? semanticFamily(routingCatalog.model.id) : undefined) ?? baseFamily;
   const routingAllowsBaseWitness =
@@ -282,9 +286,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
         baseModel !== undefined &&
         baseFamily === "claude" &&
         CLAUDE_MODEL_PATTERN.test(baseModel)));
-  const candidates = [routingModel, baseModel]
-    .filter((candidate): candidate is string => candidate !== undefined)
-    .filter((candidate) => !conflictingFamilies || candidate === baseModel);
+  const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   // routingModel and base_model are two descriptions of one deployment, so the
   // first catalogued policy wins here. Group-level unanimity is enforced later.
   const compat = claudeEvidence

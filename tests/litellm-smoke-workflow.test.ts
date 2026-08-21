@@ -122,6 +122,7 @@ describe("LiteLLM smoke workflow", () => {
         " grouped-vidaimock=openai-completions",
     );
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_RESPONSE_COST:");
+    expect(workflow).toContain("LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS: '1'");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
     expect(workflow).toContain(`- model_name: anthropic/vidaimock-claude
@@ -170,6 +171,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"');
     expect(workflow).toContain('docker logs --since "$messages_log_since" litellm-smoke');
     expect(workflow).toContain('POST /v1/messages HTTP/1.1" 200');
+    expect(workflow).toContain(".tmp/litellm.log || true)");
+    expect(workflow).toContain(`messages_requests="\${messages_requests:-0}"`);
     expect(workflow).toContain('test "$messages_requests" -ge 2');
 
     expect(workflow).not.toContain("models: read");

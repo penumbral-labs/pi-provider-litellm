@@ -26,6 +26,7 @@ export type SmokeOptions = {
   expectedSource?: DiscoverySource;
   expectedApis?: ReadonlyMap<string, LiteLLMApi>;
   expectedResponseCost?: ReadonlyMap<string, boolean>;
+  requireAllProtocols?: boolean;
 };
 
 const DISCOVERY_SOURCES: DiscoverySource[] = ["model_info", "models_list", "health"];
@@ -203,11 +204,15 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
     }
     completions.push(completion);
   }
-  if (options.expectedApis) {
+  if (options.requireAllProtocols) {
     const endpoints = new Set(completions.map(({ endpoint }) => endpoint));
     const required = ["/v1/messages", "/v1/chat/completions", "/v1/responses"];
     const absent = required.filter((endpoint) => !endpoints.has(endpoint));
-    if (absent.length > 0) throw new Error(`Smoke endpoint coverage is missing: ${absent.join(", ")}`);
+    if (absent.length > 0) {
+      throw new Error(
+        `LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS is enabled, but smoke endpoint coverage is missing: ${absent.join(", ")}`,
+      );
+    }
   }
 
   return {
@@ -235,6 +240,7 @@ export async function runSmokeFromEnv(env: NodeJS.ProcessEnv = process.env): Pro
     expectedSource: parseExpectedSource(env.LITELLM_SMOKE_EXPECT_SOURCE),
     expectedApis: parseExpectedApis(env.LITELLM_SMOKE_EXPECT_APIS),
     expectedResponseCost: parseExpectedResponseCost(env.LITELLM_SMOKE_EXPECT_RESPONSE_COST),
+    requireAllProtocols: env.LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS === "1",
   });
 }
 

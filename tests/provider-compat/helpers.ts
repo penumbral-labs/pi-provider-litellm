@@ -24,6 +24,14 @@ export function anthropicSseChunk(data: { type: string; [key: string]: unknown }
   return { data, event: data.type, waitForAbort };
 }
 
+export function claudeRoute(adapter: string, backend: string, id?: string): ModelInfoEntry {
+  return {
+    model_name: "team-claude",
+    model_info: { mode: "chat", litellm_provider: adapter, supports_reasoning: true, ...(id ? { id } : {}) },
+    litellm_params: { model: backend },
+  };
+}
+
 export function anthropicTextResponse(text: string): Chunk[] {
   return [
     anthropicSseChunk({
@@ -221,6 +229,7 @@ export async function createCompatibilityHarness(
       async start(controller) {
         const encoder = new TextEncoder();
         if (rawResponse !== undefined) {
+          if (signal?.aborted) return controller.error(signal.reason);
           controller.enqueue(encoder.encode(rawResponse));
           controller.close();
           return;

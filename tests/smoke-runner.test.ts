@@ -144,6 +144,55 @@ describe("runSmoke", () => {
     ]);
   });
 
+  it("reports missing endpoint coverage when the explicit completeness check is enabled", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["chat-route", "openai-completions"]]),
+        requireAllProtocols: true,
+      }),
+    ).rejects.toThrow(
+      /LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS is enabled, but smoke endpoint coverage is missing: \/v1\/messages, \/v1\/responses/,
+    );
+  });
+
+  it("allows expected APIs without implicitly requiring every endpoint", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["chat-route", "openai-completions"]]),
+      }),
+    ).resolves.toMatchObject({ completions: [{ endpoint: "/v1/chat/completions" }] });
+  });
+
   it("rejects an expected API mismatch before calling completion endpoints", async () => {
     const requests: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

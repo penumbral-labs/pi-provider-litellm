@@ -1300,7 +1300,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
+    if (ctx.model?.provider !== PROVIDER_NAME) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
     return prepareLiteLLMRequestPayload(
       event.payload as Record<string, unknown>,

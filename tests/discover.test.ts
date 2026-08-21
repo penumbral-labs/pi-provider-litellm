@@ -559,7 +559,7 @@ describe("discoverModels via /model/info", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "mixed-evidence",
-        litellm_params: { model: "internal/claude-magic" },
+        litellm_params: { model: "internal/mystery" },
         model_info: { mode: "chat", base_model: "openai/gpt-4o" },
       }),
     ).toMatchObject({ provider: "openai" });
@@ -581,6 +581,29 @@ describe("discoverModels via /model/info", () => {
         model_info: { mode: "chat", litellm_provider: "bedrock" },
       }),
     ).toMatchObject({ provider: "amazon-bedrock" });
+  });
+
+  it("withholds catalog authority when a recognized adapter conflicts with the routed provider", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "contradictory-adapter",
+      litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+      model_info: { mode: "chat", litellm_provider: "openai" },
+    });
+
+    expect(resolved).toEqual({ semanticFamily: "claude" });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("cost");
+    expect(resolved).not.toHaveProperty("messagesCompat");
+  });
+
+  it("withholds catalog authority when routing and base model families conflict", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "contradictory-backends",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { mode: "chat", base_model: "anthropic/claude-sonnet-4-6" },
+      }),
+    ).toBeUndefined();
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
