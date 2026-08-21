@@ -256,19 +256,29 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
   const semantic = families.length > 0 && families.every((family) => family === families[0]) ? families[0] : undefined;
+  const routingCatalog = routingModel ? resolveCatalogModel(routingModel, undefined, adapterProvider) : undefined;
+  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
+  const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
+  const routingAllowsBaseWitness =
+    routingModel === undefined ||
+    routingFamily === "claude" ||
+    (routingFamily === undefined && routingCatalog === undefined);
   const claudeEvidence =
     adapter !== undefined &&
     CLAUDE_CAPABLE_ADAPTERS.has(adapter) &&
-    candidates.length > 0 &&
-    candidates.every((candidate) => semanticFamily(candidate) === "claude" && CLAUDE_MODEL_PATTERN.test(candidate));
-  const compatiblePolicies = claudeEvidence ? candidates.map(messagesCompatFromBackend) : [];
-  const compat =
-    compatiblePolicies.length > 0 &&
-    compatiblePolicies.every(
-      (candidate) => candidate !== undefined && JSON.stringify(candidate) === JSON.stringify(compatiblePolicies[0]),
-    )
-      ? compatiblePolicies[0]
-      : undefined;
+    ((routingModel !== undefined && routingFamily === "claude" && CLAUDE_MODEL_PATTERN.test(routingModel)) ||
+      (routingAllowsBaseWitness &&
+        baseModel !== undefined &&
+        baseFamily === "claude" &&
+        CLAUDE_MODEL_PATTERN.test(baseModel)));
+  // routingModel and base_model are two descriptions of one deployment, so the
+  // first catalogued policy wins here. Group-level unanimity is enforced later.
+  const compat = claudeEvidence
+    ? candidates.reduce<MessagesBackendCompat | undefined>(
+        (carried, candidate) => carried ?? messagesCompatFromBackend(candidate),
+        undefined,
+      )
+    : undefined;
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);
