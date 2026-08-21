@@ -1,13 +1,17 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AuthInteraction,
-  Credential,
-  ModelsStore,
-  ModelsStoreEntry,
-  Provider,
-  RefreshModelsContext,
+import {
+  type AuthContext,
+  type AuthInteraction,
+  type Credential,
+  createModels,
+  InMemoryCredentialStore,
+  InMemoryModelsStore,
+  type ModelsStore,
+  type ModelsStoreEntry,
+  type Provider,
+  type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
@@ -667,6 +671,95 @@ describe("extension startup", () => {
     expect(pi.providers).toHaveLength(1);
     expect(registeredModels).toBeUndefined();
     expect(vi.mocked(globalThis.fetch).mock.calls.every(([url]) => !String(url).endsWith("/model/info"))).toBe(true);
+  });
+
+  it("uses the OAuth credential base URL when ambient configuration is unset", async () => {
+    delete process.env.LITELLM_BASE_URL;
+    delete process.env.LITELLM_API_KEY;
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-oauth",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://credential.example.com",
+    }));
+    const authContext: AuthContext = {
+      env: async () => undefined,
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+    const model = {
+      id: "oauth-model",
+      name: "OAuth model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://credential.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+    };
+
+    const result = await models.complete(model, { messages: [] });
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual(["https://credential.example.com/v1/chat/completions"]);
+  });
+
+  it("clears the remembered OAuth base URL when API-key auth resolves", async () => {
+    process.env.LITELLM_BASE_URL = "https://api-key.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const oauthCredential = {
+      type: "oauth" as const,
+      access: "shared-key",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://oauth.example.com",
+    };
+
+    await provider.auth.oauth?.toAuth(oauthCredential);
+    await resolveApiKey(provider, { type: "api_key", key: "shared-key" });
+
+    expect(() =>
+      provider.stream(
+        {
+          id: "api-key-model",
+          name: "API-key model",
+          provider: "litellm",
+          api: "openai-completions",
+          baseUrl: "https://api-key.example.com/v1",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 4096,
+          maxTokens: 1024,
+        },
+        { messages: [] },
+        { apiKey: "shared-key" },
+      ),
+    ).not.toThrow();
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {
