@@ -230,6 +230,18 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
+### Deployment groups and metadata authority
+
+LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model:
+
+- Responses is selected only when every row explicitly reports Responses mode; mixed or unknown groups use Chat.
+- Vision and reasoning are advertised only when every routable deployment resolves them as supported.
+- Context and output limits use the minimum resolved value across deployments.
+- Each displayed price field uses the maximum only when every deployment resolves that field; unresolved fields remain zero and the model name is suffixed with ` (incomplete metadata)`.
+- Catalog metadata is accepted only from one unanimous provider identity derived from deployment fields such as `litellm_params.model`, `model_info.base_model`, and the LiteLLM adapter. Ambiguous groups are not matched across all Pi provider catalogs.
+
+The ` (no metadata)` suffix is reserved for evidence-free `/v1/models` fallback entries. Those entries may receive bounded catalog enrichment on a later cache read. The ` (incomplete metadata)` suffix marks reduced `/model/info` groups or unresolved `/health` routes and permanently prevents route-name cache enrichment.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
