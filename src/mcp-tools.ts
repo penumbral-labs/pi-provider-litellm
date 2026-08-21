@@ -596,6 +596,10 @@ const SCHEMA_MAP_KEYWORDS = ["$defs", "definitions", "dependentSchemas", "patter
 const UNSAFE_REGEX_KEY = "pattern";
 const UNSAFE_REGEX_MAP_KEY = "patternProperties";
 const NONLOCAL_REF_KEYS = ["$dynamicRef", "$recursiveRef"] as const;
+// These keywords change TypeBox's reference base or introduce aliases. Rather than duplicate its
+// URI and dynamic-scope resolver, fail closed whenever an untrusted schema defines one.
+const REF_SCOPE_KEYS = new Set(["$id", "$anchor", "$dynamicAnchor", "$recursiveAnchor"]);
+const UNSAFE_POINTER_TOKENS = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_SCAN_NODES = 20_000;
 const MAX_REF_HOPS = 32;
 const POINTER_MISSING = Symbol("pointer-missing");
@@ -618,6 +622,7 @@ export type SchemaHazard =
   | "malformed-ref"
   | "nonlocal-ref"
   | "unresolvable-ref"
+  | "resolver-scope"
   | "ref-cycle"
   | "budget"
   | "cycle";
@@ -631,6 +636,8 @@ function resolvePointer(root: unknown, fragment: string): unknown {
   let current: unknown = root;
   for (const rawToken of fragment.slice(1).split("/")) {
     const token = rawToken.replaceAll("~1", "/").replaceAll("~0", "~");
+    // TypeBox's pointer lookup refuses these keys even when they are own properties.
+    if (UNSAFE_POINTER_TOKENS.has(token)) return POINTER_MISSING;
     if (Array.isArray(current)) {
       // TypeBox indexes arrays with the pointer token itself. Accept only the canonical decimal
       // spellings that can name JSON array elements; Number("01") would incorrectly alias index 1.
@@ -761,6 +768,10 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
 
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       if (!keysAreNames) {
+        // `$id` changes the base against which fragment-only refs resolve, while the anchor
+        // keywords introduce aliases and dynamic scope. TypeBox applies those semantics while
+        // compiling, so the pointer-only safety resolver must not accept schemas that define them.
+        if (REF_SCOPE_KEYS.has(key)) return "resolver-scope";
         // Any `pattern` or `patternProperties` at a keyword position, whatever its value type. This
         // TypeBox only compiles a string-valued `pattern`, so a non-string one is not a CPU risk —
         // but the expression text would still land in the schema Pi holds and forward to the

@@ -1071,6 +1071,15 @@ describe("untrusted schema hazards", () => {
     ["remote $ref", { type: "object", properties: { s: { $ref: REMOTE_REF } } }],
     ["$dynamicRef", { type: "object", properties: { s: { $dynamicRef: "#meta" } } }],
     ["$recursiveRef", { type: "object", properties: { s: { $recursiveRef: "#" } } }],
+    [
+      "nested $id self-cycle",
+      {
+        type: "object",
+        $defs: { nested: { $id: "nested", $ref: "#" } },
+        properties: { s: { $ref: "#/$defs/nested" } },
+      },
+    ],
+    ["root $anchor alias", { $anchor: "root", type: "object", properties: { s: { $ref: "#root" } } }],
   ];
 
   it.each(hazardCatalogs)(
@@ -1493,6 +1502,28 @@ describe("findSchemaHazard", () => {
     expect(findSchemaHazard({ type: "object", properties: { s: { [keyword]: 7 } } })).toBe("malformed-ref");
   });
 
+  it.each(["$id", "$anchor", "$dynamicAnchor", "$recursiveAnchor"])(
+    "degrades schemas that define the TypeBox resolver scope with %s",
+    (keyword) => {
+      expect(findSchemaHazard({ type: "object", [keyword]: keyword === "$recursiveAnchor" ? true : "alias" })).toBe(
+        "resolver-scope",
+      );
+    },
+  );
+
+  it("degrades a nested $id self-cycle and a root $anchor alias", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { nested: { $id: "nested", $ref: "#" } },
+        properties: { s: { $ref: "#/$defs/nested" } },
+      }),
+    ).toBe("resolver-scope");
+    expect(findSchemaHazard({ $anchor: "root", type: "object", properties: { s: { $ref: "#root" } } })).toBe(
+      "resolver-scope",
+    );
+  });
+
   it("rejects percent-encoded local refs before TypeBox can decode them to a different target", () => {
     expect(
       findSchemaHazard({
@@ -1721,6 +1752,20 @@ describe("every registered schema is safe for the validator that consumes it", (
       server_name: "srv",
       inputSchema: { type: "object", properties: { s: { $ref: "#someAnchor" } } },
     },
+    {
+      name: "nestedidselfcycle",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        $defs: { nested: { $id: "nested", $ref: "#" } },
+        properties: { s: { $ref: "#/$defs/nested" } },
+      },
+    },
+    {
+      name: "rootanchoralias",
+      server_name: "srv",
+      inputSchema: { $anchor: "root", type: "object", properties: { s: { $ref: "#root" } } },
+    },
     // Legitimate local refs, which must survive as passthrough.
     {
       name: "goodref",
@@ -1765,6 +1810,8 @@ describe("every registered schema is safe for the validator that consumes it", (
     expect(serialized).not.toContain(EVIL);
     expect(serialized).not.toContain(REMOTE);
     expect(serialized).not.toContain("$dynamicRef");
+    expect(serialized).not.toContain('"$id":"nested"');
+    expect(serialized).not.toContain('"$anchor":"root"');
   });
 
   it("keeps legitimate $defs and document-root references as passthrough", async () => {
@@ -1832,6 +1879,18 @@ describe("reference resolution hazards", () => {
     inherited.properties = { value: { $ref: "#/hidden" } };
 
     expect(findSchemaHazard(inherited)).toBe("unresolvable-ref");
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])("rejects the dangerous pointer token %s like TypeBox", (token) => {
+    const definitions = Object.create(null) as Record<string, unknown>;
+    definitions[token] = { type: "string" };
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: definitions,
+        properties: { value: { $ref: `#/$defs/${token}` } },
+      }),
+    ).toBe("unresolvable-ref");
   });
 
   it("reports a reference cycle that object identity cannot see", () => {
