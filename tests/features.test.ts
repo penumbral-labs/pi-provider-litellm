@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LiteLLMModelPolicy } from "../src/types.js";
 import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
@@ -16,7 +17,7 @@ function jsonResponse(status: number, body: unknown): Response {
 // `message_end` resolves the model that produced the message through the
 // registry, so display normalization reads the conclusion discovery persisted
 // instead of re-deriving a backend from the route name.
-function messageEndCtx(modelId: string, litellmPolicy?: Record<string, boolean>): unknown {
+function messageEndCtx(modelId: string, litellmPolicy?: Partial<LiteLLMModelPolicy>): unknown {
   return {
     modelRegistry: {
       find: (provider: string, id: string) =>
@@ -758,6 +759,7 @@ describe("feature parity", () => {
           provider: "litellm",
           id: "kimi-k3",
           litellmPolicy: {
+            normalizeStrictToolMessages: true,
             normalizeThinkTags: true,
             suppressReasoningVisibility: true,
           },
@@ -816,6 +818,7 @@ describe("feature parity", () => {
           provider: "litellm",
           id: "kimi-k3",
           litellmPolicy: {
+            normalizeStrictToolMessages: true,
             normalizeThinkTags: true,
             suppressReasoningVisibility: true,
           },
@@ -869,6 +872,7 @@ describe("feature parity", () => {
           provider: "litellm",
           id: "kimi-k3",
           litellmPolicy: {
+            normalizeStrictToolMessages: true,
             normalizeThinkTags: true,
             suppressReasoningVisibility: true,
           },
@@ -882,6 +886,36 @@ describe("feature parity", () => {
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
     });
+  });
+
+  it("leaves strict-schema tool messages untouched for a Moonshot-looking model without repair policy", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      {
+        payload: {
+          messages: [
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_1", type: "function", function: { name: "noop", arguments: "{}" } }],
+            },
+          ],
+        },
+      },
+      { model: { provider: "litellm", id: "kimi-k2.6" } },
+    );
+
+    expect(updated).toBeUndefined();
   });
 
   it("leaves strict-schema tool messages untouched for non-Moonshot models", async () => {
@@ -1094,7 +1128,18 @@ describe("feature parity", () => {
           reasoning: { effort: "HIGH", summary: "auto" },
         },
       },
-      { model: { provider: "litellm", id: "google/gemini-3.1-pro-preview" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "opaque-gemini-route",
+          litellmPolicy: {
+            normalizeStrictToolMessages: false,
+            normalizeThinkTags: false,
+            suppressReasoningVisibility: false,
+            normalizeGeminiReasoningEffort: true,
+          },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -1112,7 +1157,7 @@ describe("feature parity", () => {
             reasoning: { effort: "MAX_THINKING", summary: "auto" },
           },
         },
-        { model: { provider: "litellm", id: "custom/reasoner" } },
+        { model: { provider: "litellm", id: "google/gemini-3.1-pro-preview" } },
       ),
     ).toBeUndefined();
   });
@@ -1142,7 +1187,7 @@ describe("feature parity", () => {
     await extension(pi);
     await refreshProvider(pi);
     const discovered = pi.providers[0]?.getModels().find((model) => model.id === "kimi-k2.6") as
-      | { litellmPolicy?: Record<string, boolean> }
+      | { litellmPolicy?: LiteLLMModelPolicy }
       | undefined;
 
     let message: any = {
@@ -1152,12 +1197,15 @@ describe("feature parity", () => {
       content: [{ type: "text", text: "<think>internal reasoning</think>DONE" }],
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
-    for (const handler of pi.handlers.get("message_end") ?? []) {
+    const handlers = pi.handlers.get("message_end") ?? [];
+    expect(handlers.length).toBeGreaterThan(0);
+    for (const handler of handlers) {
       const result = await handler({ message }, messageEndCtx(message.model, discovered?.litellmPolicy));
       if (result?.message) message = result.message;
     }
 
     expect(discovered?.litellmPolicy).toEqual({
+      normalizeStrictToolMessages: false,
       normalizeThinkTags: true,
       suppressReasoningVisibility: false,
     });
@@ -1193,8 +1241,10 @@ describe("feature parity", () => {
       content: [{ type: "text", text: "<think>internal reasoning</think>DONE" }],
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
+    const handlers = pi.handlers.get("message_end") ?? [];
+    expect(handlers.length).toBeGreaterThan(0);
     const results = [];
-    for (const handler of pi.handlers.get("message_end") ?? []) {
+    for (const handler of handlers) {
       results.push(await handler({ message }, messageEndCtx(modelId, policy)));
     }
 
@@ -1233,10 +1283,13 @@ describe("feature parity", () => {
       content: [{ type: "text", text: "<think>DONE" }],
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
-    for (const handler of pi.handlers.get("message_end") ?? []) {
+    const handlers = pi.handlers.get("message_end") ?? [];
+    expect(handlers.length).toBeGreaterThan(0);
+    for (const handler of handlers) {
       const result = await handler(
         { message },
         messageEndCtx(message.model, {
+          normalizeStrictToolMessages: true,
           normalizeThinkTags: true,
           suppressReasoningVisibility: true,
         }),

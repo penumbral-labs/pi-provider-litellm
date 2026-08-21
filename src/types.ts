@@ -11,6 +11,9 @@ export type LiteLLMRuntimeAuth = {
 };
 
 export interface LiteLLMModelPolicy {
+  // Moonshot/Kimi's strict schema requires assistant tool calls to carry string
+  // content. Discovery enables this outbound rewrite only from deployment evidence.
+  normalizeStrictToolMessages: boolean;
   // Moonshot routes can inline reasoning as `<think>` text in the visible
   // answer. Whether to unwrap it is a per-model conclusion discovery reaches
   // from deployment evidence, carried here so the `message_end` hook does not
@@ -19,6 +22,9 @@ export interface LiteLLMModelPolicy {
   // Hide duplicate visible reasoning only for deployment-evidenced Kimi routes
   // that do not use an always-thinking generation.
   suppressReasoningVisibility: boolean;
+  // Gemini-backed deployments require lowercase effort values. Discovery carries
+  // this evidence so the request hook does not infer a backend from the route name.
+  normalizeGeminiReasoningEffort?: boolean;
 }
 
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {

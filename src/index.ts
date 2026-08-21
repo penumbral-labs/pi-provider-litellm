@@ -16,7 +16,7 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -857,8 +857,6 @@ const REASONING_REQUEST_KEYS = [
   ...Object.keys(REASONING_VISIBILITY_DEFAULTS),
   "thinking",
 ];
-const GEMINI_MODEL_PATTERN = /(?:^|[-_/.:])gemini(?=$|[-_/.:])/i;
-
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   modelId: string | undefined,
@@ -909,8 +907,9 @@ function prepareLiteLLMRequestPayload(
   }
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
-  // must carry string content, and tool results must be plain text.
-  if (openAIApi === "openai-completions" && modelId && isMoonshotModel(modelId)) {
+  // must carry string content, and tool results must be plain text. This outbound
+  // rewrite requires the deployment-backed policy; route text is not evidence.
+  if (openAIApi === "openai-completions" && modelPolicy?.normalizeStrictToolMessages) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -923,8 +922,7 @@ function prepareLiteLLMRequestPayload(
 
   if (
     (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
-    modelId &&
-    GEMINI_MODEL_PATTERN.test(modelId)
+    modelPolicy?.normalizeGeminiReasoningEffort
   ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {

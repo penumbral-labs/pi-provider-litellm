@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_TOKENS,
   isResponsesMode,
   reduceModelGroup,
+  type SemanticFamily,
   type SemanticModel,
   wireString,
 } from "./model-groups.js";
@@ -59,25 +60,46 @@ export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
 }
 
-// Route-only fallback can preserve display normalization, but it cannot authorize
-// request-side reasoning suppression. Deployment-backed models carry that
-// conclusion separately in `suppressReasoningVisibility`.
-export function moonshotPolicy(modelId: string): LiteLLMModelPolicy {
+// Response-only normalization is safe with route-name evidence, but outbound
+// strict-tool repair is not. Fresh discovery enables that repair only when every
+// routable deployment identifies Moonshot/Kimi.
+export function moonshotPolicy(modelId: string, strictToolRepair = false): LiteLLMModelPolicy {
   return {
-    // Route-only fallback may retain the legacy display repair, but it cannot
-    // authorize request-side reasoning suppression. Deployment-backed callers
-    // use requestPolicy below to persist that separate conclusion.
+    normalizeStrictToolMessages: strictToolRepair,
     normalizeThinkTags: !FORCED_THINKING_MODEL_PATTERN.test(modelId),
+    // Route-only fallback cannot authorize request-side reasoning suppression.
     suppressReasoningVisibility: false,
   };
 }
 
-function reasoningDisplayPolicy(suppressReasoningVisibility: boolean): LiteLLMModelPolicy | undefined {
-  if (!suppressReasoningVisibility) return undefined;
-  return {
-    normalizeThinkTags: true,
-    suppressReasoningVisibility: true,
-  };
+function requestPolicy(
+  modelId: string,
+  deploymentFamilies: readonly (SemanticFamily | undefined)[],
+  suppressReasoningVisibility: boolean,
+  strictToolRepair: boolean,
+): LiteLLMModelPolicy | undefined {
+  const evidenced = deploymentFamilies.filter((family): family is SemanticFamily => family !== undefined);
+  if (
+    evidenced.length > 0 &&
+    evidenced.length === deploymentFamilies.length &&
+    evidenced.every((family) => family === "gemini")
+  ) {
+    return {
+      normalizeStrictToolMessages: false,
+      normalizeThinkTags: false,
+      suppressReasoningVisibility: false,
+      normalizeGeminiReasoningEffort: true,
+    };
+  }
+  if (evidenced.includes("kimi")) {
+    return {
+      normalizeStrictToolMessages: strictToolRepair,
+      normalizeThinkTags: suppressReasoningVisibility,
+      suppressReasoningVisibility,
+    };
+  }
+  if (evidenced.length === 0 && isMoonshotModel(modelId)) return moonshotPolicy(modelId);
+  return undefined;
 }
 
 export function buildCompat(modelId: string): DiscoveredModel["compat"] {
@@ -244,6 +266,16 @@ function semanticModel(id: string): SemanticModel | undefined {
   return undefined;
 }
 
+function semanticFamily(id: string): SemanticFamily | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
+  if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
+  if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
+  if (/(?:^|[./_-])(?:openai|gpt|o\d)(?:$|[./_:-])/.test(value)) return "openai";
+  return undefined;
+}
+
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
   azure: "azure-openai-responses",
@@ -274,6 +306,8 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
   const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
+  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
+  const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
   // Two recognized generations are contradictory: applying one deployment
   // contract to the other would send the wrong control, so withhold both.
   const routingGeneration = routingModel ? semanticModel(routingModel) : undefined;
@@ -281,6 +315,11 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const contradictoryGenerations =
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
   const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
+  const adapterFamily = semanticFamily(wireString(entry.model_info?.litellm_provider)?.trim() ?? "");
+  const families = [routingFamily, baseFamily, adapterFamily].filter(
+    (family): family is SemanticFamily => family !== undefined,
+  );
+  const resolvedFamily = new Set(families).size > 1 ? "conflicting" : families[0];
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   const resolutions = candidates
     .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
@@ -294,9 +333,15 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   if (evidenceProviders.size > 1) return undefined;
   const resolved = resolutions[0];
   if (resolved) {
-    return { ...catalogResolution(resolved.provider, resolved.model), ...(model ? { semanticModel: model } : {}) };
+    return {
+      ...catalogResolution(resolved.provider, resolved.model),
+      ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}),
+      ...(model ? { semanticModel: model } : {}),
+    };
   }
-  return model ? { semanticModel: model } : undefined;
+  return resolvedFamily || model
+    ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
+    : undefined;
 }
 
 async function fetchJson<T>(
@@ -320,18 +365,50 @@ const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
 
 // Keyed by route so persistent ambiguity is reported once per process while a
 // newly observed route still receives a bounded diagnostic.
+function reportBoundedRoutes(
+  reported: Set<string>,
+  routes: readonly string[],
+  describe: (count: number) => string,
+): void {
+  const unreported = [...new Set(routes)].filter((route) => !reported.has(route));
+  if (unreported.length === 0) return;
+  for (const route of unreported) reported.add(route);
+  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
+  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
+  process.stderr.write(`${describe(unreported.length)}: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`);
+}
+
 const reportedAmbiguousRoutes = new Set<string>();
 
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
-  const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
-  if (unreported.length === 0) return;
-  for (const route of unreported) reportedAmbiguousRoutes.add(route);
-  const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
-  const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
-  process.stderr.write(
-    `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
-      `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
-      `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
+  reportBoundedRoutes(
+    reportedAmbiguousRoutes,
+    routes,
+    (count) =>
+      `LiteLLM discovery: ${count} route group(s) have missing or conflicting deployment provider evidence; ` +
+      "catalog limits, pricing, and reasoning metadata are withheld",
+  );
+}
+
+const reportedWithheldRepairRoutes = new Set<string>();
+
+function reportWithheldToolRepair(routes: readonly string[]): void {
+  reportBoundedRoutes(
+    reportedWithheldRepairRoutes,
+    routes,
+    (count) =>
+      `LiteLLM discovery: ${count} route group(s) look Moonshot-backed but not every deployment evidences it; ` +
+      "strict tool-message repair is withheld because it rewrites outbound messages and is unproven for a " +
+      "deployment that has not identified its backend. Moonshot tool calls on these routes may fail until every " +
+      "deployment declares its backend",
+  );
+}
+
+function reportWithheldToolRepairForModels(models: readonly DiscoveredModel[]): void {
+  reportWithheldToolRepair(
+    models
+      .filter((model) => isMoonshotModel(model.id) && model.litellmPolicy?.normalizeStrictToolMessages === false)
+      .map((model) => model.id),
   );
 }
 
@@ -344,6 +421,7 @@ function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
+  withheldRepairRoutes?: string[],
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
@@ -371,10 +449,17 @@ function mapFromModelInfoGroup(
     catalogLevels: reduced.thinkingLevelMap,
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
   });
-  const routeOnlyMoonshot = entries.every((entry) => !hasReadableBackendEvidence(entry)) && isMoonshotModel(reduced.id);
-  const modelPolicy =
-    reasoningDisplayPolicy(reduced.suppressReasoningVisibility) ??
-    (routeOnlyMoonshot ? moonshotPolicy(reduced.id) : undefined);
+  const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
+  const unanimousMoonshot =
+    reduced.deploymentFamilies.length > 0 && reduced.deploymentFamilies.every((family) => family === "kimi");
+  const moonshotEvidence = reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id));
+  if (moonshotEvidence && !unanimousMoonshot) withheldRepairRoutes?.push(reduced.id);
+  const modelPolicy = requestPolicy(
+    reduced.id,
+    reduced.deploymentFamilies,
+    reduced.suppressReasoningVisibility,
+    unanimousMoonshot,
+  );
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
@@ -413,7 +498,7 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // text, which is not evidence for request controls. Deleting the map would hand
   // pi-ai an absent map, i.e. every standard level, so the conclusion is closed
   // again with no candidate levels rather than mutated in place.
-  if (entry.model_name) return model;
+  if (wireString(entry.model_name)) return model;
   return {
     ...model,
     ...closeSerializerPolicy({
@@ -492,20 +577,24 @@ async function discoverFromHealth(
   // PRD names that a non-goal; see the `/health` notes in AGENTS.md and README.md.
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
-  const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
+  const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) =>
+    Boolean(wireString(entry.model)?.trim() || wireString(entry.model_id)?.trim()),
+  );
   progress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
   let completed = 0;
   const models = await Promise.all(
     endpoints.map(async (endpoint) => {
-      let model = mapFromHealthEndpoint(endpoint);
-      if (endpoint.model_id) {
+      const route = wireString(endpoint.model);
+      const deploymentId = wireString(endpoint.model_id);
+      let model = mapFromHealthEndpoint({ model: route });
+      if (deploymentId) {
         const infoResult = await fetchJson<ModelInfoResponse>(
-          `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id)}`,
+          `${base}/model/info?litellm_model_id=${encodeURIComponent(deploymentId)}`,
           apiKey,
           options,
         );
         const entry = infoResult.ok ? infoResult.data.data?.[0] : undefined;
-        if (entry) model = mapFromHealthModelInfo(entry, endpoint.model);
+        if (entry) model = mapFromHealthModelInfo(entry, route);
       }
       completed++;
       if (completed % 10 === 0 || completed === endpoints.length) {
@@ -514,7 +603,9 @@ async function discoverFromHealth(
       return model;
     }),
   );
-  return models.filter((model): model is DiscoveredModel => model !== undefined);
+  const discovered = models.filter((model): model is DiscoveredModel => model !== undefined);
+  reportWithheldToolRepairForModels(discovered);
+  return discovered;
 }
 
 function deduplicateModels(models: DiscoveredModel[]): DiscoveredModel[] {
@@ -545,10 +636,12 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const ambiguousRoutes: string[] = [];
+    const withheldRepairRoutes: string[] = [];
     let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
+      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes, withheldRepairRoutes))
       .filter((m): m is DiscoveredModel => m !== undefined);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
+    reportWithheldToolRepair(withheldRepairRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in
@@ -570,7 +663,9 @@ export async function discoverModels(
         models = [...models, ...expanded.filter((m) => !seen.has(m.id))];
       }
     }
-    return { source: "model_info", models: deduplicateModels(models) };
+    const deduplicated = deduplicateModels(models);
+    reportWithheldToolRepairForModels(deduplicated);
+    return { source: "model_info", models: deduplicated };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
@@ -588,5 +683,7 @@ export async function discoverModels(
   const models = (listResult.data.data ?? [])
     .map(mapFromModelsList)
     .filter((m): m is DiscoveredModel => m !== undefined);
-  return { source: "models_list", models: deduplicateModels(models) };
+  const deduplicated = deduplicateModels(models);
+  reportWithheldToolRepairForModels(deduplicated);
+  return { source: "models_list", models: deduplicated };
 }

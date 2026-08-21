@@ -4,7 +4,12 @@ import type { DiscoveredModel, ModelInfoEntry } from "./types.js";
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
+export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" | "kimi-k3";
+
+// Contradictory or partial deployment-family evidence must not decay into "no
+// evidence", which would allow route-name inference to re-enter later.
+export type FamilyEvidence = SemanticFamily | "conflicting";
 
 type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
 
@@ -19,6 +24,7 @@ export interface ReasoningPolicy {
 
 export interface CatalogResolution {
   provider?: string;
+  semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
@@ -45,10 +51,14 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
+  semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
+  // One entry per routable deployment. Undefined means that deployment supplied
+  // no usable family evidence; callers use this to gate outbound rewrites.
+  deploymentFamilies: (SemanticFamily | undefined)[];
   suppressReasoningVisibility: boolean;
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
@@ -471,6 +481,15 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
 }
 
+function reduceFamilyEvidence(values: readonly (FamilyEvidence | undefined)[]): FamilyEvidence | undefined {
+  const declared = values.filter((value): value is FamilyEvidence => value !== undefined);
+  if (declared.length === 0) return undefined;
+  if (declared.length !== values.length) return "conflicting";
+  const distinct = new Set(declared);
+  if (distinct.has("conflicting") || distinct.size > 1) return "conflicting";
+  return declared[0];
+}
+
 export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
@@ -488,6 +507,7 @@ export function reduceModelGroup(
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
+  const semanticFamily = reduceFamilyEvidence(catalogs.map((catalog) => catalog?.semanticFamily));
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
@@ -558,8 +578,12 @@ export function reduceModelGroup(
     cost,
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
+    ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
+    deploymentFamilies: catalogs.map((catalog) =>
+      catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,
+    ),
     suppressReasoningVisibility: deployments.some((entry) => {
       const backend =
         wireString(entry.litellm_params?.model)?.trim() || wireString(entry.model_info?.base_model)?.trim();

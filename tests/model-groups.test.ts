@@ -152,7 +152,15 @@ describe("toResponsesLevels", () => {
       xhigh: null,
       max: null,
     });
-    expect(responses.thinkingLevelMap).toEqual(chat.thinkingLevelMap);
+    expect(responses.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
   });
 
   it("denies Responses levels until reasoning_effort acceptance is evidenced", () => {
@@ -204,6 +212,7 @@ describe("reduceModelGroup", () => {
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
       catalogAuthorityAmbiguous: true,
+      deploymentFamilies: [undefined, undefined, undefined, undefined],
       suppressReasoningVisibility: false,
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },

@@ -137,6 +137,7 @@ describe("buildCompat", () => {
 describe("moonshotPolicy", () => {
   it("keeps request suppression disabled for route-name-only fallback evidence", () => {
     expect(moonshotPolicy("kimi-k2.6")).toEqual({
+      normalizeStrictToolMessages: false,
       normalizeThinkTags: true,
       suppressReasoningVisibility: false,
     });
@@ -144,6 +145,7 @@ describe("moonshotPolicy", () => {
 
   it("preserves always-thinking output and visibility behavior", () => {
     expect(moonshotPolicy("kimi-k2-thinking")).toEqual({
+      normalizeStrictToolMessages: false,
       normalizeThinkTags: false,
       suppressReasoningVisibility: false,
     });
@@ -410,6 +412,7 @@ describe("discoverModels via /model/info", () => {
 
   it.each([
     ["moonshot", "moonshot/kimi-k2.6"],
+    ["gemini", "gemini/gemini-3.1-pro-preview"],
     ["xai", "xai/grok-4.5"],
   ])("maps the %s adapter conservatively to its catalog", async (adapter, backend) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -431,6 +434,52 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.contextWindow).toBeGreaterThan(128_000);
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
     expect(result.models[0]?.id).toBe(`${adapter}-route`);
+    if (adapter === "gemini") {
+      expect(result.models[0]?.litellmPolicy?.normalizeGeminiReasoningEffort).toBe(true);
+    }
+  });
+
+  it("derives Gemini normalization from adapter evidence for an opaque route", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "internal/prod-route",
+              litellm_params: { model: "internal/opaque" },
+              model_info: { id: "a", mode: "chat", litellm_provider: "gemini" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy?.normalizeGeminiReasoningEffort).toBe(true);
+  });
+
+  it("withholds Gemini normalization when deployment family evidence is mixed", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "gemini-looking-route",
+              litellm_params: { model: "gemini/gemini-3.1-pro-preview" },
+              model_info: { id: "a", mode: "chat", litellm_provider: "gemini" },
+            },
+            {
+              model_name: "gemini-looking-route",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "b", mode: "chat", litellm_provider: "openai" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy).toBeUndefined();
   });
 
   it("trims backend candidates before catalog resolution", async () => {
@@ -540,7 +589,7 @@ describe("discoverModels via /model/info", () => {
         litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
         model_info: { mode: "chat", litellm_provider: "azure_ai" },
       }),
-    ).toEqual({ semanticModel: "deepseek-v4" });
+    ).toEqual({ semanticFamily: "deepseek", semanticModel: "deepseek-v4" });
 
     mockEndpoints({
       "/model/info": () =>
@@ -696,6 +745,40 @@ describe("discoverModels via /model/info", () => {
         maxTokens: 4_000,
       });
     }
+  });
+
+  it("withholds strict tool repair for partial Moonshot evidence and reports the route", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "mixed-tool-route",
+              litellm_params: { model: "moonshot/kimi-k2.6" },
+              model_info: { id: "a", mode: "chat" },
+            },
+            {
+              model_name: "mixed-tool-route",
+              litellm_params: { model: "internal/opaque" },
+              model_info: { id: "b", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy).toMatchObject({
+      normalizeStrictToolMessages: false,
+      normalizeThinkTags: true,
+    });
+    expect(writes.filter((line) => line.includes("strict tool-message repair is withheld"))).toHaveLength(1);
+    expect(writes.join("\n")).toContain("mixed-tool-route");
   });
 
   it("keeps an ambiguous group with complete router pricing unsuffixed and reports withheld authority", async () => {
@@ -972,7 +1055,11 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      litellmPolicy: { normalizeThinkTags: true, suppressReasoningVisibility: false },
+      litellmPolicy: {
+        normalizeStrictToolMessages: false,
+        normalizeThinkTags: true,
+        suppressReasoningVisibility: false,
+      },
     });
     expect(result.models[0]?.reasoning).toBe(false);
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");

@@ -10,13 +10,27 @@ import {
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
+const NO_LEVELS = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: null,
+  xhigh: null,
+  max: null,
+};
+
 describe("native provider stream compatibility", () => {
   it("completes two text turns with usage", async () => {
-    const { models, model, respond } = await createCompatibilityHarness();
+    const { models, model, requests, respond } = await createCompatibilityHarness();
     const context: Context = { messages: [user("First")] };
     respond(
       sseChunk({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
       sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } }),
+    );
+    respond(
+      sseChunk({ choices: [{ delta: { content: "Again" }, finish_reason: null }] }),
+      sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 1 } }),
     );
 
     const first = await models.streamSimple(model, context).result();
@@ -25,14 +39,12 @@ describe("native provider stream compatibility", () => {
     expect(first.usage.output).toBeGreaterThan(0);
 
     context.messages.push(first, user("Second"));
-    respond(
-      sseChunk({ choices: [{ delta: { content: "Again" }, finish_reason: null }] }),
-      sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 1 } }),
-    );
     const second = await models.streamSimple(model, context).result();
+    expect(second.stopReason).toBe("stop");
     expect(second.content).toEqual([{ type: "text", text: "Again" }]);
     expect(second.usage.input).toBeGreaterThan(0);
     expect(second.usage.output).toBeGreaterThan(0);
+    expect(requests).toHaveLength(2);
   });
 
   it("emits text start, delta, and end events", async () => {
@@ -273,6 +285,79 @@ describe("native provider stream compatibility", () => {
   });
 
   // Strict tool-message repair rewrites outbound messages, so it is applied only
+  // when every routable deployment evidences the Moonshot need.
+  it.each([
+    {
+      source: "route text only",
+      rows: [{ model_name: "kimi-k3", model_info: { mode: "chat" } }],
+      repaired: false,
+    },
+    {
+      source: "a Moonshot deployment beside an unidentified one",
+      rows: [
+        { model_name: "mixed", litellm_params: { model: "moonshot/kimi-k2.6" }, model_info: { id: "a", mode: "chat" } },
+        { model_name: "mixed", litellm_params: { model: "internal/opaque" }, model_info: { id: "b", mode: "chat" } },
+      ],
+      repaired: false,
+    },
+    {
+      source: "every deployment evidencing Moonshot",
+      rows: [
+        {
+          model_name: "unanimous",
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+          model_info: { id: "a", mode: "chat" },
+        },
+        {
+          model_name: "unanimous",
+          litellm_params: { model: "moonshot/kimi-k3" },
+          model_info: { id: "b", mode: "chat" },
+        },
+      ],
+      repaired: true,
+    },
+  ])("repairs strict tool messages only with $source", async ({ rows, repaired }) => {
+    const { models, model, requests, respond } = await createCompatibilityHarness(rows);
+    respond(...successfulResponse("ok"));
+
+    await models
+      .streamSimple(model, {
+        messages: [
+          user("Call a tool"),
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "call_1", name: "lookup", arguments: {} }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "result" }],
+            isError: false,
+            timestamp: 3,
+          },
+        ],
+      })
+      .result();
+
+    expect(model).toMatchObject({ litellmPolicy: { normalizeStrictToolMessages: repaired } });
+    const assistant = requests[0]?.messages?.find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe(repaired ? "" : null);
+  });
+
   it.each([
     { name: "Kimi K3", backend: "moonshot/kimi-k3", params: ["reasoning_effort"] },
     { name: "Kimi K2.7 Code", backend: "moonshot/kimi-k2.7-code", params: ["thinking"] },
@@ -346,13 +431,19 @@ describe("native provider stream compatibility", () => {
     ];
     const online = await createCompatibilityHarness(rows, { modelsStore });
     online.respond(...successfulResponse("online"));
-    await online.models.streamSimple(online.model, { messages: [user("Think")] }, { reasoning: "max" }).result();
+    const onlineMessage = await online.models
+      .streamSimple(online.model, { messages: [user("Think")] }, { reasoning: "max" })
+      .result();
+    expect(onlineMessage.stopReason).toBe("stop");
 
     vi.restoreAllMocks();
     vi.resetModules();
     const offline = await createCompatibilityHarness(rows, { modelsStore, allowNetwork: false });
     offline.respond(...successfulResponse("offline"));
-    await offline.models.streamSimple(offline.model, { messages: [user("Think")] }, { reasoning: "max" }).result();
+    const offlineMessage = await offline.models
+      .streamSimple(offline.model, { messages: [user("Think")] }, { reasoning: "max" })
+      .result();
+    expect(offlineMessage.stopReason).toBe("stop");
 
     expect(offline.model).toEqual(online.model);
     expect(offline.requests[0]).toEqual(online.requests[0]);
@@ -394,7 +485,9 @@ describe("native provider stream compatibility", () => {
     );
     const second = await models.streamSimple(model, context).result();
 
+    expect(second.stopReason).toBe("stop");
     expect(second.content).toContainEqual({ type: "text", text: "887" });
+    expect(requests).toHaveLength(2);
     expect(requests.at(-1)?.messages).toContainEqual(expect.objectContaining({ role: "tool", content: "887" }));
   });
 
@@ -486,7 +579,7 @@ describe("advertised thinking levels are transmissible", () => {
         await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
         expect(requests.at(-1)).not.toHaveProperty("reasoning_effort");
         expect(requests.at(-1)).not.toHaveProperty("thinking");
-        expect(model.reasoning ? model.thinkingLevelMap : {}).toBeDefined();
+        if (model.reasoning) expect(model.thinkingLevelMap).toEqual(NO_LEVELS);
       }
     },
   );
@@ -556,10 +649,10 @@ describe("advertised levels serialize on both APIs", () => {
       }
     }
 
-    if (offered.length === 0) {
+    if (offered.length === 0 && model.reasoning) {
       // The no-level conclusion must be explicit; an absent map means every
       // standard level upstream.
-      expect(model.reasoning ? model.thinkingLevelMap : {}).toBeDefined();
+      expect(model.thinkingLevelMap).toEqual(NO_LEVELS);
     }
   });
 });
