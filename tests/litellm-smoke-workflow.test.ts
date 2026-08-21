@@ -234,12 +234,16 @@ describe("LiteLLM smoke workflow", () => {
     expect(enterpriseStep).toContain("run: npx tsx scripts/smoke-auth.ts");
   });
 
-  it("uses minimal permissions and a pinned, checksum-verified VidaiMock build", () => {
+  it("uses minimal permissions and a repository-pinned VidaiMock checksum", () => {
     const workflow = readWorkflow();
 
     expect(workflow).toMatch(/permissions:\n {2}contents: read/);
     expect(workflow).toMatch(/VIDAIMOCK_VERSION: v\d+\.\d+\.\d+$/m);
-    expect(workflow).toMatch(/sha256sum -c "\$\{asset%\.tar\.gz\}\.sha256"/);
+    expect(workflow).toMatch(/VIDAIMOCK_LINUX_X64_SHA256: [a-f0-9]{64}$/m);
+    expect(workflow).toMatch(
+      /echo "\$\{VIDAIMOCK_LINUX_X64_SHA256\} {2}\$\{asset\}" \| \(cd \.tmp && sha256sum -c -\)/,
+    );
+    expect(workflow).not.toMatch(/\$\{asset%\.tar\.gz\}\.sha256/);
   });
 
   it("preserves the workflow environment in the terminal smoke", () => {

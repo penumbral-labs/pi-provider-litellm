@@ -45,6 +45,7 @@ jobs:
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
       VIDAIMOCK_VERSION: v0.2.7
+      VIDAIMOCK_LINUX_X64_SHA256: 3095dd2794b6bd3623057beb1c7def22ae366b85121acb72b3c92a54f79eb7fe
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,10 +68,7 @@ jobs:
           curl -fsSL \
             "https://github.com/vidaiUK/VidaiMock/releases/download/${VIDAIMOCK_VERSION}/${asset}" \
             -o ".tmp/${asset}"
-          curl -fsSL \
-            "https://github.com/vidaiUK/VidaiMock/releases/download/${VIDAIMOCK_VERSION}/${asset%.tar.gz}.sha256" \
-            -o ".tmp/${asset%.tar.gz}.sha256"
-          (cd .tmp && sha256sum -c "${asset%.tar.gz}.sha256")
+          echo "${VIDAIMOCK_LINUX_X64_SHA256}  ${asset}" | (cd .tmp && sha256sum -c -)
           tar -xzf ".tmp/${asset}" -C .tmp
           install -m 0755 .tmp/vidaimock/vidaimock .tmp/bin/vidaimock
           .tmp/bin/vidaimock --version
