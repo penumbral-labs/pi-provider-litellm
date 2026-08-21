@@ -296,10 +296,11 @@ describe("pi package compatibility", () => {
     expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.84.2");
   });
 
-  it("documents native Provider model persistence", async () => {
+  it("documents native Provider model persistence and the extension-only package surface", async () => {
     const readme = await readFile(join(repoRoot, "README.md"), "utf8");
 
     expect(readme).toContain("Pi 0.81.0+ is required");
+    expect(readme).toMatch(/no\s+longer exposes that library import/);
     expect(readme).toContain("native Provider");
     expect(readme).toContain("run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`");
     expect(readme).toContain("With `/login litellm`, choose `Sign in with an API key` directly");

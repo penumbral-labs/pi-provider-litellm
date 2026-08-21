@@ -7,7 +7,7 @@ import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
-useHermeticEnv(["PI_OFFLINE"]);
+useHermeticEnv();
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

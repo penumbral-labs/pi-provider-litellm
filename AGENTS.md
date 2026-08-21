@@ -44,8 +44,7 @@
 
 ## Smoke And CI
 
-- CI runs `npm ci` and `npm run prepublishOnly`.
-- The release workflow invokes `npm run prepublishOnly` explicitly before `npm publish`, so the publish gate still runs when npm lifecycle scripts are disabled.
+- CI runs `npm ci` and `npm run prepublishOnly`; release relies on `npm publish` invoking `prepublishOnly`.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.

@@ -28,6 +28,8 @@ git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extens
 Pi loads the TypeScript source entrypoint declared in `package.json` `pi.extensions`, so a source install needs no
 build step and no `node_modules`. Install dependencies only to run the test suite or the local checks.
 
+Version 2.2.0 was also importable as `pi-provider-litellm` from JavaScript or TypeScript. The source-only package no longer exposes that library import; it is supported only as a Pi extension.
+
 </details>
 
 ## Configure
@@ -216,11 +218,11 @@ npm run supply-chain:guard
 npm pack --dry-run
 ```
 
-The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs.
+The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs. The package does not expose a JavaScript or TypeScript library import; load it through Pi.
 
 ## Release
 
-Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, runs the checks, builds `dist`, verifies the package tarball, publishes to npm with provenance, and creates a GitHub release.
+Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, then `npm publish` runs `prepublishOnly` to check the source, build `dist` for verification, verify the package contents, and publish to npm with provenance before the workflow creates a GitHub release.
 
 Before tagging a release, keep `package.json` and `package-lock.json` versions in sync and verify the dry-run package contents.
 
