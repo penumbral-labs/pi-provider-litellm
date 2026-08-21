@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
@@ -10,11 +10,20 @@ vi.unmock("@earendil-works/pi-coding-agent");
 const ENV_KEYS = [
   "LITELLM_BASE_URL",
   "LITELLM_API_KEY",
+  "LITELLM_API_KEY_HELPER",
+  "LITELLM_HEADERS",
   "LITELLM_OFFLINE",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
+  "LITELLM_VERBOSE_DISCOVERY",
+  "LITELLM_GCLOUD_TOKEN_AUTH",
+  "GOOGLE_APPLICATION_CREDENTIALS",
   "PI_OFFLINE",
 ];
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
+});
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
