@@ -24,9 +24,6 @@ export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => Cat
 
 export interface ReducedModelGroup {
   id: string;
-  // Reported for downstream request-policy consumers; discovery currently uses
-  // the same count only while deciding whether route text is a catalog hint.
-  deploymentCount: number;
   api: "openai-completions" | "openai-responses";
   reasoning: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
@@ -36,20 +33,23 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
-  // Reported for downstream request-policy consumers; discovery projects the
-  // already-reduced capabilities rather than the family label itself.
-  semanticFamily?: SemanticFamily;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
-  // Reported for downstream request-policy consumers; discovery does not yet
-  // project the parameter intersection into the Pi model.
-  acceptedOpenAIParams: string[];
 }
 
 const RESPONSES_MODE_PATTERN = /^responses?$/i;
 const CHAT_STYLE_MODE_PATTERN = /^chat$/i;
 const COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+const REASONING_EFFORT_FLAGS = [
+  ["off", "none", "supports_none_reasoning_effort"],
+  ["minimal", "minimal", "supports_minimal_reasoning_effort"],
+  ["low", "low", "supports_low_reasoning_effort"],
+  ["medium", "medium", "supports_medium_reasoning_effort"],
+  ["high", "high", "supports_high_reasoning_effort"],
+  ["xhigh", "xhigh", "supports_xhigh_reasoning_effort"],
+  ["max", "max", "supports_max_reasoning_effort"],
+] as const;
 type CostField = (typeof COST_FIELDS)[number];
 
 // `/model/info` is parsed JSON from operator-authored proxy config, so a field
@@ -138,22 +138,17 @@ function explicitLimit(value: number | undefined): number | undefined {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? undefined : value;
 }
 
-function normalizeParams(params: unknown): Set<string> {
-  if (!Array.isArray(params)) return new Set();
-  const named = params.map((param) => wireString(param)?.trim()).filter((param) => Boolean(param));
-  return new Set(named as string[]);
-}
-
-function acceptedParams(entry: ModelInfoEntry): Set<string> {
-  const params = normalizeParams(entry.model_info?.supported_openai_params);
-  for (const param of normalizeParams(entry.litellm_params?.allowed_openai_params)) params.add(param);
-  return params;
-}
-
-function intersectParams(entries: readonly ModelInfoEntry[]): string[] {
-  const [first, ...rest] = entries.map(acceptedParams);
-  if (!first) return [];
-  return [...first].filter((param) => rest.every((params) => params.has(param))).sort();
+function routerThinkingLevelMap(entries: readonly ModelInfoEntry[]): DiscoveredModel["thinkingLevelMap"] {
+  const map: NonNullable<DiscoveredModel["thinkingLevelMap"]> = {};
+  for (const [level, effort, flag] of REASONING_EFFORT_FLAGS) {
+    const reported = entries.map((entry) => entry.model_info?.[flag]);
+    if (!reported.some((value) => value !== undefined)) continue;
+    // Preserve upstream singleton behavior (including explicit false), while a
+    // group advertises a router-reported effort only when every deployment says
+    // true. Missing, false, or unreadable evidence suppresses that level.
+    map[level] = reported.every((value) => wireBoolean(value) === true) ? effort : null;
+  }
+  return Object.keys(map).length > 0 ? map : undefined;
 }
 
 function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefined {
@@ -206,7 +201,6 @@ export function reduceModelGroup(
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
-  const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
@@ -248,28 +242,29 @@ export function reduceModelGroup(
     const tiers = unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.cost?.tiers)));
     if (tiers) cost.tiers = JSON.parse(tiers);
   }
-  const thinkingLevelMap = catalogProvider
+  const catalogThinkingLevelMap = catalogProvider
     ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
     : undefined;
+  const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
+  const routerMap = routerThinkingLevelMap(deployments);
+  const thinkingLevelMap =
+    parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
 
   return {
     id,
-    deploymentCount: deployments.length,
     api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,
-    ...(thinkingLevelMap ? { thinkingLevelMap: JSON.parse(thinkingLevelMap) } : {}),
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     vision,
     contextWindow,
     maxTokens,
     cost,
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
-    ...(semanticFamily ? { semanticFamily } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
-    acceptedOpenAIParams: intersectParams(deployments),
   };
 }
 

@@ -145,21 +145,17 @@ jobs:
             - model_name: grouped-vidaimock
               model_info:
                 mode: chat
-                supported_openai_params: [temperature, reasoning_effort]
               litellm_params:
                 model: openai/gpt-4o-mini
                 api_base: http://host.docker.internal:8100/v1
                 api_key: sk-vidaimock
-                allowed_openai_params: [reasoning_effort]
             - model_name: grouped-vidaimock
               model_info:
                 mode: responses
-                supported_openai_params: [temperature, thinking]
               litellm_params:
                 model: anthropic/claude-3-5-sonnet
                 api_base: http://host.docker.internal:8100
                 api_key: sk-vidaimock
-                allowed_openai_params: [thinking, reasoning_effort]
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
           YAML
@@ -218,14 +214,8 @@ jobs:
           assert(Array.isArray(payload.data), "/model/info response has no data array");
           const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
           assert(rows.length === 2, `expected two grouped deployments, received ${rows.length}`);
-          const accepted = (row) => [
-            ...new Set([
-              ...(row.model_info?.supported_openai_params ?? []),
-              ...(row.litellm_params?.allowed_openai_params ?? []),
-            ]),
-          ].sort();
           const summary = rows
-            .map((row) => ({ id: row.model_info?.id, mode: row.model_info?.mode, accepted: accepted(row) }))
+            .map((row) => ({ id: row.model_info?.id, mode: row.model_info?.mode }))
             .sort((left, right) => String(left.mode).localeCompare(String(right.mode)));
           console.log(JSON.stringify(summary, null, 2));
           for (const row of summary) assert(row.id, "grouped deployment is missing model_info.id");
@@ -233,14 +223,6 @@ jobs:
             summary.map((row) => row.mode).join(",") === "chat,responses",
             `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
           );
-          const has = (row, ...params) => params.every((param) => row.accepted.includes(param));
-          assert(has(summary[0], "temperature", "reasoning_effort"), `chat row lost declared params: ${summary[0].accepted}`);
-          assert(has(summary[1], "temperature", "thinking"), `responses row lost declared params: ${summary[1].accepted}`);
-          assert(
-            summary[0].accepted.join(",") !== summary[1].accepted.join(","),
-            "the two deployments must remain asymmetric for this fixture to exercise intersection",
-          );
-
           const { pathToFileURL } = await import("node:url");
           const { discoverModels } = await import(pathToFileURL("dist/discover.js").href);
           const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY);
