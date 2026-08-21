@@ -282,15 +282,10 @@ export function closeSerializerPolicy(input: {
 }): SerializerPolicy {
   const { api, reasoning, vendorCompat, semanticCompat, semanticLevels, catalogLevels, denyLevels } = input;
   if (api === "openai-responses") {
-    // Chat compat fields are not part of the Responses compat union, so only the
-    // shared request-shape fields travel. The vendor's explicit effort denial is
-    // still authoritative even though it cannot be copied into Responses compat:
-    // no level may be offered for that API when the backend rejected the carrier.
+    // Keep route-derived compatibility intact while translating only the
+    // reasoning selector into the Responses effort vocabulary.
+    const compat = vendorCompat;
     const shared = vendorCompat as OpenAICompat | undefined;
-    const compat: DiscoveredModel["compat"] = {
-      ...(shared?.supportsDeveloperRole === false ? { supportsDeveloperRole: false } : {}),
-      ...(shared?.supportsStrictMode === false ? { supportsStrictMode: false } : {}),
-    };
     if (!reasoning) return { reasoning, compat };
     if (denyLevels || shared?.supportsReasoningEffort === false) {
       return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };

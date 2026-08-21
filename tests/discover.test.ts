@@ -700,8 +700,11 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
     expect(result.models[0]?.compat).toEqual({
+      supportsStore: false,
       supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
       supportsStrictMode: false,
+      maxTokensField: "max_tokens",
     });
   });
 
@@ -716,7 +719,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
-    expect(result.models[0]?.compat).toEqual({});
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
   });
 
   it.each([
