@@ -596,16 +596,47 @@ describe("discoverModels via /model/info", () => {
     expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
-  it("does not fall through a recognized adapter miss to a provider-qualified routing model", () => {
+  it.each([
+    ["routing model", "openai/gpt-4o", undefined],
+    ["base model", undefined, "openai/gpt-4o"],
+  ])("does not fall through a recognized adapter miss to a provider-qualified %s", (_field, model, baseModel) => {
     const resolved = resolveModelInfoCatalog({
       model_name: "contradictory-adapter",
-      litellm_params: { model: "openai/gpt-4o" },
-      model_info: { mode: "chat", litellm_provider: "anthropic" },
+      ...(model ? { litellm_params: { model } } : {}),
+      model_info: { mode: "chat", ...(baseModel ? { base_model: baseModel } : {}), litellm_provider: "anthropic" },
     });
 
     expect(resolved).toEqual({ semanticFamily: "openai" });
     expect(resolved).not.toHaveProperty("provider");
     expect(resolved).not.toHaveProperty("cost");
+  });
+
+  it("keeps recognized adapter conflicts incomplete through discovery", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "contradictory-adapter",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: { mode: "chat", litellm_provider: "openai" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "contradictory-adapter",
+      name: "contradictory-adapter (incomplete metadata)",
+      api: "openai-completions",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
   });
 
   it("withholds catalog authority when routing and base model families conflict", () => {

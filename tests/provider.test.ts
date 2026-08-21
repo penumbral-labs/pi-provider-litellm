@@ -229,6 +229,35 @@ describe("createLiteLLMProvider", () => {
     expect(placeholder.filterModels?.(models, credential)).toEqual([]);
   });
 
+  it("accepts equivalent cached roots after URL canonicalization", () => {
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "HTTPS://PROXY.EXAMPLE:443/team-a", [
+      baseModel,
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
+    ]);
+    const value = controller({ resolveCredentialRoot: () => "https://proxy.example/team-a" });
+
+    expect(value.filterModels?.(models, credential).map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
+      { api: "openai-completions", baseUrl: "https://proxy.example/team-a/v1" },
+      { api: "anthropic-messages", baseUrl: "https://proxy.example/team-a" },
+    ]);
+    expect(() => value.stream(models[0], { messages: [] })).not.toThrow();
+    expect(apiSpies.completions).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "https://proxy.example/team-a/v1" }),
+      { messages: [] },
+      undefined,
+    );
+  });
+
+  it("keeps proxy-root paths case-sensitive", () => {
+    const models = toNativeModels("litellm", "https://gateway.example/Team-A", discovered("model").models);
+    const value = controller({ resolveCredentialRoot: () => "https://gateway.example/team-a" });
+
+    expect(value.filterModels?.(models, credential)).toEqual([]);
+    expect(() => value.stream(models[0], { messages: [] })).toThrow(/stale LiteLLM model root.*network refresh/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
   it("rejects cached models from another same-origin proxy prefix", () => {
     const baseModel = discovered("model").models[0];
     const models = toNativeModels("litellm", "https://gateway.example/team-a", [
@@ -298,7 +327,18 @@ describe("createLiteLLMProvider", () => {
     const model = { ...native("invalid-url"), baseUrl: "not a URL" };
     const value = controller();
 
+    expect(value.filterModels?.([model], credential)).toEqual([]);
     expect(() => value.stream(model, { messages: [] })).toThrow(/invalid LiteLLM model URL.*network refresh/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
+  it("blocks invalid active credential roots", () => {
+    const value = controller({ resolveCredentialRoot: () => "not a URL" });
+
+    expect(value.filterModels?.([native("invalid-active-root")], credential)).toEqual([]);
+    expect(() => value.stream(native("invalid-active-root"), { messages: [] })).toThrow(
+      /Active credentials has an invalid LiteLLM model URL.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 

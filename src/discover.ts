@@ -98,10 +98,13 @@ function catalogProviderCandidates(
   ownedBy?: string,
   adapterProvider?: BuiltinProvider,
 ): BuiltinProvider[] {
-  const candidates = [adapterProvider, toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])].filter(
+  // A recognized adapter is authoritative provider evidence. If its catalog
+  // misses, do not try a conflicting provider qualifier from model or base_model.
+  if (adapterProvider) return [adapterProvider];
+  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])].filter(
     (provider): provider is BuiltinProvider => provider !== undefined,
   );
-  if (!adapterProvider && lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
+  if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
   return [...new Set(candidates)];
 }
 
@@ -111,10 +114,7 @@ function resolveCatalogModel(
   adapterProvider?: BuiltinProvider,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  const providers = adapterProvider
-    ? [adapterProvider]
-    : catalogProviderCandidates(lookupIds, id, ownedBy, adapterProvider);
-  for (const provider of providers) {
+  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy, adapterProvider)) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
