@@ -606,6 +606,63 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it.each(["openai", "custom_openai", "openai_like", "text-completion-openai", "azure", "azure_ai"])(
+    "treats the %s adapter as transport when the model identifies Kimi",
+    (adapter) => {
+      expect(
+        resolveModelInfoCatalog({
+          model_name: "kimi-route",
+          litellm_params: { model: "openai/kimi-k2.5" },
+          model_info: { mode: "chat", litellm_provider: adapter },
+        }),
+      ).toEqual({ semanticFamily: "kimi", semanticModel: "kimi-k2.5-k2.6" });
+    },
+  );
+
+  it("publishes Kimi compatibility when an OpenAI transport adapter routes openai/kimi", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-through-openai",
+              litellm_params: { model: "openai/kimi-k2.5", allowed_openai_params: ["thinking"] },
+              model_info: { id: "kimi-openai", mode: "chat", litellm_provider: "openai", supports_reasoning: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-through-openai",
+      reasoning: true,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsStrictMode: false,
+        maxTokensField: "max_tokens",
+      },
+      litellmPolicy: {
+        normalizeStrictToolMessages: true,
+        normalizeThinkTags: true,
+        suppressReasoningVisibility: true,
+      },
+    });
+  });
+
+  it("uses a generic adapter family only when model and base identities provide no family", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "opaque-route",
+        litellm_params: { model: "internal/model" },
+        model_info: { mode: "chat", litellm_provider: "openai" },
+      }),
+    ).toEqual({ semanticFamily: "openai" });
+  });
+
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
     expect(
       resolveModelInfoCatalog({
@@ -677,6 +734,16 @@ describe("discoverModels via /model/info", () => {
     },
   ])("withholds catalog resolution when $name", ({ entry }) => {
     expect(resolveModelInfoCatalog(entry)).toBeUndefined();
+  });
+
+  it("preserves conflicts between a vendor-bearing identity and a specific adapter", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "specific-adapter-conflict",
+        litellm_params: { model: "openai/kimi-k2.5" },
+        model_info: { mode: "chat", litellm_provider: "anthropic" },
+      }),
+    ).toEqual({ semanticFamily: "conflicting" });
   });
 
   it.each([
@@ -1217,6 +1284,30 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 16_384,
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("reports genuinely conflicting family evidence once with bounded detail", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const conflicting = (route: string) => ({
+      model_name: route,
+      model_info: { id: route, mode: "chat", base_model: "anthropic/claude-sonnet-4-6" },
+      litellm_params: { model: "openai/gpt-4o" },
+    });
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: ["family-a", "family-b", "family-c", "family-d"].map(conflicting),
+        }),
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("4 route group(s) have conflicting deployment family evidence");
+    expect(diagnostics[0]).toContain("family-a, family-b, family-c (+1 more)");
+    expect(diagnostics[0]).not.toContain("family-d");
+    expect(diagnostics[0]).not.toContain("claude-sonnet");
   });
 
   it("reports conflicting deployment provider identity once with bounded detail", async () => {

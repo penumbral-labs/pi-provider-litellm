@@ -301,12 +301,33 @@ function semanticFamily(id: string): SemanticFamily | undefined {
   return undefined;
 }
 
+const GENERIC_TRANSPORT_ADAPTERS = new Set([
+  "azure",
+  "azure_ai",
+  "custom_openai",
+  "openai",
+  "openai_like",
+  "text-completion-openai",
+]);
+
 function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFamily"] {
-  const identities = [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider]
+  const identityFamilies = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
-  const families = identities.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
-  return new Set(families).size > 1 ? "conflicting" : families[0];
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map(semanticFamily)
+    .filter((family): family is SemanticFamily => family !== undefined);
+  const distinctIdentityFamilies = new Set(identityFamilies);
+  if (distinctIdentityFamilies.size > 1) return "conflicting";
+
+  const identityFamily = identityFamilies[0];
+  const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
+  const adapterFamily = adapter ? semanticFamily(adapter) : undefined;
+  if (!identityFamily) return adapterFamily;
+  // OpenAI-compatible and Azure adapters describe transport, not the backend
+  // vendor. They remain useful fallback evidence for opaque identities, but must
+  // not contradict a model/base identity such as `openai/kimi-k2.5`.
+  if (!adapterFamily || (adapter && GENERIC_TRANSPORT_ADAPTERS.has(adapter))) return identityFamily;
+  return adapterFamily === identityFamily ? identityFamily : "conflicting";
 }
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
@@ -325,14 +346,27 @@ const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   vertex_ai: "google-vertex",
 };
 
+function normalizedAdapter(adapter: unknown): string | undefined {
+  return wireString(adapter)?.trim().toLowerCase() || undefined;
+}
+
+function isGenericTransportAdapter(adapter: unknown): boolean {
+  const normalized = normalizedAdapter(adapter);
+  return normalized !== undefined && GENERIC_TRANSPORT_ADAPTERS.has(normalized);
+}
+
 function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
-  const normalized = wireString(adapter)?.trim().toLowerCase();
+  const normalized = normalizedAdapter(adapter);
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
-function qualifiedModelProvider(model: string): BuiltinProvider | undefined {
+function qualifiedIdentityProvider(model: string, family: SemanticFamily | undefined): BuiltinProvider | undefined {
   const separator = model.indexOf("/");
-  return separator < 1 ? undefined : adapterCatalogProvider(model.slice(0, separator));
+  if (separator < 1) return undefined;
+  const qualifier = model.slice(0, separator);
+  const qualifierFamily = semanticFamily(qualifier);
+  if (family && qualifierFamily && qualifierFamily !== family && isGenericTransportAdapter(qualifier)) return undefined;
+  return adapterCatalogProvider(qualifier);
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
@@ -346,6 +380,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const contradictoryGenerations =
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
   const resolvedFamily = deploymentFamily(entry);
+  const identityFamily = resolvedFamily === "conflicting" ? undefined : resolvedFamily;
   // Family disagreement invalidates generation-specific policy even when only one
   // side names a recognized generation. Otherwise OpenAI/Kimi or OpenAI/DeepSeek
   // evidence can inherit controls, replay, and suppression from one side.
@@ -358,10 +393,12 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const evidenceProviders = new Set(resolutions.map((resolved) => resolved.provider));
   const catalogIdentities = new Set(resolutions.map((resolved) => `${resolved.provider}\0${resolved.model.id}`));
   for (const candidate of candidates) {
-    const provider = qualifiedModelProvider(candidate);
+    const provider = qualifiedIdentityProvider(candidate, semanticFamily(candidate));
     if (provider) evidenceProviders.add(provider);
   }
-  if (adapterProvider) evidenceProviders.add(adapterProvider);
+  if (adapterProvider && (!identityFamily || !isGenericTransportAdapter(entry.model_info?.litellm_provider))) {
+    evidenceProviders.add(adapterProvider);
+  }
   if (evidenceProviders.size > 1) return undefined;
   if (catalogIdentities.size > 1) {
     return resolvedFamily || model
@@ -427,6 +464,18 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   );
 }
 
+const reportedConflictingFamilyRoutes = new Set<string>();
+
+function reportConflictingFamilyEvidence(routes: readonly string[]): void {
+  reportBoundedRoutes(
+    reportedConflictingFamilyRoutes,
+    routes,
+    (count) =>
+      `LiteLLM discovery: ${count} route group(s) have conflicting deployment family evidence; ` +
+      "family-specific compatibility and request policy are withheld",
+  );
+}
+
 const reportedWithheldRepairRoutes = new Set<string>();
 
 function reportWithheldToolRepair(routes: readonly string[]): void {
@@ -463,6 +512,7 @@ function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   options: {
     ambiguousRoutes?: string[];
+    conflictingFamilyRoutes?: string[];
     withheldRepairRoutes?: string[];
     allowRouteCatalogFallback?: boolean;
     denyLevels?: boolean;
@@ -484,6 +534,7 @@ function mapFromModelInfoGroup(
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) options.ambiguousRoutes?.push(reduced.id);
+  if (reduced.deploymentFamilies.includes("conflicting")) options.conflictingFamilyRoutes?.push(reduced.id);
   const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
   const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
   // The semantic policy's compat only applies on Chat, so its level map must be
@@ -650,6 +701,7 @@ async function discoverFromHealth(
     groups.set(route, group);
   }
   const ambiguousRoutes: string[] = [];
+  const conflictingFamilyRoutes: string[] = [];
   const withheldRepairRoutes: string[] = [];
   const discovered = [...groups.values()]
     .map((group) => {
@@ -657,6 +709,7 @@ async function discoverFromHealth(
         group.map(({ entry }) => entry),
         {
           ambiguousRoutes,
+          conflictingFamilyRoutes,
           withheldRepairRoutes,
           allowRouteCatalogFallback: group.every(({ allowRouteCatalogFallback }) => allowRouteCatalogFallback),
           denyLevels: group.some(({ denyLevels }) => denyLevels),
@@ -668,6 +721,7 @@ async function discoverFromHealth(
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
   reportAmbiguousCatalogAuthority(ambiguousRoutes);
+  reportConflictingFamilyEvidence(conflictingFamilyRoutes);
   reportWithheldToolRepair(withheldRepairRoutes);
   reportWithheldToolRepairForModels(discovered);
   return discovered;
@@ -701,11 +755,13 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const ambiguousRoutes: string[] = [];
+    const conflictingFamilyRoutes: string[] = [];
     const withheldRepairRoutes: string[] = [];
     let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, { ambiguousRoutes, withheldRepairRoutes }))
+      .map((group) => mapFromModelInfoGroup(group, { ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes }))
       .filter((m): m is DiscoveredModel => m !== undefined);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
+    reportConflictingFamilyEvidence(conflictingFamilyRoutes);
     reportWithheldToolRepair(withheldRepairRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
