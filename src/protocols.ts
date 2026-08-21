@@ -23,8 +23,6 @@ export const LITELLM_PROTOCOLS = {
   },
 } satisfies Record<LiteLLMApi, LiteLLMProtocol>;
 
-export const LITELLM_API_NAMES = Object.keys(LITELLM_PROTOCOLS) as LiteLLMApi[];
-
 export function isLiteLLMApi(api: unknown): api is LiteLLMApi {
   return typeof api === "string" && Object.hasOwn(LITELLM_PROTOCOLS, api);
 }
