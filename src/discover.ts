@@ -5,9 +5,12 @@ import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import {
   type CatalogResolution,
   catalogResolution,
+  closeSerializerPolicy,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  isResponsesMode,
   reduceModelGroup,
+  type SemanticModel,
   wireString,
 } from "./model-groups.js";
 import type {
@@ -15,6 +18,7 @@ import type {
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
+  LiteLLMModelPolicy,
   ModelInfoEntry,
   ModelInfoResponse,
   ModelsListEntry,
@@ -55,8 +59,25 @@ export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
 }
 
-export function shouldSuppressReasoningContent(modelId: string): boolean {
-  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
+// Route-only fallback can preserve display normalization, but it cannot authorize
+// request-side reasoning suppression. Deployment-backed models carry that
+// conclusion separately in `suppressReasoningVisibility`.
+export function moonshotPolicy(modelId: string): LiteLLMModelPolicy {
+  return {
+    // Route-only fallback may retain the legacy display repair, but it cannot
+    // authorize request-side reasoning suppression. Deployment-backed callers
+    // use requestPolicy below to persist that separate conclusion.
+    normalizeThinkTags: !FORCED_THINKING_MODEL_PATTERN.test(modelId),
+    suppressReasoningVisibility: false,
+  };
+}
+
+function reasoningDisplayPolicy(suppressReasoningVisibility: boolean): LiteLLMModelPolicy | undefined {
+  if (!suppressReasoningVisibility) return undefined;
+  return {
+    normalizeThinkTags: true,
+    suppressReasoningVisibility: true,
+  };
 }
 
 export function buildCompat(modelId: string): DiscoveredModel["compat"] {
@@ -107,15 +128,43 @@ function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined 
   return resolveCatalogModel(id, ownedBy)?.model;
 }
 
-export function enrichCachedModel(model: Model<Api>): Model<Api> {
-  // ponytail: legacy cache lacks field provenance; add per-field cache provenance if
-  // strict preservation becomes necessary. The two-marker contract below is the
-  // workaround for that absence, so this deferral is still open, not resolved.
-  //
-  // This sentinel is emitted only by the evidence-free `/v1/models` fallback, so
-  // re-deriving catalog metadata from the model id here cannot re-authorize a
-  // reduced `/model/info` group whose catalog authority was withheld. Reduced
-  // groups carry the distinct ` (incomplete metadata)` marker instead.
+// The Moonshot strict-schema compat block is the only one that pins
+// `maxTokensField`, so its presence identifies a model that discovery already
+// judged to be Moonshot-backed. Releases before request policies existed wrote
+// that same block, which makes it usable provenance.
+function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
+  const openAICompat = compat as Model<"openai-completions">["compat"];
+  return openAICompat?.maxTokensField === "max_tokens" && openAICompat.supportsStrictMode === false;
+}
+
+// A cached model written before request policies existed carries none. Its
+// stored compatibility fingerprint can recover the response-only conclusion,
+// but it cannot prove that every deployment identified Moonshot, so the
+// outbound repair stays disabled until fresh discovery persists that authority.
+function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
+  const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
+  if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
+  const restored: typeof cached = { ...cached, litellmPolicy: moonshotPolicy(model.id) };
+  return restored;
+}
+
+export function enrichCachedModel(input: Model<Api>): Model<Api> {
+  const restored = restoreCachedModelPolicy(input);
+  // A model stored by a release that predates the transmissibility gate carries
+  // whatever level map that release published, so the gate applies to the cached
+  // map on the way in — not only to catalog metadata on the way out, which every
+  // reasoning model skips via the guard below.
+  const model = {
+    ...restored,
+    ...closeSerializerPolicy({
+      api: restored.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: restored.reasoning,
+      vendorCompat: restored.compat,
+      catalogLevels: restored.thinkingLevelMap,
+    }),
+  } as Model<Api>;
+  // Reduced deployment groups use a distinct marker; this sentinel remains
+  // exclusive to evidence-free fallback models that may be enriched safely.
   if (
     !model.name.endsWith(" (no metadata)") ||
     model.reasoning ||
@@ -137,8 +186,14 @@ export function enrichCachedModel(model: Model<Api>): Model<Api> {
   return {
     ...model,
     name: catalogModel.name,
-    reasoning: catalogModel.reasoning,
-    thinkingLevelMap: catalogModel.thinkingLevelMap,
+    // The cached compat stays as stored, so catalog levels are closed against it
+    // rather than trusted because the catalog offered them.
+    ...closeSerializerPolicy({
+      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: catalogModel.reasoning,
+      vendorCompat: model.compat,
+      catalogLevels: catalogModel.thinkingLevelMap,
+    }),
     input: catalogModel.input,
     cost: catalogModel.cost,
     contextWindow: catalogModel.contextWindow,
@@ -169,6 +224,17 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   return undefined;
 }
 
+function semanticModel(id: string): SemanticModel | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?[56](?:$|[./_:-])/.test(value)) return "kimi-k2.5-k2.6";
+  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?7(?:[-_/]?(?:code|highspeed))?(?:$|[./_:-])/.test(value)) {
+    return "kimi-k2.7-code";
+  }
+  if (/(?:^|[./_-])kimi[-_/]?k?3(?:$|[./_:-])/.test(value)) return "kimi-k3";
+  if (/(?:^|[./_-])deepseek[-_/]?v?4(?:$|[./_:-])/.test(value)) return "deepseek-v4";
+  return undefined;
+}
+
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
   azure: "azure-openai-responses",
@@ -192,14 +258,22 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => wireString(candidate)?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
+  const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
+  const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
+  // Two recognized generations are contradictory: applying one deployment
+  // contract to the other would send the wrong control, so withhold both.
+  const routingGeneration = routingModel ? semanticModel(routingModel) : undefined;
+  const baseGeneration = baseModel ? semanticModel(baseModel) : undefined;
+  const contradictoryGenerations =
+    routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
+  const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
+  const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, resolved.model);
+    if (resolved)
+      return { ...catalogResolution(resolved.provider, resolved.model), ...(model ? { semanticModel: model } : {}) };
   }
-  return undefined;
+  return model ? { semanticModel: model } : undefined;
 }
 
 async function fetchJson<T>(
@@ -221,16 +295,10 @@ async function fetchJson<T>(
 
 const AMBIGUOUS_AUTHORITY_SAMPLE = 3;
 
-// Reported routes, so a persistent misconfiguration is announced once rather than on
-// every background refresh and every `/model` open. Keyed by route rather than a
-// single flag so a newly ambiguous route is still reported. Mirrors the once-per-
-// process diagnostic set in src/index.ts.
+// Keyed by route so persistent ambiguity is reported once per process while a
+// newly observed route still receives a bounded diagnostic.
 const reportedAmbiguousRoutes = new Set<string>();
 
-// Withholding catalog authority can be invisible in the model name when the router
-// supplies complete prices; limits and other catalog-derived metadata may still use
-// conservative defaults. Report that degradation regardless of
-// LITELLM_VERBOSE_DISCOVERY, carrying only a count and bounded public route ids.
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   const unreported = routes.filter((route) => !reportedAmbiguousRoutes.has(route));
   if (unreported.length === 0) return;
@@ -238,9 +306,6 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   const hidden = unreported.length - AMBIGUOUS_AUTHORITY_SAMPLE;
   const sample = unreported.slice(0, AMBIGUOUS_AUTHORITY_SAMPLE).join(", ");
   process.stderr.write(
-    // "missing or conflicting": the group is also withheld when one deployment
-    // resolves a provider and another supplies no usable backend evidence at all,
-    // which points at a different fix than a genuine provider conflict.
     `LiteLLM discovery: ${unreported.length} route group(s) have missing or conflicting deployment provider ` +
       `evidence; catalog limits, pricing, and reasoning metadata are withheld: ${sample}` +
       `${hidden > 0 ? ` (+${hidden} more)` : ""}\n`,
@@ -269,19 +334,33 @@ function mapFromModelInfoGroup(
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
+  const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
+  const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
+  // The semantic policy's compat only applies on Chat, so its level map must be
+  // gated the same way. Generic provider compatibility remains route-derived.
+  const vendorCompat = buildCompat(reduced.id);
+  const policy = closeSerializerPolicy({
+    api: reduced.api,
+    reasoning,
+    vendorCompat,
+    semanticCompat: reasoningPolicy?.compat,
+    semanticLevels: reasoningPolicy?.thinkingLevelMap,
+    catalogLevels: reduced.thinkingLevelMap,
+  });
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
     // catalog re-derivation from the model id during offline cache reads.
     name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
-    reasoning: reduced.reasoning,
-    ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
+    ...policy,
     input: reduced.vision ? ["text", "image"] : ["text"],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    compat: buildCompat(reduced.id),
+    ...(reasoningDisplayPolicy(reduced.suppressReasoningVisibility)
+      ? { litellmPolicy: reasoningDisplayPolicy(reduced.suppressReasoningVisibility) }
+      : {}),
   };
 }
 
@@ -290,14 +369,31 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  // Branch on the readable name, not the raw field: an unreadable one must fall back
-  // to the `/health` route name rather than discarding a model the route could name.
-  if (wireString(entry.model_name) || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // A thinking-level map is a per-generation control, and `/health` supplies only
-  // route text for it. Other catalog metadata on this path is unchanged.
-  if (model) delete model.thinkingLevelMap;
-  return model;
+  const named = wireString(entry.model_name) || !fallbackId ? entry : { ...entry, model_name: fallbackId };
+  // `/health` detail lookups are per deployment, not complete route groups, so
+  // they stay on Chat. Rewriting the mode before reduction keeps the deployment
+  // on the ordinary Chat path, so vendor and reasoning-replay compatibility are
+  // built for it instead of being patched back on afterwards. Modes this
+  // discovery cannot serve at all are left alone so they still drop out.
+  const chatOnly = isResponsesMode(named.model_info?.mode)
+    ? { ...named, model_info: { ...named.model_info, mode: "chat" } }
+    : named;
+  const model = mapFromModelInfo(chatOnly);
+  if (!model) return undefined;
+  // Without a deployment `model_name` the only identifier is the `/health` route
+  // text, which is not evidence for request controls. Deleting the map would hand
+  // pi-ai an absent map, i.e. every standard level, so the conclusion is closed
+  // again with no candidate levels rather than mutated in place.
+  if (entry.model_name) return model;
+  return {
+    ...model,
+    ...closeSerializerPolicy({
+      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: model.reasoning,
+      vendorCompat: model.compat,
+      denyLevels: true,
+    }),
+  };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
@@ -306,19 +402,23 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
   const catalogModel = findCatalogModel(id);
   return {
     id,
-    // `/health` route text is never authorized for later cache re-enrichment, so
-    // an unresolved route is marked permanently rather than borrowing the
-    // `/v1/models` sentinel or presenting unknown cost as free.
+    // Health route text is not later cache authority. Unknown routes therefore
+    // use the permanent reduced-evidence marker, never the fallback sentinel.
     name: catalogModel?.name ?? `${id} (incomplete metadata)`,
-    reasoning: catalogModel?.reasoning ?? false,
-    // A thinking-level map is a per-generation control, and route text is the only
-    // input here, so no map is derived. Other catalog metadata is unchanged.
+    // Same evidence quality as the `/v1/models` fallback — a route name and
+    // nothing else — so it closes the same catalog map the same way.
+    ...closeSerializerPolicy({
+      api: "openai-completions",
+      reasoning: catalogModel?.reasoning ?? false,
+      vendorCompat: buildCompat(id),
+      catalogLevels: catalogModel?.thinkingLevelMap,
+    }),
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat: buildCompat(id),
+    ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
 
@@ -330,14 +430,18 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
   return {
     id,
     name: catalogModel?.name ?? `${id} (no metadata)`,
-    reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    ...closeSerializerPolicy({
+      api: "openai-completions",
+      reasoning: catalogModel?.reasoning ?? false,
+      vendorCompat: buildCompat(id),
+      catalogLevels: catalogModel?.thinkingLevelMap,
+    }),
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
-    compat: buildCompat(id),
+    ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
 
@@ -348,6 +452,15 @@ async function discoverFromHealth(
 ): Promise<DiscoveredModel[]> {
   const progress = options.silent ? undefined : options.onProgress;
   progress?.("Querying /health endpoint...");
+  // KNOWN LIMITATION: `/health` lists deployments, not routes, and each one is
+  // mapped on its own, so deployments sharing a `model_name` are not reduced
+  // against each other the way `/model/info` groups are. `Promise.all` preserves
+  // list order and `deduplicateModels` keeps the first entry, so the survivor is
+  // whichever deployment `/health` listed first — not whichever answered first.
+  // Reducing here means aggregating the per-deployment detail fetches by
+  // `model_name` and feeding whole groups to `mapFromModelInfoGroup`, which also
+  // changes naming and the singleton catalog fallback on this path. The approved
+  // PRD names that a non-goal; see the `/health` notes in AGENTS.md and README.md.
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
@@ -396,7 +509,6 @@ export async function discoverModels(
   if (infoResult.ok) {
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoResult.data.data ?? []) {
-      // A route without a readable public name cannot be grouped or addressed.
       const route = wireString(entry.model_name);
       if (!route) continue;
       const group = groups.get(route) ?? [];

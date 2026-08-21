@@ -13,6 +13,20 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+// `message_end` resolves the model that produced the message through the
+// registry, so display normalization reads the conclusion discovery persisted
+// instead of re-deriving a backend from the route name.
+function messageEndCtx(modelId: string, litellmPolicy?: Record<string, boolean>): unknown {
+  return {
+    modelRegistry: {
+      find: (provider: string, id: string) =>
+        provider === "litellm" && id === modelId
+          ? { id, provider, api: "openai-completions", ...(litellmPolicy ? { litellmPolicy } : {}) }
+          : undefined,
+    },
+  };
+}
+
 async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
   await pi.providers[0]?.refreshModels?.({
     allowNetwork,
@@ -655,16 +669,13 @@ describe("feature parity", () => {
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
-    expect(updated).toMatchObject({
+    expect(updated).toEqual({
       messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
       litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
     });
   });
 
-  it("does not send thinking for Kimi OpenAI completions requests", async () => {
+  it("does not inject reasoning controls from a Kimi-looking public route", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -693,12 +704,7 @@ describe("feature parity", () => {
       { payload: { messages: [] } },
       { model: { provider: "litellm", id: "kimi-k3", api: "openai-completions" } },
     );
-    expect(updated).toEqual({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(updated).toBeUndefined();
   });
 
   it("leaves Kimi Responses requests unchanged", async () => {
@@ -747,7 +753,16 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: {
+            normalizeThinkTags: true,
+            suppressReasoningVisibility: true,
+          },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -796,7 +811,16 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: {
+            normalizeThinkTags: true,
+            suppressReasoningVisibility: true,
+          },
+        },
+      },
     );
 
     expect(updated).toEqual({
@@ -838,9 +862,26 @@ describe("feature parity", () => {
       { role: "tool", tool_call_id: "call_1", content: "tool output" },
     ];
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.({ payload: { messages } }, { model: { provider: "litellm", id: "kimi-k3" } });
+    const updated = beforeRequest?.(
+      { payload: { messages } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          litellmPolicy: {
+            normalizeThinkTags: true,
+            suppressReasoningVisibility: true,
+          },
+        },
+      },
+    );
 
-    expect(updated?.messages).toBe(messages);
+    expect(updated).toEqual({
+      messages,
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+    });
   });
 
   it("leaves strict-schema tool messages untouched for non-Moonshot models", async () => {
@@ -1108,7 +1149,13 @@ describe("feature parity", () => {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
     for (const handler of pi.handlers.get("message_end") ?? []) {
-      const result = await handler({ message });
+      const result = await handler(
+        { message },
+        messageEndCtx(message.model, {
+          normalizeThinkTags: true,
+          suppressReasoningVisibility: true,
+        }),
+      );
       if (result?.message) message = result.message;
     }
 
@@ -1116,6 +1163,41 @@ describe("feature parity", () => {
       { type: "thinking", thinking: "internal reasoning" },
       { type: "text", text: "DONE" },
     ]);
+  });
+
+  it.each([
+    { name: "a Kimi-shaped route carrying no display conclusion", policy: undefined, modelId: "kimi-k2.6" },
+    {
+      name: "a route whose discovered conclusion declines normalization",
+      policy: { normalizeThinkTags: false, suppressReasoningVisibility: false },
+      modelId: "kimi-k2.6",
+    },
+  ])("leaves think tags alone for $name", async ({ policy, modelId }) => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // A Kimi-shaped id with inline think tags: only the absent/negative
+    // conclusion stops the rewrite, so this fails if the hook reads the id.
+    const message = {
+      role: "assistant",
+      provider: "litellm",
+      model: modelId,
+      content: [{ type: "text", text: "<think>internal reasoning</think>DONE" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+    const results = [];
+    for (const handler of pi.handlers.get("message_end") ?? []) {
+      results.push(await handler({ message }, messageEndCtx(modelId, policy)));
+    }
+
+    expect(results.every((result) => result?.message === undefined)).toBe(true);
+    expect(message.content).toEqual([{ type: "text", text: "<think>internal reasoning</think>DONE" }]);
   });
 
   it("keeps final Kimi text visible when a dangling think tag prefixes it", async () => {
@@ -1150,7 +1232,13 @@ describe("feature parity", () => {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
     for (const handler of pi.handlers.get("message_end") ?? []) {
-      const result = await handler({ message });
+      const result = await handler(
+        { message },
+        messageEndCtx(message.model, {
+          normalizeThinkTags: true,
+          suppressReasoningVisibility: true,
+        }),
+      );
       if (result?.message) message = result.message;
     }
 

@@ -242,6 +242,19 @@ LiteLLM may load-balance one public `model_name` across deployments with differe
 
 The ` (no metadata)` suffix is reserved for evidence-free `/v1/models` fallback entries. Those entries may receive bounded catalog enrichment on a later cache read. The ` (incomplete metadata)` suffix marks reduced `/model/info` groups or unresolved `/health` routes and permanently prevents route-name cache enrichment. It means at least one metadata field is unknown, including cache pricing that the proxy omitted; known input/output prices may still be shown alongside the suffix.
 
+### Reasoning compatibility
+
+Reasoning selectors are derived from backend and accepted-parameter evidence, not from the public route name. Every routable deployment in a group must accept the selected wire control:
+
+| Recognized backend | Selectable levels | Wire control |
+|---|---|---|
+| Kimi K2.5 / K2.6 | `off`, `high` | `thinking.type` disabled/enabled |
+| Kimi K2.7 Code / Highspeed | `high` only | `thinking.type` enabled; disabling is never sent |
+| Kimi K3 | `low`, `high`, `max` | `reasoning_effort` |
+| DeepSeek V4 | Depends on the common accepted controls | Native `thinking`, OpenAI-style `reasoning_effort`, or both |
+
+Unknown generations and mixed deployment evidence expose no speculative selector. Kimi K2.7 Code, Kimi K3, and DeepSeek V4 retain assistant reasoning content for tool and multi-turn replay. Inline `<think>` normalization is a separate display policy and never enables generation controls. Existing GPT-5.5 Chat tool-request compatibility remains unchanged.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -252,6 +265,7 @@ The ` (no metadata)` suffix is reserved for evidence-free `/v1/models` fallback 
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `LiteLLM discovery: ... route group(s) have missing or conflicting deployment provider evidence` | One or more deployments lack a resolvable backend provider or resolve to different providers. Add consistent `litellm_params.model`, `model_info.base_model`, or adapter metadata; catalog-derived limits, pricing, and reasoning metadata are withheld meanwhile. |
 | A model is marked ` (incomplete metadata)` | `/model/info` or `/health` did not provide enough authoritative metadata. Explicit fields remain usable, but unknown cost fields are shown as zero and route-name cache enrichment stays disabled. |
+| Reasoning model has no selectable thinking level | Ensure every deployment declares its supported `thinking` or `reasoning_effort` field in `supported_openai_params` or `allowed_openai_params`; unsupported and mixed groups fail closed |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
 | Enterprise SSO waits for token insertion | The proxy returned 404/405 for `/sso/cli/start`, so Pi used the legacy flow — upgrade LiteLLM or paste the UI token |

@@ -4,8 +4,22 @@ import type { DiscoveredModel, ModelInfoEntry } from "./types.js";
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
+export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" | "kimi-k3";
+
+type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
+
+export interface ReasoningPolicy {
+  reasoning: boolean;
+  thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
+  compat?: Pick<
+    OpenAICompat,
+    "requiresReasoningContentOnAssistantMessages" | "supportsReasoningEffort" | "thinkingFormat"
+  >;
+}
+
 export interface CatalogResolution {
   provider?: string;
+  semanticModel?: SemanticModel;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -30,9 +44,13 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
+  semanticModel?: SemanticModel;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
+  suppressReasoningVisibility: boolean;
+  acceptedOpenAIParams: string[];
+  reasoningPolicy: ReasoningPolicy;
 }
 
 const RESPONSES_MODE_PATTERN = /^responses?$/i;
@@ -56,19 +74,22 @@ export function wireString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-// An unreadable capability flag must not be read as `true`. `"false"` and `"no"` are
-// both truthy, so coercing would relax a group guarantee — the one direction that
-// matters here, since a capability is only advertised when every deployment agrees.
+// Unreadable capability flags are withheld rather than coerced. In particular,
+// string values such as `"false"` must not become truthy capability evidence.
 function wireBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+export function isResponsesMode(mode: unknown): boolean {
+  const value = wireString(mode);
+  return value !== undefined && RESPONSES_MODE_PATTERN.test(value.trim());
 }
 
 function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = wireString(mode)?.trim();
-  // An unreadable mode is not evidence that the deployment is non-chat. Treating it
-  // as "unsupported" would drop the row from the reduction and discard its limits,
-  // relaxing the group; "unknown" keeps it routable and conservative.
+  // An unreadable mode remains in the conservative reduction instead of being
+  // filtered as unsupported and silently relaxing the remaining group.
   if (value === undefined) return "unknown";
   if (RESPONSES_MODE_PATTERN.test(value)) return "responses";
   if (CHAT_STYLE_MODE_PATTERN.test(value)) return "chat";
@@ -101,10 +122,8 @@ function stableEntry(entry: ModelInfoEntry): string {
   return JSON.stringify(sortValue(entry));
 }
 
-// For rows with a deployment id, collapses only exact duplicates rather than all
-// rows repeating that id. Id-less rows are never collapsed, even when identical,
-// because there is no deployment identity proving that they describe one target.
-// Conflicting variants therefore stay plural and fail closed.
+// Exact identified duplicates collapse, conflicting variants sharing an id stay
+// plural, and anonymous rows stay distinct because no identity proves equality.
 function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
   const identified = new Map<string, Map<string, ModelInfoEntry>>();
   const anonymous: Array<{ signature: string; entry: ModelInfoEntry }> = [];
@@ -119,6 +138,8 @@ function uniqueDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[]
       anonymous.push({ signature, entry });
     }
   }
+  // Conflicting rows for one deployment remain in the reduction so their
+  // disagreement fails closed, while exact repeats stay idempotent.
   return [
     ...[...identified.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -146,6 +167,272 @@ function routerThinkingLevelMap(entries: readonly ModelInfoEntry[]): DiscoveredM
     map[level] = reported.every((value) => wireBoolean(value) === true) ? effort : null;
   }
   return Object.keys(map).length > 0 ? map : undefined;
+}
+
+function normalizeParams(params: unknown): Set<string> {
+  if (!Array.isArray(params)) return new Set();
+  const named = params.map((param) => wireString(param)?.trim()).filter((param) => Boolean(param));
+  return new Set(named as string[]);
+}
+
+function acceptedParams(entry: ModelInfoEntry): Set<string> {
+  const params = normalizeParams(entry.model_info?.supported_openai_params);
+  for (const param of normalizeParams(entry.litellm_params?.allowed_openai_params)) params.add(param);
+  return params;
+}
+
+function intersectParams(entries: readonly ModelInfoEntry[]): string[] {
+  const [first, ...rest] = entries.map(acceptedParams);
+  if (!first) return [];
+  return [...first].filter((param) => rest.every((params) => params.has(param))).sort();
+}
+
+const ONLY_HIGH = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: "high",
+  xhigh: null,
+  max: null,
+} as const;
+
+// pi-ai reads an ABSENT thinkingLevelMap as "every standard level supported"
+// (getSupportedThinkingLevels), so a policy that cannot transmit any level has
+// to deny each one explicitly instead of omitting the map.
+export const NO_TRANSMISSIBLE_LEVELS = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: null,
+  xhigh: null,
+  max: null,
+} as const;
+
+const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+// Efforts the Responses API accepts. pi-ai passes an unmapped level through
+// verbatim and reads `thinkingLevelMap.off` as the disable value, so a Chat-shaped
+// map would emit `off` or `max` as an effort. `none` is the disable spelling —
+// pi-ai's own `openai/gpt-5.5` entry maps `off` to it.
+const RESPONSES_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+// A level map is only meaningful next to the compat that serializes it, and the
+// two used to travel separately: five call sites each decided whether to copy
+// one, the other, or both. `SerializerPolicy` closes them into one value so a
+// consumer cannot take a level map without the conclusion that carries it.
+export interface SerializerPolicy {
+  reasoning: boolean;
+  thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
+  compat: DiscoveredModel["compat"];
+}
+
+// Chat carries a level through `reasoning_effort` or an explicit `thinkingFormat`.
+// pi-ai would default effort on for a litellm provider, but a closed policy must
+// state its own carrier rather than inherit one, so this reports only explicit
+// evidence and the caller sets the carrier it concluded.
+function chatCarrier(compat: OpenAICompat | undefined): boolean {
+  return compat?.thinkingFormat !== undefined || compat?.supportsReasoningEffort === true;
+}
+
+function deniesChatEffort(compat: OpenAICompat | undefined): boolean {
+  return compat?.supportsReasoningEffort === false && compat?.thinkingFormat === undefined;
+}
+
+// Translates a Chat-shaped map into Responses efforts, denying any level with no
+// valid Responses value instead of letting it through verbatim. pi-ai treats an
+// absent xhigh/max entry as unsupported (unlike the standard levels), so the
+// translation must preserve that distinction rather than widening the map.
+export function toResponsesLevels(
+  levels: DiscoveredModel["thinkingLevelMap"] | undefined,
+): NonNullable<DiscoveredModel["thinkingLevelMap"]> {
+  const translated: Record<string, string | null> = {};
+  for (const level of EXTENDED_LEVELS) {
+    const chat = levels?.[level];
+    if (level === "off") {
+      // Disable is `none` on this API, never `off`.
+      translated.off = chat === null ? null : "none";
+      continue;
+    }
+    if (chat === undefined && (level === "xhigh" || level === "max")) {
+      translated[level] = null;
+      continue;
+    }
+    // pi-ai passes an absent standard level through as its own name.
+    const candidate = chat === undefined ? level : chat;
+    translated[level] = candidate !== null && RESPONSES_EFFORTS.has(candidate) ? candidate : null;
+  }
+  return translated as NonNullable<DiscoveredModel["thinkingLevelMap"]>;
+}
+
+// The one place a level map is paired with a serializer conclusion. Every
+// discovery, cache, health and singleton path consumes the whole returned object.
+export function closeSerializerPolicy(input: {
+  api: "openai-completions" | "openai-responses";
+  reasoning: boolean;
+  vendorCompat: DiscoveredModel["compat"];
+  semanticCompat?: ReasoningPolicy["compat"];
+  semanticLevels?: DiscoveredModel["thinkingLevelMap"];
+  catalogLevels?: DiscoveredModel["thinkingLevelMap"];
+  // For callers with no level evidence at all. Distinct from "no candidate map":
+  // this states the no-level conclusion explicitly, so a caller spreading the
+  // policy over an earlier model cannot leave a stale map behind.
+  denyLevels?: boolean;
+}): SerializerPolicy {
+  const { api, reasoning, vendorCompat, semanticCompat, semanticLevels, catalogLevels, denyLevels } = input;
+  if (api === "openai-responses") {
+    // Chat compat fields are not part of the Responses compat union, so only the
+    // shared request-shape fields travel. The vendor's explicit effort denial is
+    // still authoritative even though it cannot be copied into Responses compat:
+    // no level may be offered for that API when the backend rejected the carrier.
+    const shared = vendorCompat as OpenAICompat | undefined;
+    const compat: DiscoveredModel["compat"] = {
+      ...(shared?.supportsDeveloperRole === false ? { supportsDeveloperRole: false } : {}),
+      ...(shared?.supportsStrictMode === false ? { supportsStrictMode: false } : {}),
+    };
+    if (!reasoning) return { reasoning, compat };
+    if (denyLevels || shared?.supportsReasoningEffort === false) {
+      return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+    }
+    return { reasoning, thinkingLevelMap: toResponsesLevels(semanticLevels ?? catalogLevels), compat };
+  }
+  // A model with no compat at all keeps none: fabricating an empty object here
+  // would rewrite every cached model that passes through.
+  const stated = vendorCompat !== undefined || semanticCompat !== undefined;
+  const merged = { ...(vendorCompat as OpenAICompat), ...semanticCompat } as OpenAICompat;
+  const compat = (stated ? merged : undefined) as DiscoveredModel["compat"];
+  if (!reasoning) return { reasoning, compat };
+  if (denyLevels) return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+  if (deniesChatEffort(merged)) {
+    // The vendor denies effort and named no format: nothing can carry a level.
+    return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+  }
+  const candidateLevels = semanticLevels ?? catalogLevels;
+  // No candidate map: pi-ai offers the standard levels and serializes them through
+  // `reasoning_effort`, which this compat permits, so there is nothing to close.
+  if (candidateLevels === undefined) return { reasoning, compat };
+  if (chatCarrier(merged)) return { reasoning, thinkingLevelMap: candidateLevels, compat };
+  // Advertising a specific map without an explicit carrier would lean on pi-ai's
+  // default for a litellm provider; state the carrier this policy concluded.
+  return {
+    reasoning,
+    thinkingLevelMap: candidateLevels,
+    compat: { ...merged, supportsReasoningEffort: true } as DiscoveredModel["compat"],
+  };
+}
+
+function failClosedReasoning(
+  reasoning: boolean,
+  replay?: Pick<OpenAICompat, "requiresReasoningContentOnAssistantMessages">,
+): ReasoningPolicy {
+  return {
+    reasoning,
+    ...(reasoning ? { thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS } : {}),
+    compat: { ...replay, supportsReasoningEffort: false },
+  };
+}
+
+function buildReasoningPolicy(
+  semanticModel: SemanticModel | undefined,
+  acceptedOpenAIParams: readonly string[],
+  reducedReasoning: boolean,
+  explicitlyUnsupported: boolean,
+): ReasoningPolicy {
+  const acceptsThinking = acceptedOpenAIParams.includes("thinking");
+  const acceptsEffort = acceptedOpenAIParams.includes("reasoning_effort");
+  const hasAcceptedControl = acceptsThinking || acceptsEffort;
+  const reasoning =
+    !explicitlyUnsupported && (reducedReasoning || hasAcceptedControl || semanticModel === "kimi-k2.7-code");
+  if (semanticModel === "kimi-k2.5-k2.6") {
+    // Binary thinking rides the `thinking` param, so without that accepted
+    // param there is no wire mechanism and every level must be denied.
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
+    return failClosedReasoning(reasoning);
+  }
+  if (semanticModel === "kimi-k2.7-code") {
+    // K2.7 Code always reasons and cannot be switched off, so `off` stays
+    // denied rather than inventing a disable control. The `high` level only
+    // exists when a deployment accepts `thinking` to carry it.
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: ONLY_HIGH,
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
+    return failClosedReasoning(reasoning, replay);
+  }
+  if (semanticModel === "kimi-k3") {
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
+      };
+    }
+    return failClosedReasoning(reasoning, replay);
+  }
+  if (semanticModel === "deepseek-v4") {
+    const replay = { requiresReasoningContentOnAssistantMessages: true } as const;
+    if (acceptsThinking && acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: true },
+      };
+    }
+    if (acceptsEffort && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: { ...replay, thinkingFormat: "openai", supportsReasoningEffort: true },
+      };
+    }
+    if (acceptsThinking && reasoning) {
+      return {
+        reasoning,
+        thinkingLevelMap: { ...ONLY_HIGH, off: "off" },
+        compat: { ...replay, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      };
+    }
+    return failClosedReasoning(reasoning, replay);
+  }
+  // No identified semantic model means no known reasoning contract; the caller
+  // ignores this policy entirely and keeps the reduced/catalog metadata.
+  return { reasoning: false };
 }
 
 function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefined {
@@ -183,26 +470,28 @@ export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  // A group is addressed by its public route name, so a row without a readable one
-  // cannot participate. Enforced here rather than at each caller, so no caller can
-  // leak a non-string id into a discovered model.
+  // A route is addressable only by a readable public name. Keeping this guard in
+  // the reducer prevents any caller from leaking malformed wire data into ids.
   const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
   if (candidates.length === 0) return undefined;
-  // Transport votes over every candidate row, so a row this reduction will not
-  // otherwise use — an embedding sibling, say — can still force Chat. Capability,
-  // limit, price, and identity evidence reduces only over routable rows, so such a
-  // row cannot corrupt them or make the group look larger than it is.
+  // Transport votes over every candidate row, so an unsupported sibling still
+  // forces Chat; capability, limit, price, and identity evidence reduces only
+  // over routable rows so a non-chat sibling cannot corrupt them.
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
+  const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
   const reasoning = deployments.every(
     (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning ?? false,
+  );
+  const explicitlyUnsupported = deployments.some(
+    (entry) => wireBoolean(entry.model_info?.supports_reasoning) === false,
   );
   const vision = deployments.every(
     (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision ?? false,
@@ -246,6 +535,7 @@ export function reduceModelGroup(
   const routerMap = routerThinkingLevelMap(deployments);
   const thinkingLevelMap =
     parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
+  const acceptedOpenAIParams = intersectParams(deployments);
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
@@ -261,7 +551,19 @@ export function reduceModelGroup(
     cost,
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
+    ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
+    suppressReasoningVisibility: deployments.some((entry) => {
+      const backend =
+        wireString(entry.litellm_params?.model)?.trim() || wireString(entry.model_info?.base_model)?.trim();
+      return (
+        backend !== undefined &&
+        /(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/i.test(backend) &&
+        !/(?:^|[-/])thinking(?:[-/]|$)/i.test(backend)
+      );
+    }),
+    acceptedOpenAIParams,
+    reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };
 }
 

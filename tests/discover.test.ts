@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
+  moonshotPolicy,
   normalizeBaseUrl,
   resolveModelInfoCatalog,
-  shouldSuppressReasoningContent,
 } from "../src/discover.js";
 
 // Deterministic endpoint mock: only the listed suffixes are served and every
@@ -133,18 +133,19 @@ describe("buildCompat", () => {
   });
 });
 
-describe("shouldSuppressReasoningContent", () => {
-  it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
-    expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+describe("moonshotPolicy", () => {
+  it("keeps request suppression disabled for route-name-only fallback evidence", () => {
+    expect(moonshotPolicy("kimi-k2.6")).toEqual({
+      normalizeThinkTags: true,
+      suppressReasoningVisibility: false,
+    });
   });
 
-  it("does not suppress explicit forced-thinking models", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
-  });
-
-  it("does not suppress unrelated models", () => {
-    expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
+  it("preserves always-thinking output and visibility behavior", () => {
+    expect(moonshotPolicy("kimi-k2-thinking")).toEqual({
+      normalizeThinkTags: false,
+      suppressReasoningVisibility: false,
+    });
   });
 });
 
@@ -531,14 +532,22 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
-  it("keeps unresolved Azure Foundry backend evidence incomplete", async () => {
+  it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "public-route-without-family-text",
+        litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+        model_info: { mode: "chat", litellm_provider: "azure_ai" },
+      }),
+    ).toEqual({ semanticModel: "deepseek-v4" });
+
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
             {
               model_name: "foundry-route",
-              litellm_params: { model: " azure_ai/DeepSeek-V4 " },
+              litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
               model_info: { mode: "chat", litellm_provider: "azure_ai" },
             },
           ],
@@ -550,12 +559,14 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
       name: "foundry-route (incomplete metadata)",
-      reasoning: false,
+      reasoning: true,
       contextWindow: 128_000,
+      thinkingLevelMap: { off: null, high: "high", max: "max" },
+      compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
     });
   });
 
-  it("uses the backend candidate that supplies catalog authority", () => {
+  it("keeps provider identity from the backend candidate that resolves", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "mixed-evidence",
@@ -689,11 +700,8 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
     expect(result.models[0]?.compat).toEqual({
-      supportsStore: false,
       supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
       supportsStrictMode: false,
-      maxTokensField: "max_tokens",
     });
   });
 
@@ -708,7 +716,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
-    expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
+    expect(result.models[0]?.compat).toEqual({});
   });
 
   it.each([
@@ -1122,7 +1130,7 @@ describe("discoverModels response-mode models", () => {
     });
   });
 
-  it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
+  it("keeps /health response-mode model_info fallbacks on Chat", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) return jsonResponse(404, {});
@@ -1151,7 +1159,8 @@ describe("discoverModels response-mode models", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.3-codex-openai",
-      api: "openai-responses",
+      api: "openai-completions",
+      compat: { supportsStore: false },
     });
   });
 
@@ -1172,7 +1181,15 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("health");
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
   });
 
   it("does not derive thinking controls from a health endpoint without deployment detail", async () => {
@@ -1188,7 +1205,15 @@ describe("discoverModels response-mode models", () => {
 
     expect(result.source).toBe("health");
     expect(result.models[0]).toMatchObject({ id: "openai/gpt-5.5", reasoning: true });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: "none",
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: null,
+    });
   });
 });
 

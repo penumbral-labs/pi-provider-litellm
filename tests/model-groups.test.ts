@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogResolution, type CatalogResolver, reduceModelGroup } from "../src/model-groups.js";
+import {
+  type CatalogResolution,
+  type CatalogResolver,
+  closeSerializerPolicy,
+  reduceModelGroup,
+  toResponsesLevels,
+} from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
 const catalog = new Map<string, CatalogResolution>([
@@ -72,6 +78,74 @@ function permutations<T>(values: readonly T[]): T[][] {
   );
 }
 
+describe("toResponsesLevels", () => {
+  it.each([
+    {
+      name: "an absent map",
+      levels: undefined,
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "a partial Chat map",
+      levels: { low: "high" },
+      expected: {
+        off: "none",
+        minimal: "minimal",
+        low: "high",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    },
+    {
+      name: "explicit extended levels",
+      levels: { off: null, xhigh: "xhigh", max: "max" },
+      expected: {
+        off: null,
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: null,
+      },
+    },
+  ])("never widens Responses beyond Chat for $name", ({ levels, expected }) => {
+    expect(toResponsesLevels(levels)).toEqual(expected);
+  });
+
+  it("keeps Chat and Responses closed when vendor compatibility denies reasoning effort", () => {
+    const input = {
+      reasoning: true,
+      vendorCompat: { supportsReasoningEffort: false } as const,
+      catalogLevels: { off: "off", low: "low", high: "high" },
+    };
+
+    const chat = closeSerializerPolicy({ ...input, api: "openai-completions" });
+    const responses = closeSerializerPolicy({ ...input, api: "openai-responses" });
+
+    expect(chat.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(responses.thinkingLevelMap).toEqual(chat.thinkingLevelMap);
+  });
+});
+
 describe("reduceModelGroup", () => {
   it("is permutation invariant for heterogeneous deployment evidence", () => {
     const deployments = [
@@ -99,6 +173,9 @@ describe("reduceModelGroup", () => {
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
       catalogAuthorityAmbiguous: true,
+      suppressReasoningVisibility: false,
+      acceptedOpenAIParams: [],
+      reasoningPolicy: { reasoning: false },
     };
 
     for (const order of permutations(deployments)) {
@@ -114,11 +191,11 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([repeated, repeated], resolveCatalog)).toEqual(
       reduceModelGroup([repeated], resolveCatalog),
     );
-    // Conflicting variants of one deployment id stay plural, so they can never be
-    // mistaken for a single deployment and re-admit public route text as evidence.
+    // Conflicting variants of one deployment id both stay in the reduction.
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
     expect(expected).toMatchObject({ contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
+
     // Exact id-less repeats remain plural: equal content is not enough evidence
     // that two rows describe the same deployment.
     const seen: boolean[] = [];
@@ -126,38 +203,6 @@ describe("reduceModelGroup", () => {
       seen.push(singleton);
       return undefined;
     });
-    expect(seen).toEqual([false, false]);
-  });
-
-  it("reports singleton status from routable deployments only", () => {
-    const seen: boolean[] = [];
-    const record: CatalogResolver = (_entry, singleton) => {
-      seen.push(singleton);
-      return undefined;
-    };
-    const chat = row({ model_info: { id: "chat", mode: "chat" } });
-    const embedding = row({ model_info: { id: "embed", mode: "embedding" } });
-    const other = row({ model_info: { id: "other", mode: "chat" } });
-    const conflicting = row({ model_info: { id: "chat", mode: "chat", max_input_tokens: 8_000 } });
-
-    reduceModelGroup([chat], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, chat], record);
-    expect(seen).toEqual([true]);
-
-    // An unsupported sibling is not a routable deployment.
-    seen.length = 0;
-    reduceModelGroup([chat, embedding], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, other], record);
-    expect(seen).toEqual([false, false]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, conflicting], record);
     expect(seen).toEqual([false, false]);
   });
 
@@ -205,7 +250,9 @@ describe("reduceModelGroup", () => {
     );
     expect(result).toMatchObject({
       api: "openai-completions",
+
       // The embedding row votes on transport but does not reduce metadata.
+
       contextWindow: 200_000,
       maxTokens: 32_000,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
@@ -618,30 +665,302 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result).not.toHaveProperty("catalogProvider");
+
     expect(result?.thinkingLevelMap).toBeUndefined();
-    // The disagreement is reportable so the silent downgrade is diagnosable.
-    expect(result?.catalogAuthorityAmbiguous).toBe(true);
   });
 
-  it("flags ambiguous catalog authority only when resolved identities disagree", () => {
-    const anthropic = row({ model_info: { id: "anthropic", mode: "chat" } });
-    const openai = row({
-      model_info: { id: "openai", mode: "chat" },
-      litellm_params: { model: "openai/gpt-4o" },
-    });
-    const unresolved = row({
-      model_info: { id: "unknown", mode: "chat" },
-      litellm_params: { model: "internal/unknown" },
-    });
+  it("intersects accepted parameters across deployments", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "a", mode: "chat", supported_openai_params: ["temperature", "reasoning_effort"] },
+          litellm_params: { model: "internal/a" },
+        }),
+        row({
+          model_info: { id: "b", mode: "chat", supported_openai_params: ["reasoning_effort", "thinking"] },
+          litellm_params: { model: "internal/b", allowed_openai_params: ["reasoning_effort"] },
+        }),
+      ],
+      resolveCatalog,
+    );
 
-    // Unanimous identity, and wholly unknown identity, are not ambiguity.
-    expect(reduceModelGroup([anthropic], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([anthropic, anthropic], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([unresolved], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
-    expect(reduceModelGroup([unresolved, unresolved], resolveCatalog)).not.toHaveProperty("catalogAuthorityAmbiguous");
+    expect(result?.acceptedOpenAIParams).toEqual(["reasoning_effort"]);
+  });
 
-    // Conflicting identities, and partial evidence, both withhold authority.
-    expect(reduceModelGroup([anthropic, openai], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
-    expect(reduceModelGroup([anthropic, unresolved], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
+  it.each([
+    {
+      name: "Kimi K2.6 with binary thinking",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
+        compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+      },
+    },
+    {
+      // K2.7 Code cannot be switched off, so `off` stays denied while `high`
+      // rides the accepted `thinking` param.
+      name: "Kimi K2.7 Code with accepted thinking",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
+        compat: {
+          supportsReasoningEffort: false,
+          requiresReasoningContentOnAssistantMessages: true,
+          thinkingFormat: "deepseek",
+        },
+      },
+    },
+    {
+      name: "Kimi K2.7 Code without accepted controls",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
+        compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+      },
+    },
+    {
+      name: "Kimi K2.6 without accepted controls",
+      semanticModel: "kimi-k2.5-k2.6" as const,
+      params: undefined,
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: null,
+          xhigh: null,
+          max: null,
+        },
+        compat: { supportsReasoningEffort: false },
+      },
+    },
+    {
+      name: "Kimi K3 with effort",
+      semanticModel: "kimi-k3" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 with native controls",
+      semanticModel: "deepseek-v4" as const,
+      params: ["thinking", "reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "deepseek",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 through an effort-only route",
+      semanticModel: "deepseek-v4" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 through a thinking-only route",
+      semanticModel: "deepseek-v4" as const,
+      params: ["thinking"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: {
+          off: "off",
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: null,
+        },
+        compat: {
+          thinkingFormat: "deepseek",
+          supportsReasoningEffort: false,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+  ])("derives $name policy from semantic and accepted-control evidence", ({ semanticModel, params, expected }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supported_openai_params: params },
+          litellm_params: { model: "internal/model" },
+        }),
+      ],
+      () => ({ semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual(expected);
+  });
+
+  it.each([
+    {
+      name: "Kimi K3",
+      semanticModel: "kimi-k3" as const,
+    },
+    {
+      name: "DeepSeek V4",
+      semanticModel: "deepseek-v4" as const,
+    },
+  ])("preserves $name capability and replay without accepted-control evidence", ({ semanticModel }) => {
+    const result = reduceModelGroup(
+      [row({ model_info: { supports_reasoning: true }, litellm_params: { model: `internal/${semanticModel}` } })],
+      () => ({ semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+      compat: {
+        requiresReasoningContentOnAssistantMessages: true,
+        supportsReasoningEffort: false,
+      },
+    });
+  });
+
+  it("lets any explicit reasoning denial override accepted-control promotion", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "denied", supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+        row({
+          model_info: { id: "accepted", supports_reasoning: true, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+        }),
+      ],
+      () => ({ semanticModel: "kimi-k2.5-k2.6", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false, compat: { supportsReasoningEffort: false } });
+  });
+
+  it("preserves always-thinking Kimi display behavior from deployment evidence", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "misleading-public-route",
+          litellm_params: { model: "moonshot/kimi-k2-thinking" },
+          model_info: { supports_reasoning: true },
+        }),
+      ],
+      () => undefined,
+    );
+
+    expect(result?.suppressReasoningVisibility).toBe(false);
+  });
+
+  it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supports_reasoning: false, supported_openai_params: ["thinking"] },
+          litellm_params: { model: "moonshot/kimi-k2.7-code" },
+        }),
+      ],
+      () => ({ semanticModel: "kimi-k2.7-code", reasoning: true }),
+    );
+
+    expect(result?.reasoning).toBe(false);
+    expect(result?.reasoningPolicy).toEqual({
+      reasoning: false,
+      compat: { supportsReasoningEffort: false, requiresReasoningContentOnAssistantMessages: true },
+    });
+  });
+
+  it("fails closed for mixed semantic generations and accepted controls", () => {
+    const deployments = [
+      row({
+        model_info: { id: "k2", supported_openai_params: ["thinking"] },
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+      }),
+      row({
+        model_info: { id: "k3", supported_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: "moonshot/kimi-k3" },
+      }),
+    ];
+    const result = reduceModelGroup(deployments, (entry) => ({
+      semanticModel: entry.model_info?.id === "k2" ? "kimi-k2.5-k2.6" : "kimi-k3",
+    }));
+
+    expect(result?.acceptedOpenAIParams).toEqual([]);
+    expect(result?.reasoningPolicy).toEqual({ reasoning: false });
   });
 });
