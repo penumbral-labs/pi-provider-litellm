@@ -1,102 +1,13 @@
+import { SyntaxKind } from "@typescript/native-preview/unstable/ast";
+import { createScanner } from "@typescript/native-preview/unstable/ast/scanner";
 import { init, parse } from "es-module-lexer";
 
 // Extracts module specifiers from source text so the package-load contract can assert that
-// `src/` only imports things Pi's loader provides. es-module-lexer does the parsing: it is a
-// real ES module lexer, so comments, string contents and template literals are handled by
-// construction rather than by hand-rolled scanning.
-//
-// Two things the lexer cannot answer, both handled as policy:
-//   - a dynamic `import()` whose specifier is not a plain string literal reports no name,
-//     and is surfaced as UNVERIFIABLE_SPECIFIER rather than dropped;
-//   - CommonJS and dynamic-evaluation escape hatches are not ES imports at all, so they are
-//     rejected by name. `src/` is ESM-only, so any appearance is a contract violation.
+// `src/` only imports things Pi's loader provides. es-module-lexer parses ESM imports, while
+// TypeScript's scanner identifies executable CommonJS and dynamic-evaluation escape hatches
+// without mistaking comments, strings, templates, or regex literals for calls.
 export const UNVERIFIABLE_SPECIFIER = "<unverifiable-dynamic-specifier>";
 export const FORBIDDEN_RESOLVER = "<forbidden-dynamic-resolver>";
-
-const FORBIDDEN_RESOLVERS = [
-  /\brequire\s*\(/,
-  /\bcreateRequire\s*\(/,
-  /\beval\s*\(/,
-  /\bnew\s+Function\s*\(/,
-  /\bimport\.meta\.resolve\s*\(/,
-];
-
-// Replaces the contents of comments, regexes, and string/template literals with spaces,
-// preserving length, so a regex scan sees only executable text.
-function blankNonCode(source: string): string {
-  let out = "";
-  let index = 0;
-
-  while (index < source.length) {
-    const two = source.slice(index, index + 2);
-
-    if (two === "//" || two === "/*") {
-      const end = two === "//" ? source.indexOf("\n", index) : source.indexOf("*/", index + 2);
-      const stop = end === -1 ? source.length : two === "//" ? end : end + 2;
-      out += source.slice(index, stop).replace(/[^\n]/g, " ");
-      index = stop;
-      continue;
-    }
-
-    const quote = source[index];
-    if (quote === '"' || quote === "'" || quote === "`") {
-      let cursor = index + 1;
-      while (cursor < source.length) {
-        if (source[cursor] === "\\") {
-          cursor += 2;
-          continue;
-        }
-        if (source[cursor] === quote) break;
-        cursor += 1;
-      }
-      const stop = Math.min(cursor + 1, source.length);
-      out += source.slice(index, stop).replace(/[^\n]/g, " ");
-      index = stop;
-      continue;
-    }
-
-    if (quote === "/" && startsRegexLiteral(source, index)) {
-      let cursor = index + 1;
-      let inCharacterClass = false;
-      while (cursor < source.length) {
-        if (source[cursor] === "\\") {
-          cursor += 2;
-          continue;
-        }
-        if (source[cursor] === "[") inCharacterClass = true;
-        else if (source[cursor] === "]") inCharacterClass = false;
-        else if (source[cursor] === "/" && !inCharacterClass) {
-          cursor += 1;
-          while (/[a-z]/i.test(source[cursor] ?? "")) cursor += 1;
-          break;
-        }
-        cursor += 1;
-      }
-      out += source.slice(index, cursor).replace(/[^\n]/g, " ");
-      index = cursor;
-      continue;
-    }
-
-    out += source[index];
-    index += 1;
-  }
-
-  return out;
-}
-
-// JavaScript decides whether `/` starts a regex from the preceding token. Resolver calls in
-// this package are only rejected, never executed, so this small lexical predicate only needs
-// to keep regex contents from changing comment/string state in the policy scan.
-function startsRegexLiteral(source: string, slashIndex: number): boolean {
-  const prefix = source.slice(0, slashIndex).trimEnd();
-  if (prefix === "") return true;
-
-  const previous = prefix.at(-1) ?? "";
-  if ("([{:;,=!?&|+-*%^~<>".includes(previous)) return true;
-
-  const word = /[A-Za-z_$][\w$]*$/.exec(prefix)?.[0];
-  return word !== undefined && /^(?:await|case|delete|in|instanceof|of|return|throw|typeof|void|yield)$/.test(word);
-}
 
 let ready: Promise<void> | undefined;
 
@@ -106,17 +17,121 @@ export async function initImportSpecifiers(): Promise<void> {
   await ready;
 }
 
+const REGEX_PRECEDERS = new Set([
+  SyntaxKind.OpenParenToken,
+  SyntaxKind.OpenBracketToken,
+  SyntaxKind.OpenBraceToken,
+  SyntaxKind.CommaToken,
+  SyntaxKind.SemicolonToken,
+  SyntaxKind.ColonToken,
+  SyntaxKind.QuestionToken,
+  SyntaxKind.EqualsToken,
+  SyntaxKind.EqualsGreaterThanToken,
+  SyntaxKind.ReturnKeyword,
+  SyntaxKind.ThrowKeyword,
+  SyntaxKind.CaseKeyword,
+  SyntaxKind.DeleteKeyword,
+  SyntaxKind.TypeOfKeyword,
+  SyntaxKind.VoidKeyword,
+  SyntaxKind.YieldKeyword,
+  SyntaxKind.AwaitKeyword,
+]);
+
+function tokenEndsExpression(kind: SyntaxKind): boolean {
+  return (
+    kind === SyntaxKind.Identifier ||
+    kind === SyntaxKind.RequireKeyword ||
+    kind === SyntaxKind.NumericLiteral ||
+    kind === SyntaxKind.BigIntLiteral ||
+    kind === SyntaxKind.StringLiteral ||
+    kind === SyntaxKind.RegularExpressionLiteral ||
+    kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    kind === SyntaxKind.TemplateTail ||
+    kind === SyntaxKind.TrueKeyword ||
+    kind === SyntaxKind.FalseKeyword ||
+    kind === SyntaxKind.NullKeyword ||
+    kind === SyntaxKind.ThisKeyword ||
+    kind === SyntaxKind.SuperKeyword ||
+    kind === SyntaxKind.CloseParenToken ||
+    kind === SyntaxKind.CloseBracketToken ||
+    kind === SyntaxKind.CloseBraceToken ||
+    kind === SyntaxKind.PlusPlusToken ||
+    kind === SyntaxKind.MinusMinusToken
+  );
+}
+
+function scanTokens(source: string): Array<{ kind: SyntaxKind; text: string }> {
+  const scanner = createScanner(true, undefined, source);
+  const tokens: Array<{ kind: SyntaxKind; text: string }> = [];
+  let templateExpressionDepth = 0;
+  let previousKind: SyntaxKind | undefined;
+
+  while (true) {
+    let kind = scanner.scan();
+    if (
+      (kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) &&
+      (previousKind === undefined || REGEX_PRECEDERS.has(previousKind) || !tokenEndsExpression(previousKind))
+    ) {
+      kind = scanner.reScanSlashToken();
+    }
+    if (kind === SyntaxKind.EndOfFile) break;
+
+    const text = scanner.getTokenText();
+    if (kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle) templateExpressionDepth += 1;
+    tokens.push({ kind, text });
+
+    if (kind === SyntaxKind.CloseBraceToken && templateExpressionDepth > 0) {
+      kind = scanner.reScanTemplateToken(false);
+      tokens.push({ kind, text: scanner.getTokenText() });
+      if (kind === SyntaxKind.TemplateTail) templateExpressionDepth -= 1;
+    }
+    previousKind = kind;
+  }
+
+  return tokens;
+}
+
+function containsForbiddenResolver(source: string): boolean {
+  const tokens = scanTokens(source);
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const current = tokens[index];
+    const next = tokens[index + 1];
+    const previous = tokens[index - 1];
+
+    if (
+      next?.kind === SyntaxKind.OpenParenToken &&
+      (current.kind === SyntaxKind.RequireKeyword || current.text === "createRequire" || current.text === "eval")
+    ) {
+      return true;
+    }
+
+    if (
+      current.kind === SyntaxKind.NewKeyword &&
+      next?.text === "Function" &&
+      tokens[index + 2]?.kind === SyntaxKind.OpenParenToken
+    ) {
+      return true;
+    }
+
+    if (
+      previous?.kind === SyntaxKind.DotToken &&
+      current.text === "resolve" &&
+      next?.kind === SyntaxKind.OpenParenToken &&
+      tokens[index - 2]?.text === "meta" &&
+      tokens[index - 3]?.kind === SyntaxKind.DotToken &&
+      tokens[index - 4]?.kind === SyntaxKind.ImportKeyword
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function importSpecifiers(source: string, filename = "source.ts"): string[] {
   const [imports] = parse(source, filename);
   const specifiers = imports.map((entry) => entry.n ?? UNVERIFIABLE_SPECIFIER);
-
-  // Blank comment and literal bodies before the resolver scan. Only executable text counts:
-  // a doc comment or a message string mentioning `require()` is not a resolver call, and
-  // flagging one would fail the package contract for prose.
-  const executable = blankNonCode(source);
-  for (const pattern of FORBIDDEN_RESOLVERS) {
-    if (pattern.test(executable)) specifiers.push(FORBIDDEN_RESOLVER);
-  }
-
+  if (containsForbiddenResolver(source)) specifiers.push(FORBIDDEN_RESOLVER);
   return specifiers;
 }

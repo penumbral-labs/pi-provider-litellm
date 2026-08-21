@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -25,15 +25,52 @@ interface LoadResult {
   extensions: unknown[];
 }
 
-async function loadExtension(entrypoint: string, cwd: string): Promise<LoadResult> {
-  const loaderUrl = pathToFileURL(
-    resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
-  ).href;
-  const { loadExtensions } = (await import(loaderUrl)) as {
-    loadExtensions(paths: string[], cwd: string): Promise<LoadResult>;
-  };
+async function loadExtension(
+  entrypoint: string,
+  cwd: string,
+  loaderPath = resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
+): Promise<LoadResult> {
+  let loader: unknown;
+  try {
+    loader = await import(pathToFileURL(loaderPath).href);
+  } catch (error) {
+    throw new Error(
+      `Pi's internal extension loader is unavailable at ${loaderPath}; update this package test for the installed @earendil-works/pi-coding-agent layout`,
+      { cause: error },
+    );
+  }
 
-  return loadExtensions([entrypoint], cwd);
+  const loadExtensions = (loader as { loadExtensions?: unknown }).loadExtensions;
+  if (typeof loadExtensions !== "function") {
+    throw new Error(`Pi's internal extension loader at ${loaderPath} does not export loadExtensions`);
+  }
+
+  return (loadExtensions as (paths: string[], cwd: string) => Promise<LoadResult>)([entrypoint], cwd);
+}
+
+function isPathOutsideRepo(path: string, root = repoRoot): boolean {
+  const pathFromRepo = relative(root, path);
+  return (
+    pathFromRepo !== "" && (isAbsolute(pathFromRepo) || pathFromRepo === ".." || pathFromRepo.startsWith(`..${sep}`))
+  );
+}
+
+function expectFixtureOutsideRepo(fixture: string): void {
+  expect(isPathOutsideRepo(fixture), `${fixture} must be outside ${repoRoot}`).toBe(true);
+}
+
+async function runListModels(piBin: string, cwd: string, agentDir: string): Promise<string> {
+  const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
+    cwd,
+    env: hermeticChildEnv({
+      PI_CODING_AGENT_DIR: agentDir,
+      LITELLM_HEADERS: "{bad json",
+      LITELLM_OFFLINE: "1",
+      LITELLM_BASE_URL: "https://proxy.invalid",
+      LITELLM_API_KEY: "sk-not-a-real-key",
+    }),
+  });
+  return `${stdout}${stderr}`;
 }
 
 describe("package gallery metadata", () => {
@@ -65,9 +102,18 @@ describe("pi package compatibility", () => {
     expect(manifest).not.toHaveProperty("exports");
   });
 
+  it("reports when Pi's internal extension loader path changes", async () => {
+    const missingLoader = join(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/missing-loader.js");
+
+    await expect(loadExtension("unused.ts", repoRoot, missingLoader)).rejects.toThrow(
+      `Pi's internal extension loader is unavailable at ${missingLoader}`,
+    );
+  });
+
   it("loads a production-only Git archive from its manifest entrypoint", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-git-package-"));
     try {
+      expectFixtureOutsideRepo(fixture);
       // Archive HEAD, not the working tree: a Git install materialises the committed
       // tree, `git stash create` writes objects into an object store shared with sibling
       // worktrees, and its output silently omits untracked files. Working-tree fidelity
@@ -98,6 +144,7 @@ describe("pi package compatibility", () => {
   it("packs, installs, and loads the source package without TypeScript stripping in node_modules", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-npm-package-"));
     try {
+      expectFixtureOutsideRepo(fixture);
       const { stdout: tarballName } = await execFileAsync(
         "npm",
         ["pack", "--ignore-scripts", "--pack-destination", fixture],
@@ -143,27 +190,15 @@ describe("pi package compatibility", () => {
     const detector = "failed to parse custom headers";
     const piBin = resolve(repoRoot, "node_modules/.bin/pi");
 
-    const listModels = async (cwd: string): Promise<string> => {
-      const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
-        cwd,
-        env: hermeticChildEnv({
-          PI_CODING_AGENT_DIR: agentDir,
-          LITELLM_HEADERS: "{bad json",
-          LITELLM_OFFLINE: "1",
-          LITELLM_BASE_URL: "https://proxy.invalid",
-          LITELLM_API_KEY: "sk-not-a-real-key",
-        }),
-      });
-      return `${stdout}${stderr}`;
-    };
-
     try {
+      expectFixtureOutsideRepo(fixture);
+      expectFixtureOutsideRepo(agentDir);
       const archivePath = join(fixture, "git-package.tar");
       await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, "HEAD"], { cwd: repoRoot });
       await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
       await rm(archivePath);
 
-      expect(await listModels(fixture)).toContain(detector);
+      expect(await runListModels(piBin, fixture, agentDir)).toContain(detector);
 
       // Negative control: a manifest entrypoint that does not exist is skipped silently by
       // the loader, so without this the assertion above could pass on a stale global copy.
@@ -172,7 +207,7 @@ describe("pi package compatibility", () => {
       manifest.pi.extensions = ["./src/does-not-exist.ts"];
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      expect(await listModels(fixture)).not.toContain(detector);
+      expect(await runListModels(piBin, fixture, agentDir)).not.toContain(detector);
     } finally {
       await rm(fixture, { force: true, recursive: true });
       await rm(agentDir, { force: true, recursive: true });
@@ -190,6 +225,8 @@ describe("pi package compatibility", () => {
     const piBin = resolve(repoRoot, "node_modules/.bin/pi");
 
     try {
+      expectFixtureOutsideRepo(fixture);
+      expectFixtureOutsideRepo(agentDir);
       const archivePath = join(fixture, "git-package.tar");
       await execFileAsync("git", ["archive", "--format=tar", `--output=${archivePath}`, "HEAD"], { cwd: repoRoot });
       await execFileAsync("tar", ["-xf", archivePath, "-C", fixture]);
@@ -219,25 +256,16 @@ describe("pi package compatibility", () => {
         "utf8",
       );
 
+      const populatedOutput = await runListModels(piBin, fixture, agentDir);
+      expect(populatedOutput).toContain(cachedModelId);
+
       const manifestPath = join(fixture, "package.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest;
       manifest.pi.extensions = ["./src/does-not-exist.ts"];
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      const { stdout, stderr } = await execFileAsync(piBin, ["-e", ".", "--list-models", "litellm"], {
-        cwd: fixture,
-        env: hermeticChildEnv({
-          PI_CODING_AGENT_DIR: agentDir,
-          LITELLM_HEADERS: "{bad json",
-          LITELLM_OFFLINE: "1",
-          LITELLM_BASE_URL: "https://proxy.invalid",
-          LITELLM_API_KEY: "sk-not-a-real-key",
-        }),
-      });
-      const output = `${stdout}${stderr}`;
-
-      // The store is present, so a naive assertion on cached ids would pass here.
-      expect(output).not.toContain("failed to parse custom headers");
+      const brokenEntrypointOutput = await runListModels(piBin, fixture, agentDir);
+      expect(brokenEntrypointOutput).not.toContain("failed to parse custom headers");
     } finally {
       await rm(fixture, { force: true, recursive: true });
       await rm(agentDir, { force: true, recursive: true });

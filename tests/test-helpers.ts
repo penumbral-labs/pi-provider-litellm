@@ -19,6 +19,14 @@ export const MANAGED_ENV_VARS = [
   "APPDATA",
 ] as const;
 
+// Returns a subprocess environment with every source-read variable cleared before
+// applying explicit overrides.
+export function hermeticChildEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of MANAGED_ENV_VARS) delete env[name];
+  return { ...env, ...overrides };
+}
+
 // Snapshots and clears the managed variables before each test and restores the
 // original values afterwards, so a result never depends on ambient environment or
 // on which test ran first in the file.
@@ -26,12 +34,6 @@ export const MANAGED_ENV_VARS = [
 // `extra` adds suite-specific names. HOME is deliberately not in the shared set: clearing
 // it for every suite would break the npm and git subprocesses tests/package.test.ts spawns,
 // so only the suites that exercise ADC path discovery opt into it.
-export function hermeticChildEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const name of MANAGED_ENV_VARS) delete env[name];
-  return { ...env, ...overrides };
-}
-
 export function useHermeticEnv(extra: readonly string[] = []): void {
   const managed = [...MANAGED_ENV_VARS, ...extra];
   let saved: Array<[string, string | undefined]> = [];

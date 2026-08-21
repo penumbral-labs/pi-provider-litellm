@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parsePushTriggers } from "./workflow-triggers.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -103,9 +104,11 @@ describe("LiteLLM smoke workflow", () => {
     expect(readReleaseWorkflow()).toContain("run: npm publish --access public --provenance");
   });
 
-  it("keeps the publish flow tag-driven", () => {
-    expect(readReleaseWorkflow()).toContain("tags:");
-    expect(readReleaseWorkflow()).toContain("v*.*.*");
+  it("keeps the publish flow tag-only", () => {
+    expect(parsePushTriggers(readReleaseWorkflow())).toEqual({
+      branches: [],
+      tags: ["v*.*.*"],
+    });
   });
 
   // `--list-models` also reports models from Pi's own store, so this leg must run against an
