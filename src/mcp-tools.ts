@@ -56,7 +56,7 @@ export type McpIncidentReason = McpDropReason | McpDegradeReason;
 
 const DROP_REASON_TEXT: Readonly<Record<McpDropReason, string>> = {
   "invalid-tool": "a missing name or server identity",
-  "duplicate-identity": "a repeated identity (the first occurrence of each is the one registered)",
+  "duplicate-identity": "a repeated valid identity (the first valid occurrence of each is the one registered)",
   "invalid-schema": "an invalid or oversized input schema",
   "name-collision": "a colliding generated Pi name",
 };
@@ -80,6 +80,8 @@ export interface McpPreparationReport {
   enveloped: number;
   // Tools discarded because the registered-tool cap was reached.
   overflow: number;
+  // Bounded generated names for the overflow membership, used to detect catalog changes.
+  overflowTools: string[];
   dropped: Array<{ reason: McpDropReason; tools: string[] }>;
   degraded: Array<{ reason: McpDegradeReason; tools: string[] }>;
 }
@@ -911,23 +913,20 @@ export function prepareTools(discovery: McpDiscovery): {
 
   for (const label of discovery.invalid) recordDrop("invalid-tool", label);
 
-  const unique = new Map<string, LiteLLMMcpTool>();
-  for (const tool of discovery.tools) {
-    const identity = toolIdentity(tool);
-    if (unique.has(identity)) {
-      recordDrop("duplicate-identity", buildPiToolName(tool));
-      continue;
-    }
-    unique.set(identity, tool);
-  }
-
   const accepted: Array<Omit<PreparedTool, "name"> & { degraded?: McpDegradeReason }> = [];
-  for (const tool of unique.values()) {
+  const acceptedIdentities = new Set<string>();
+  for (const tool of discovery.tools) {
     const built = buildParameters(tool);
     if (typeof built === "string") {
       recordDrop(built, buildPiToolName(tool));
       continue;
     }
+    const identity = toolIdentity(tool);
+    if (acceptedIdentities.has(identity)) {
+      recordDrop("duplicate-identity", buildPiToolName(tool));
+      continue;
+    }
+    acceptedIdentities.add(identity);
     accepted.push({
       tool,
       parameters: built.parameters,
@@ -937,6 +936,7 @@ export function prepareTools(discovery: McpDiscovery): {
   }
 
   const candidates = accepted.slice(0, MAX_REGISTERED_TOOLS);
+  const overflowTools = accepted.slice(MAX_REGISTERED_TOOLS).map(({ tool }) => buildPiToolName(tool));
   const finalNames = new Set<string>();
   const prepared: PreparedTool[] = [];
   for (const candidate of candidates) {
@@ -964,7 +964,8 @@ export function prepareTools(discovery: McpDiscovery): {
       // Counting only hazard degradations would tell an operator that schemaless tools have a
       // Pi-side argument contract when they do not.
       enveloped: prepared.filter((tool) => tool.syntheticArgsEnvelope).length,
-      overflow: accepted.length - candidates.length,
+      overflow: overflowTools.length,
+      overflowTools,
       dropped: [...drops.entries()].map(([reason, tools]) => ({ reason, tools })),
       degraded: [...degrades.entries()].map(([reason, tools]) => ({ reason, tools })),
     },
@@ -998,7 +999,7 @@ function emitPreparationDiagnostics(report: McpPreparationReport): void {
     emitSafetyDiagnostic(
       "tool-cap",
       `ignoring ${plural(report.overflow, "MCP tool")} beyond the ${MAX_REGISTERED_TOOLS}-tool limit.`,
-      `tool-cap:${report.overflow}`,
+      `${report.overflow}:${membershipIdentity(report.overflowTools)}`,
     );
   }
   // Clear classes that did not recur, so the same incident is reported again if it comes back

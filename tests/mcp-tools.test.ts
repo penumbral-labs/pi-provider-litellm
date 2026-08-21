@@ -444,9 +444,9 @@ describe("createMcpToolDefinitions", () => {
     expect(diagnostics.filter((message) => message.includes("MCP tool call response exceeded"))).toHaveLength(1);
 
     // Each class is reported on its own line, with a count and the sanitized generated names.
-    const duplicateLine = diagnostics.find((message) => message.includes("a repeated identity"));
+    const duplicateLine = diagnostics.find((message) => message.includes("a repeated valid identity"));
     expect(duplicateLine).toMatch(
-      /^LiteLLM MCP: dropped 1 MCP tool with a repeated identity \(the first occurrence of each is the one registered\): mcp_server_duplicate_[a-f0-9]{10}\.\n$/,
+      /^LiteLLM MCP: dropped 1 MCP tool with a repeated valid identity \(the first valid occurrence of each is the one registered\): mcp_server_duplicate_[a-f0-9]{10}\.\n$/,
     );
     const schemaLine = diagnostics.find((message) => message.includes("invalid or oversized input schema"));
     expect(schemaLine).toMatch(
@@ -537,6 +537,24 @@ describe("createMcpToolDefinitions", () => {
     expect(definitions).toHaveLength(2);
     for (const definition of definitions) expect(definition.name).toMatch(/^mcp_shared_search_[a-f0-9]{10}$/);
     expect(new Set(definitions.map((definition) => definition.name)).size).toBe(2);
+  });
+
+  it("preserves a valid duplicate after an invalid occurrence of the same identity", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "duplicate", server_name: "server", input_schema: { type: "array" } },
+        { name: "duplicate", server_name: "server", input_schema: { type: "object", properties: {} } },
+      ]),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions.map((tool) => tool.name)).toEqual([named("mcp_server_duplicate")]);
+    expect(report.dropped.map(({ reason }) => reason)).toEqual(["invalid-schema"]);
+    expect(report.prepared + report.dropped[0]!.tools.length + report.overflow).toBe(report.discovered);
   });
 
   it("caps registered tools after invalid entries are isolated", async () => {
@@ -1460,6 +1478,35 @@ describe("incident identity covers full membership", () => {
     fetchMock.mockImplementation(async () => jsonResponse(200, { tools: swapped.map(broken) }));
     await createDefinitionsRaw(auth);
     expect(lines()).toHaveLength(2);
+  });
+
+  it("re-reports when tool-cap membership changes without changing the overflow count", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const tool = (name: string) => ({
+      name,
+      server_name: "srv",
+      inputSchema: { type: "object", properties: {} },
+    });
+    const lines = () =>
+      stderr.mock.calls.map(([message]) => String(message)).filter((message) => message.includes("512-tool limit"));
+    const firstCatalog = Array.from({ length: 513 }, (_, index) => tool(`tool-${index}`));
+
+    fetchMock.mockImplementation(async () => jsonResponse(200, { tools: firstCatalog }));
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(1);
+
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(1);
+
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(200, { tools: [...firstCatalog.slice(0, 512), tool("replacement-overflow")] }),
+    );
+    await createDefinitionsRaw(auth);
+    expect(lines()).toHaveLength(2);
+    expect(lines()[1]).toBe("LiteLLM MCP: ignoring 1 MCP tool beyond the 512-tool limit.\n");
   });
 
   it("reports a body-cap breach again after a clean response on the same surface", async () => {
