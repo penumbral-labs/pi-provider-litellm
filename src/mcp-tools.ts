@@ -632,8 +632,11 @@ function resolvePointer(root: unknown, fragment: string): unknown {
   for (const rawToken of fragment.slice(1).split("/")) {
     const token = rawToken.replaceAll("~1", "/").replaceAll("~0", "~");
     if (Array.isArray(current)) {
+      // TypeBox indexes arrays with the pointer token itself. Accept only the canonical decimal
+      // spellings that can name JSON array elements; Number("01") would incorrectly alias index 1.
+      if (!/^(0|[1-9]\d*)$/.test(token)) return POINTER_MISSING;
       const index = Number(token);
-      if (!Number.isInteger(index) || index < 0 || index >= current.length) return POINTER_MISSING;
+      if (!Number.isSafeInteger(index) || index >= current.length) return POINTER_MISSING;
       current = current[index];
       continue;
     }
@@ -663,6 +666,9 @@ function findLocalRefHazard(
     if (visited.has(pointer)) return "ref-cycle";
     visited.add(pointer);
     if (visited.size > MAX_REF_HOPS) return "budget";
+    // TypeBox percent-decodes URI fragments before resolving their JSON pointer. Keeping encoded
+    // refs would require exactly mirroring that decoding (including failures), so refuse them.
+    if (pointer.includes("%")) return "unresolvable-ref";
     const target = resolvePointer(root, pointer.slice(1));
     if (target === POINTER_MISSING) return "unresolvable-ref";
     // A boolean is always a complete schema, independent of where it appears in the document.
@@ -694,6 +700,14 @@ function schemaPositionNodes(root: Record<string, unknown>): WeakSet<object> {
     for (const keyword of SCHEMA_MAP_KEYWORDS) {
       const map = asRecord(schema[keyword]);
       if (map) for (const child of Object.values(map)) visitSchema(child);
+    }
+    const dependencies = asRecord(schema.dependencies);
+    if (dependencies) {
+      for (const child of Object.values(dependencies)) {
+        // Draft-07 dependencies may also be arrays of property names; only schema-valued entries
+        // establish independently reachable schema positions.
+        if (typeof child === "boolean" || asRecord(child)) visitSchema(child);
+      }
     }
     for (const keyword of SCHEMA_ARRAY_KEYWORDS) {
       const schemas = schema[keyword];
@@ -759,6 +773,9 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
         if (key === "$ref") {
           if (typeof child !== "string") return "malformed-ref";
           if (!child.startsWith("#")) return "nonlocal-ref";
+          // TypeBox decodes percent escapes before pointer lookup. Reject encoded local refs rather
+          // than risk validating a different target from the one TypeBox will compile.
+          if (child.includes("%")) return "unresolvable-ref";
           // Resolve after the complete walk so acceptance cannot depend on whether the referenced
           // schema appeared before or after this `$ref` in object insertion order.
           localRefs.push(child);
@@ -800,15 +817,24 @@ function isValidSchemaArray(value: unknown): boolean {
   return Array.isArray(value) && value.every(isValidSchema);
 }
 
-function isValidRequired(value: unknown): boolean {
+function isStringArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isValidDependencies(value: unknown): boolean {
+  const dependencies = asRecord(value);
+  return (
+    dependencies !== undefined &&
+    Object.values(dependencies).every((entry) => isValidSchema(entry) || isStringArray(entry))
+  );
 }
 
 // Shape validation is a separate concern from the hazard scan above: it exists to avoid handing the
 // validator a structurally broken document, and it deliberately only looks where a subschema may
 // legally appear so that data positions are not misread as constraints.
 function hasValidSchemaShape(record: Record<string, unknown>): boolean {
-  if ("required" in record && !isValidRequired(record.required)) return false;
+  if ("required" in record && !isStringArray(record.required)) return false;
+  if ("dependencies" in record && !isValidDependencies(record.dependencies)) return false;
   if (SCHEMA_MAP_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaMap(record[keyword]))) return false;
   if (SCHEMA_ARRAY_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaArray(record[keyword]))) return false;
   if (DIRECT_SCHEMA_KEYWORDS.some((keyword) => keyword in record && !isValidSchema(record[keyword]))) return false;

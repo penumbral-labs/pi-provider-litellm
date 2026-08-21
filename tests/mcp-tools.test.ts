@@ -1112,6 +1112,28 @@ describe("untrusted schema hazards", () => {
     },
   );
 
+  it("refuses a percent-encoded ref decoy before the validator can decode it", async () => {
+    const decoy = {
+      type: "object",
+      $defs: {
+        "a%2Fdependencies": { type: "string" },
+        a: { dependencies: { pattern: CATASTROPHIC } },
+      },
+      properties: { s: { $ref: "#/$defs/a%2Fdependencies" } },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, { tools: [{ name: "decoy", server_name: "srv", inputSchema: decoy }] }),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    expect(report.enveloped).toBe(0);
+    expect(definitions).toEqual([]);
+    expect(Object.fromEntries(report.dropped.map((entry) => [entry.reason, entry.tools.length]))).toEqual({
+      "invalid-schema": 1,
+    });
+  });
+
   it("reports envelope degradation under its own class, without echoing the schema", async () => {
     vi.resetModules();
     const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
@@ -1148,6 +1170,10 @@ describe("untrusted schema hazards", () => {
       [
         "a local ref to a real subschema",
         { type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } },
+      ],
+      [
+        "an escaped local ref to a real subschema",
+        { type: "object", $defs: { "a/b": { type: "string" } }, properties: { s: { $ref: "#/$defs/a~1b" } } },
       ],
       ["an enum containing the word pattern", { type: "object", properties: { s: { enum: ["pattern", "other"] } } }],
       [
@@ -1467,6 +1493,26 @@ describe("findSchemaHazard", () => {
     expect(findSchemaHazard({ type: "object", properties: { s: { [keyword]: 7 } } })).toBe("malformed-ref");
   });
 
+  it("rejects percent-encoded local refs before TypeBox can decode them to a different target", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: {
+          "a%2Fdependencies": { type: "string" },
+          a: { dependencies: { pattern: "^(a+)+$" } },
+        },
+        properties: { s: { $ref: "#/$defs/a%2Fdependencies" } },
+      }),
+    ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: { s: { type: "string" } },
+        properties: { s: { $ref: "#/$defs/%73" } },
+      }),
+    ).toBe("unresolvable-ref");
+  });
+
   it("only resolves local references to independently valid schemas", () => {
     expect(
       findSchemaHazard({
@@ -1603,6 +1649,18 @@ describe("every registered schema is safe for the validator that consumes it", (
       },
     },
     {
+      name: "refpercentdecoy",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        $defs: {
+          "a%2Fdependencies": { type: "string" },
+          a: { dependencies: { pattern: EVIL } },
+        },
+        properties: { s: { $ref: "#/$defs/a%2Fdependencies" } },
+      },
+    },
+    {
       name: "viaadditems",
       server_name: "srv",
       inputSchema: { type: "object", properties: { a: { type: "array", additionalItems: { pattern: EVIL } } } },
@@ -1723,15 +1781,35 @@ describe("every registered schema is safe for the validator that consumes it", (
             server_name: "srv",
             inputSchema: { type: "object", properties: { s: { $ref: "#" } } },
           },
+          {
+            name: "escapedref",
+            server_name: "srv",
+            inputSchema: {
+              type: "object",
+              $defs: { "a/b": { type: "string" } },
+              properties: { s: { $ref: "#/$defs/a~1b" } },
+            },
+          },
+          {
+            name: "dependencyref",
+            server_name: "srv",
+            inputSchema: {
+              type: "object",
+              dependencies: { enabled: { type: "object", properties: { token: { type: "string" } } } },
+              properties: { enabled: { type: "boolean" }, guarded: { $ref: "#/dependencies/enabled" } },
+            },
+          },
         ],
       }),
     );
     const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
     expect(report.enveloped).toBe(0);
-    expect(definitions).toHaveLength(2);
+    expect(definitions).toHaveLength(4);
     expect(definitions.map((definition) => JSON.stringify(definition.parameters))).toEqual([
       expect.stringContaining('"$ref":"#/$defs/s"'),
       expect.stringContaining('"$ref":"#"'),
+      expect.stringContaining('"$ref":"#/$defs/a~1b"'),
+      expect.stringContaining('"$ref":"#/dependencies/enabled"'),
     ]);
   });
 });
@@ -1775,7 +1853,7 @@ describe("reference resolution hazards", () => {
       findSchemaHazard({ type: "object", $defs: { s: true }, properties: { s: { $ref: "#/$defs/s" } } }),
     ).toBeUndefined();
     expect(findSchemaHazard({ type: "object", properties: { s: { $ref: "#" } } })).toBeUndefined();
-    // Escaped pointer tokens resolve correctly.
+    // Escaped pointer tokens and canonical array indices resolve correctly.
     expect(
       findSchemaHazard({
         type: "object",
@@ -1783,6 +1861,27 @@ describe("reference resolution hazards", () => {
         properties: { s: { $ref: "#/$defs/a~1b" } },
       }),
     ).toBeUndefined();
+    expect(
+      findSchemaHazard({
+        type: "object",
+        allOf: [{ type: "string" }],
+        properties: { s: { $ref: "#/allOf/0" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      findSchemaHazard({
+        type: "object",
+        dependencies: { enabled: { type: "object", properties: { token: { type: "string" } } } },
+        properties: { guarded: { $ref: "#/dependencies/enabled" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      findSchemaHazard({
+        type: "object",
+        allOf: [{ type: "string" }],
+        properties: { s: { $ref: "#/allOf/00" } },
+      }),
+    ).toBe("unresolvable-ref");
   });
 
   it("follows a chain of local references and rejects one that leaves the document", () => {
@@ -1870,11 +1969,21 @@ describe("regex keywords are refused regardless of value type", () => {
     expect(JSON.stringify(definitions.map((definition) => definition.parameters))).not.toContain("(a+)+");
   });
 
-  it("drops a structurally invalid patternProperties before the hazard scan sees it", async () => {
+  it("drops structurally invalid schema maps and dependencies before the hazard scan sees them", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         tools: [
           { name: "arr", server_name: "srv", inputSchema: { type: "object", patternProperties: [{ "^a+$": {} }] } },
+          {
+            name: "scalar-dependency",
+            server_name: "srv",
+            inputSchema: { type: "object", dependencies: { enabled: "^(a+)+$" } },
+          },
+          {
+            name: "mixed-dependency-array",
+            server_name: "srv",
+            inputSchema: { type: "object", dependencies: { enabled: ["other", 7] } },
+          },
         ],
       }),
     );
@@ -1882,9 +1991,30 @@ describe("regex keywords are refused regardless of value type", () => {
       baseUrl: "https://litellm.example.com",
       apiKey: "sk-test",
     }));
-    // An array-valued schema map is not valid JSON Schema, so it is a loss rather than a degradation.
     expect(definitions).toEqual([]);
-    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 1 });
+    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 3 });
+  });
+
+  it("accepts schema-valued and string-array dependencies", async () => {
+    const schemas = [
+      { type: "object", dependencies: { enabled: { type: "object", properties: { token: { type: "string" } } } } },
+      { type: "object", dependencies: { enabled: ["token"] } },
+    ];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: schemas.map((inputSchema, index) => ({
+          name: `valid-dependency-${index}`,
+          server_name: "srv",
+          inputSchema,
+        })),
+      }),
+    );
+    const { definitions, report } = await createMcpToolDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+    expect(report.enveloped).toBe(0);
+    expect(definitions.map((definition) => definition.parameters)).toEqual(schemas);
   });
 
   it("still leaves a property literally named pattern alone", () => {
