@@ -239,6 +239,25 @@ describe("createLiteLLMProvider", () => {
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
+  it.each(["stream", "streamSimple"] as const)(
+    "passes the AuthResult env root and API key to resolveCredentialRoot for %s",
+    (method) => {
+      const resolveCredentialRoot = vi.fn(() => "https://proxy.example");
+      const value = controller({ resolveCredentialRoot });
+
+      value[method](
+        native(method),
+        { messages: [] },
+        {
+          apiKey: "resolved-key",
+          env: { LITELLM_BASE_URL: "https://auth-result.example" },
+        },
+      );
+
+      expect(resolveCredentialRoot).toHaveBeenCalledWith(undefined, "https://auth-result.example", "resolved-key");
+    },
+  );
+
   it("blocks requests when active credentials have no model host", () => {
     const value = controller({ resolveCredentialRoot: () => undefined });
 
