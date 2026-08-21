@@ -253,12 +253,16 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const adapterProvider = adapterCatalogProvider(adapter);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
   const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
-  const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
-  const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
-  const semantic = families.length > 0 && families.every((family) => family === families[0]) ? families[0] : undefined;
-  const routingCatalog = routingModel ? resolveCatalogModel(routingModel, undefined, adapterProvider) : undefined;
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
+  const routingCatalog = routingModel ? resolveCatalogModel(routingModel, undefined, adapterProvider) : undefined;
+  const conflictingFamilies =
+    routingModel !== undefined &&
+    baseFamily !== undefined &&
+    ((routingFamily !== undefined && routingFamily !== baseFamily) ||
+      (routingCatalog !== undefined && semanticFamily(routingCatalog.model.id) !== baseFamily));
+  const semantic =
+    routingFamily ?? (routingCatalog ? semanticFamily(routingCatalog.model.id) : undefined) ?? baseFamily;
   const routingAllowsBaseWitness =
     routingModel === undefined ||
     routingFamily === "claude" ||
@@ -267,10 +271,14 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     adapter !== undefined &&
     CLAUDE_CAPABLE_ADAPTERS.has(adapter) &&
     ((routingModel !== undefined && routingFamily === "claude" && CLAUDE_MODEL_PATTERN.test(routingModel)) ||
-      (routingAllowsBaseWitness &&
+      (!conflictingFamilies &&
+        routingAllowsBaseWitness &&
         baseModel !== undefined &&
         baseFamily === "claude" &&
         CLAUDE_MODEL_PATTERN.test(baseModel)));
+  const candidates = [routingModel, baseModel]
+    .filter((candidate): candidate is string => candidate !== undefined)
+    .filter((candidate) => !conflictingFamilies || candidate === baseModel);
   // routingModel and base_model are two descriptions of one deployment, so the
   // first catalogued policy wins here. Group-level unanimity is enforced later.
   const compat = claudeEvidence

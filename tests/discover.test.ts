@@ -1549,3 +1549,33 @@ describe("discoverModels timeout", () => {
     expect(Date.now() - start).toBeLessThan(500);
   });
 });
+
+describe("native Messages backend evidence conflicts", () => {
+  it("does not let a Claude base_model override a contrary routed family", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "contrary-route",
+        litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+        model_info: {
+          mode: "chat",
+          litellm_provider: "bedrock",
+          base_model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0",
+        },
+      }),
+    ).not.toMatchObject({ semanticFamily: "claude", messagesCompat: expect.anything() });
+  });
+
+  it("uses Claude base_model evidence for an opaque adapter target", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "opaque-route",
+        litellm_params: { model: "bedrock/arn:aws:bedrock:us-east-1:123:application-inference-profile/opaque" },
+        model_info: {
+          mode: "chat",
+          litellm_provider: "bedrock",
+          base_model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0",
+        },
+      }),
+    ).toMatchObject({ semanticFamily: "claude", messagesCompat: expect.anything() });
+  });
+});
