@@ -328,12 +328,18 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
     .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
   const evidenceProviders = new Set(resolutions.map((resolved) => resolved.provider));
+  const catalogIdentities = new Set(resolutions.map((resolved) => `${resolved.provider}\0${resolved.model.id}`));
   for (const candidate of candidates) {
     const provider = qualifiedModelProvider(candidate);
     if (provider) evidenceProviders.add(provider);
   }
   if (adapterProvider) evidenceProviders.add(adapterProvider);
   if (evidenceProviders.size > 1) return undefined;
+  if (catalogIdentities.size > 1) {
+    return resolvedFamily || model
+      ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
+      : undefined;
+  }
   const resolved = resolutions[0];
   if (resolved) {
     return {
@@ -423,15 +429,20 @@ function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
 
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
-  ambiguousRoutes?: string[],
-  withheldRepairRoutes?: string[],
+  options: {
+    ambiguousRoutes?: string[];
+    withheldRepairRoutes?: string[];
+    allowRouteCatalogFallback?: boolean;
+    denyLevels?: boolean;
+  } = {},
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
     if (resolved) return resolved;
     const semanticFamily = deploymentFamily(entry);
     if (semanticFamily) return { semanticFamily };
-    if (!singleton || hasReadableBackendEvidence(entry)) return undefined;
+    if (options.allowRouteCatalogFallback === false || !singleton || hasReadableBackendEvidence(entry))
+      return undefined;
     // Preserve upstream singleton enrichment only when LiteLLM provides no
     // readable backend identity. Route text never overrides opaque evidence.
     // `reduceModelGroup` only passes rows whose route name is a readable string.
@@ -440,7 +451,7 @@ function mapFromModelInfoGroup(
     return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
+  if (reduced.catalogAuthorityAmbiguous) options.ambiguousRoutes?.push(reduced.id);
   const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
   const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
   // The semantic policy's compat only applies on Chat, so its level map must be
@@ -454,12 +465,13 @@ function mapFromModelInfoGroup(
     semanticLevels: reasoningPolicy?.thinkingLevelMap,
     catalogLevels: reduced.thinkingLevelMap,
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
+    denyLevels: options.denyLevels,
   });
   const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
   const unanimousMoonshot =
     reduced.deploymentFamilies.length > 0 && reduced.deploymentFamilies.every((family) => family === "kimi");
   const moonshotEvidence = reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id));
-  if (moonshotEvidence && !unanimousMoonshot) withheldRepairRoutes?.push(reduced.id);
+  if (moonshotEvidence && !unanimousMoonshot) options.withheldRepairRoutes?.push(reduced.id);
   const modelPolicy = requestPolicy(
     reduced.id,
     reduced.deploymentFamilies,
@@ -485,61 +497,46 @@ function mapFromModelInfoGroup(
   };
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
-  return mapFromModelInfoGroup([entry]);
+interface HealthDeployment {
+  entry: ModelInfoEntry;
+  allowRouteCatalogFallback: boolean;
+  denyLevels: boolean;
+  endpointOnly: boolean;
 }
 
-function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  const named = wireString(entry.model_name) || !fallbackId ? entry : { ...entry, model_name: fallbackId };
-  // `/health` detail lookups are per deployment, not complete route groups, so
-  // they stay on Chat. Rewriting the mode before reduction keeps the deployment
-  // on the ordinary Chat path, so vendor and reasoning-replay compatibility are
-  // built for it instead of being patched back on afterwards. Modes this
-  // discovery cannot serve at all are left alone so they still drop out.
-  const chatOnly = isResponsesMode(named.model_info?.mode)
-    ? { ...named, model_info: { ...named.model_info, mode: "chat" } }
-    : named;
-  const model = mapFromModelInfo(chatOnly);
-  if (!model) return undefined;
-  // Without a deployment `model_name` the only identifier is the `/health` route
-  // text, which is not evidence for request controls. Deleting the map would hand
-  // pi-ai an absent map, i.e. every standard level, so the conclusion is closed
-  // again with no candidate levels rather than mutated in place.
-  if (wireString(entry.model_name)) return model;
+function healthDeployment(
+  detail: ModelInfoEntry | undefined,
+  fallbackRoute: string | undefined,
+  deploymentId: string | undefined,
+): HealthDeployment | undefined {
+  const detailRoute = wireString(detail?.model_name)?.trim() || undefined;
+  const route = fallbackRoute?.trim() || detailRoute;
+  if (!route) return undefined;
+  if (!detail) {
+    return {
+      entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
+      allowRouteCatalogFallback: true,
+      denyLevels: false,
+      endpointOnly: true,
+    };
+  }
+  const mode = isResponsesMode(detail.model_info?.mode) ? "chat" : detail.model_info?.mode;
   return {
-    ...model,
-    ...closeSerializerPolicy({
-      api: model.api === "openai-responses" ? "openai-responses" : "openai-completions",
-      reasoning: model.reasoning,
-      vendorCompat: model.compat,
-      denyLevels: true,
-    }),
-  };
-}
-
-function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = wireString(entry.model);
-  if (!id) return undefined;
-  const catalogModel = findCatalogModel(id);
-  return {
-    id,
-    // Health route text is not later cache authority. Unknown routes therefore
-    // use the permanent reduced-evidence marker, never the fallback sentinel.
-    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
-    // Same evidence quality as the `/v1/models` fallback — a route name and
-    // nothing else — so it closes the same catalog map the same way.
-    ...closeSerializerPolicy({
-      api: "openai-completions",
-      reasoning: catalogModel?.reasoning ?? false,
-      vendorCompat: buildCompat(id),
-      catalogLevels: catalogModel?.thinkingLevelMap,
-    }),
-    input: catalogModel?.input ?? ["text"],
-    cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    api: "openai-completions",
-    ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
+    entry: {
+      ...detail,
+      model_name: route,
+      model_info: {
+        ...detail.model_info,
+        ...(wireString(detail.model_info?.id)?.trim() ? {} : deploymentId ? { id: deploymentId } : {}),
+        mode,
+      },
+    },
+    // A detail row that omits its own route did not establish request-control
+    // evidence. Route catalog metadata remains available as on the prior health
+    // path, but selectable levels stay explicitly closed.
+    allowRouteCatalogFallback: true,
+    denyLevels: detailRoute === undefined,
+    endpointOnly: false,
   };
 }
 
@@ -573,15 +570,6 @@ async function discoverFromHealth(
 ): Promise<DiscoveredModel[]> {
   const progress = options.silent ? undefined : options.onProgress;
   progress?.("Querying /health endpoint...");
-  // KNOWN LIMITATION: `/health` lists deployments, not routes, and each one is
-  // mapped on its own, so deployments sharing a `model_name` are not reduced
-  // against each other the way `/model/info` groups are. `Promise.all` preserves
-  // list order and `deduplicateModels` keeps the first entry, so the survivor is
-  // whichever deployment `/health` listed first — not whichever answered first.
-  // Reducing here means aggregating the per-deployment detail fetches by
-  // `model_name` and feeding whole groups to `mapFromModelInfoGroup`, which also
-  // changes naming and the singleton catalog fallback on this path. The approved
-  // PRD names that a non-goal; see the `/health` notes in AGENTS.md and README.md.
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) =>
@@ -589,28 +577,54 @@ async function discoverFromHealth(
   );
   progress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
   let completed = 0;
-  const models = await Promise.all(
+  const deployments = await Promise.all(
     endpoints.map(async (endpoint) => {
-      const route = wireString(endpoint.model);
-      const deploymentId = wireString(endpoint.model_id);
-      let model = mapFromHealthEndpoint({ model: route });
+      const route = wireString(endpoint.model)?.trim() || undefined;
+      const deploymentId = wireString(endpoint.model_id)?.trim() || undefined;
+      let detail: ModelInfoEntry | undefined;
       if (deploymentId) {
         const infoResult = await fetchJson<ModelInfoResponse>(
           `${base}/model/info?litellm_model_id=${encodeURIComponent(deploymentId)}`,
           apiKey,
           options,
         );
-        const entry = infoResult.ok ? infoResult.data.data?.[0] : undefined;
-        if (entry) model = mapFromHealthModelInfo(entry, route);
+        detail = infoResult.ok ? infoResult.data.data?.[0] : undefined;
       }
       completed++;
       if (completed % 10 === 0 || completed === endpoints.length) {
         progress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
-      return model;
+      return healthDeployment(detail, route, deploymentId);
     }),
   );
-  const discovered = models.filter((model): model is DiscoveredModel => model !== undefined);
+  const groups = new Map<string, HealthDeployment[]>();
+  for (const deployment of deployments) {
+    const route = wireString(deployment?.entry.model_name);
+    if (!deployment || !route) continue;
+    const group = groups.get(route) ?? [];
+    group.push(deployment);
+    groups.set(route, group);
+  }
+  const ambiguousRoutes: string[] = [];
+  const withheldRepairRoutes: string[] = [];
+  const discovered = [...groups.values()]
+    .map((group) => {
+      const model = mapFromModelInfoGroup(
+        group.map(({ entry }) => entry),
+        {
+          ambiguousRoutes,
+          withheldRepairRoutes,
+          allowRouteCatalogFallback: group.every(({ allowRouteCatalogFallback }) => allowRouteCatalogFallback),
+          denyLevels: group.some(({ denyLevels }) => denyLevels),
+        },
+      );
+      if (!model || !group.every(({ endpointOnly }) => endpointOnly)) return model;
+      const catalogName = findCatalogModel(model.id)?.name;
+      return catalogName ? { ...model, name: catalogName } : model;
+    })
+    .filter((model): model is DiscoveredModel => model !== undefined);
+  reportAmbiguousCatalogAuthority(ambiguousRoutes);
+  reportWithheldToolRepair(withheldRepairRoutes);
   reportWithheldToolRepairForModels(discovered);
   return discovered;
 }
@@ -645,7 +659,7 @@ export async function discoverModels(
     const ambiguousRoutes: string[] = [];
     const withheldRepairRoutes: string[] = [];
     let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes, withheldRepairRoutes))
+      .map((group) => mapFromModelInfoGroup(group, { ambiguousRoutes, withheldRepairRoutes }))
       .filter((m): m is DiscoveredModel => m !== undefined);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
     reportWithheldToolRepair(withheldRepairRoutes);

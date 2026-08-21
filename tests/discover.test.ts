@@ -674,6 +674,48 @@ describe("discoverModels via /model/info", () => {
     expect(resolveModelInfoCatalog(entry)).toBeUndefined();
   });
 
+  it.each([
+    ["routing then base", "openai/gpt-4o", "openai/o3"],
+    ["base then routing", "openai/o3", "openai/gpt-4o"],
+  ])("withholds catalog metadata for same-provider model conflicts in %s order", (_case, routing, base) => {
+    const result = resolveModelInfoCatalog({
+      model_name: "conflicting-openai-models",
+      litellm_params: { model: routing },
+      model_info: { mode: "chat", litellm_provider: "openai", base_model: base },
+    });
+
+    expect(result).toEqual({ semanticFamily: "openai" });
+  });
+
+  it("withholds same-provider conflicting catalog metadata from the published model", async () => {
+    const rows = [
+      {
+        model_name: "one-conflicted-openai-deployment",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { id: "one", mode: "chat", litellm_provider: "openai", base_model: "openai/o3" },
+      },
+      {
+        model_name: "one-conflicted-openai-deployment",
+        litellm_params: { model: "openai/o3" },
+        model_info: { id: "one", mode: "chat", litellm_provider: "openai", base_model: "openai/gpt-4o" },
+      },
+    ];
+    for (const data of rows) {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [data] }) });
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]).toMatchObject({
+        name: "one-conflicted-openai-deployment (incomplete metadata)",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      });
+      expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    }
+  });
+
   it("withholds catalog metadata for conflicting provider evidence within one deployment", async () => {
     mockEndpoints({
       "/model/info": () =>
@@ -864,33 +906,36 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics[0]).toContain("catalog limits, pricing, and reasoning metadata are withheld");
   });
 
-  it("denies Responses reasoning levels without accepted reasoning_effort evidence", async () => {
-    mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            {
-              model_name: "thinking-only-responses",
-              litellm_params: { model: "moonshot/kimi-k2.6", allowed_openai_params: ["thinking"] },
-              model_info: { id: "one", mode: "responses", supports_reasoning: true },
-            },
-          ],
-        }),
-    });
+  it("denies Responses reasoning levels unless every deployment accepts reasoning_effort", async () => {
+    const deployments = [
+      {
+        model_name: "mixed-control-responses",
+        litellm_params: { model: "moonshot/kimi-k2.6", allowed_openai_params: ["reasoning_effort", "thinking"] },
+        model_info: { id: "effort", mode: "responses", supports_reasoning: true },
+      },
+      {
+        model_name: "mixed-control-responses",
+        litellm_params: { model: "moonshot/kimi-k2.6", allowed_openai_params: ["thinking"] },
+        model_info: { id: "thinking", mode: "responses", supports_reasoning: true },
+      },
+    ];
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const rows of [deployments, [...deployments].reverse()]) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: rows }));
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
-
-    expect(result.models[0]).toMatchObject({ api: "openai-responses", reasoning: true });
-    expect(result.models[0]?.thinkingLevelMap).toEqual({
-      off: null,
-      minimal: null,
-      low: null,
-      medium: null,
-      high: null,
-      xhigh: null,
-      max: null,
-    });
-    expect(result.models[0]).not.toHaveProperty("litellmResponsesReasoningControl");
+      expect(result.models[0]).toMatchObject({ api: "openai-responses", reasoning: true });
+      expect(result.models[0]?.thinkingLevelMap).toEqual({
+        off: null,
+        minimal: null,
+        low: null,
+        medium: null,
+        high: null,
+        xhigh: null,
+        max: null,
+      });
+      expect(result.models[0]).not.toHaveProperty("litellmResponsesReasoningControl");
+    }
   });
 
   it("preserves accepted Responses reasoning control through cached enrichment", async () => {
@@ -1636,6 +1681,74 @@ describe("discoverModels fallback to /v1/models", () => {
 });
 
 describe("discoverModels fallback to /health", () => {
+  it.each([
+    ["uuid-roomy", "uuid-cramped"],
+    ["uuid-cramped", "uuid-roomy"],
+  ])("groups healthy deployments by route before publication in order %j", async (...endpointIds) => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-roomy": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-health-route",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: {
+                id: "roomy",
+                mode: "responses",
+                supports_reasoning: true,
+                supports_vision: true,
+                max_input_tokens: 128_000,
+                max_output_tokens: 16_384,
+                input_cost_per_token: 0.000005,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000025,
+                cache_creation_input_token_cost: 0,
+              },
+            },
+          ],
+        }),
+      "/model/info?litellm_model_id=uuid-cramped": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-health-route",
+              litellm_params: { model: "internal/unknown" },
+              model_info: {
+                id: "cramped",
+                mode: "chat",
+                supports_reasoning: false,
+                supports_vision: false,
+                max_input_tokens: 64_000,
+                max_output_tokens: 8_192,
+              },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: endpointIds.map((model_id) => ({ model: "shared-health-route", model_id })),
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "shared-health-route",
+      name: "shared-health-route (incomplete metadata)",
+      api: "openai-completions",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 64_000,
+      maxTokens: 8_192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("reports completed health detail requests rather than endpoint indexes", async () => {
     const endpoints = Array.from({ length: 11 }, (_, index) => ({
       model: `model-${index + 1}`,

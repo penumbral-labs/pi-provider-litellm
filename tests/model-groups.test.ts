@@ -258,6 +258,27 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([responses, unknown], resolveCatalog)?.api).toBe("openai-completions");
   });
 
+  it("requires every Responses deployment to accept reasoning_effort", () => {
+    const accepted = (id: string, params: string[] | undefined) =>
+      row({
+        model_info: { id, mode: "responses", supported_openai_params: params },
+        litellm_params: { model: `internal/${id}` },
+      });
+
+    for (const order of permutations([accepted("effort", ["reasoning_effort"]), accepted("thinking", ["thinking"])])) {
+      expect(reduceModelGroup(order, resolveCatalog)).toMatchObject({
+        api: "openai-responses",
+        acceptsResponsesReasoningControl: false,
+      });
+    }
+    expect(
+      reduceModelGroup(
+        [accepted("a", ["reasoning_effort", "thinking"]), accepted("b", ["reasoning_effort"])],
+        resolveCatalog,
+      ),
+    ).toMatchObject({ api: "openai-responses", acceptsResponsesReasoningControl: true });
+  });
+
   it("lets unsupported transport evidence force Chat without affecting metadata", () => {
     const responses = row({ model_info: { id: "responses", mode: "responses" } });
     const unsupported = row({
