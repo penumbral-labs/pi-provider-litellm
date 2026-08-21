@@ -502,6 +502,16 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "anthropic", semanticFamily: "claude" });
   });
 
+  it("keeps Bedrock catalog authority separate from Claude family identity", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "bedrock-claude-route",
+        litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
+        model_info: { mode: "chat", litellm_provider: "bedrock" },
+      }),
+    ).toMatchObject({ provider: "amazon-bedrock", semanticFamily: "claude" });
+  });
+
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
