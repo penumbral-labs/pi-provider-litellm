@@ -693,4 +693,45 @@ describe("native Messages route selection", () => {
 
     expect(result?.api).toBe("openai-responses");
   });
+
+  it("does not inject router OpenAI effort values into a Messages model", () => {
+    const result = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: {
+            id: "a",
+            mode: "chat",
+            supports_minimal_reasoning_effort: true,
+            supports_xhigh_reasoning_effort: true,
+          },
+        },
+      ],
+      () => ({
+        ...claude({ forceAdaptiveThinking: true }),
+        thinkingLevelMap: { max: "max" },
+      }),
+    );
+
+    expect(result).toMatchObject({ api: "anthropic-messages", thinkingLevelMap: { max: "max" } });
+    expect(result?.thinkingLevelMap).not.toHaveProperty("minimal");
+    expect(result?.thinkingLevelMap).not.toHaveProperty("xhigh");
+  });
+
+  it("lets router evidence disable but not rename a catalogued Messages effort", () => {
+    const result = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: { id: "a", mode: "chat", supports_xhigh_reasoning_effort: false },
+        },
+      ],
+      () => ({
+        ...claude({ forceAdaptiveThinking: true }),
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      }),
+    );
+
+    expect(result?.thinkingLevelMap).toEqual({ xhigh: null, max: "max" });
+  });
 });

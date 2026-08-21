@@ -1155,6 +1155,49 @@ describe("discoverModels response-mode models", () => {
     });
   });
 
+  it("preserves Responses when an unreadable /health detail name uses the route fallback", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, { healthy_endpoints: [{ model: "team-responses", model_id: "responses-uuid" }] }),
+      "/model/info?litellm_model_id=responses-uuid": () =>
+        jsonResponse(200, { data: [{ model_name: 7, model_info: { mode: "responses" } }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([expect.objectContaining({ id: "team-responses", api: "openai-responses" })]);
+  });
+
+  it("downgrades only synthetic Messages when an unreadable /health detail name uses the route fallback", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "team-claude", model_id: "messages-uuid" }] }),
+      "/model/info?litellm_model_id=messages-uuid": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: 7,
+              model_info: { mode: "chat", litellm_provider: "anthropic" },
+              litellm_params: { model: "anthropic/claude-opus-5" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "team-claude",
+        api: "openai-completions",
+        compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+      }),
+    ]);
+  });
+
   it("does not derive thinking controls from a health-only route name", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);

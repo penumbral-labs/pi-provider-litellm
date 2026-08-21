@@ -10,7 +10,6 @@ const anthropicRoute = {
     base_model: "bedrock/us.anthropic.claude-opus-5",
     supports_reasoning: true,
     supports_vision: true,
-    supported_openai_params: ["thinking", "reasoning_effort"],
   },
   litellm_params: { model: "bedrock/us.anthropic.claude-opus-5" },
 };
@@ -140,6 +139,28 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
     expect(requests[0]).not.toHaveProperty("include");
     expect(requests[0]).not.toHaveProperty("litellm_session_id");
+  });
+
+  it("ignores router OpenAI effort additions on native Messages", async () => {
+    const route = {
+      ...anthropicRoute,
+      model_info: {
+        ...anthropicRoute.model_info,
+        supports_minimal_reasoning_effort: true,
+        supports_xhigh_reasoning_effort: false,
+      },
+    };
+    const { models, model, requests, respond } = await createCompatibilityHarness(route);
+    respond(...anthropicTextResponse("ready"));
+
+    expect(model.thinkingLevelMap).not.toHaveProperty("minimal");
+    expect(getSupportedThinkingLevels(model)).not.toContain("xhigh");
+    expect(getSupportedThinkingLevels(model)).toContain("max");
+
+    await models.streamSimple(model, { messages: [user("Think carefully")] }, { reasoning: "max" }).result();
+
+    expect(model.thinkingLevelMap).toEqual({ xhigh: null, max: "max" });
+    expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "max" } });
   });
 
   it("preserves budget-based thinking for older native Claude models", async () => {

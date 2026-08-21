@@ -204,6 +204,9 @@ function semanticFamily(id: string): SemanticFamily | undefined {
 }
 
 function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined {
+  // Native Messages is safe only when Pi's Anthropic catalog supplies the exact
+  // serializer policy for that generation; a provider adapter catalog describes
+  // backend access and pricing, not the Anthropic wire contract LiteLLM accepts.
   if (model.api !== "anthropic-messages") return undefined;
   const compat = (model as Model<"anthropic-messages">).compat;
   const carried: MessagesBackendCompat = {};
@@ -224,6 +227,9 @@ function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefine
   return model ? messagesCompatOf(model) : undefined;
 }
 
+// These are the LiteLLM adapters whose native request path can terminate at a
+// Claude backend. Other adapters may expose Claude-like public aliases, but an
+// alias alone is not evidence that LiteLLM accepts the Anthropic Messages schema.
 const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
 const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
 
@@ -403,11 +409,14 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
   if (!model) return undefined;
   delete model.thinkingLevelMap;
-  if (model.api === "openai-completions") return model;
+  if (model.api !== "anthropic-messages") return model;
+  // Replacing an unreadable detail-row name with `/health` route text makes a
+  // synthetic identity. That is insufficient for Messages backend proof, while
+  // an explicit Responses mode remains authoritative transport evidence.
   return {
     ...model,
     api: "openai-completions",
-    compat: buildCompat(model.id, "openai-completions", model.api === "anthropic-messages" ? "claude" : undefined),
+    compat: buildCompat(model.id, "openai-completions", "claude"),
   };
 }
 

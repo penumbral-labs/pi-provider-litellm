@@ -257,8 +257,6 @@ export function reduceModelGroup(
     : undefined;
   const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
-  const thinkingLevelMap =
-    parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
@@ -268,6 +266,21 @@ export function reduceModelGroup(
     : candidateModes.every((mode) => mode === "chat") && semanticFamily === "claude" && messagesCompat
       ? "anthropic-messages"
       : "openai-completions";
+  let thinkingLevelMap = parsedCatalogThinkingLevelMap;
+  if (api !== "anthropic-messages") {
+    thinkingLevelMap =
+      parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
+  } else if (parsedCatalogThinkingLevelMap && routerMap) {
+    // LiteLLM's supports_*_reasoning_effort fields describe its OpenAI-compatible
+    // surface. They may restrict a catalogued Messages effort, but must not add or
+    // rename Anthropic effort values that the backend catalog does not authorize.
+    thinkingLevelMap = Object.fromEntries(
+      Object.entries(parsedCatalogThinkingLevelMap).map(([level, effort]) => [
+        level,
+        routerMap[level as keyof typeof routerMap] === null ? null : effort,
+      ]),
+    );
+  }
 
   return {
     id,
