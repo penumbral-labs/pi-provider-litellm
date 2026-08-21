@@ -321,7 +321,11 @@ function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFam
 
   const identityFamily = identityFamilies[0];
   const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
-  const adapterFamily = adapter ? semanticFamily(adapter) : undefined;
+  const adapterFamily = adapter
+    ? GENERIC_TRANSPORT_ADAPTERS.has(adapter)
+      ? "openai"
+      : semanticFamily(adapter)
+    : undefined;
   if (!identityFamily) return adapterFamily;
   // OpenAI-compatible and Azure adapters describe transport, not the backend
   // vendor. They remain useful fallback evidence for opaque identities, but must

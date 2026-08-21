@@ -653,15 +653,18 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("uses a generic adapter family only when model and base identities provide no family", () => {
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "opaque-route",
-        litellm_params: { model: "internal/model" },
-        model_info: { mode: "chat", litellm_provider: "openai" },
-      }),
-    ).toEqual({ semanticFamily: "openai" });
-  });
+  it.each(["openai", "custom_openai", "openai_like", "text-completion-openai", "azure", "azure_ai"])(
+    "uses the %s adapter family only when model and base identities provide no family",
+    (adapter) => {
+      expect(
+        resolveModelInfoCatalog({
+          model_name: "opaque-route",
+          litellm_params: { model: "internal/model" },
+          model_info: { mode: "chat", litellm_provider: adapter },
+        }),
+      ).toEqual({ semanticFamily: "openai" });
+    },
+  );
 
   it("derives DeepSeek family and accepted controls from Azure Foundry backend evidence", async () => {
     expect(
