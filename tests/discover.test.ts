@@ -573,6 +573,54 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "anthropic" });
   });
 
+  it.each([
+    ["anthropic", "openai/gpt-4o", "bedrock/anthropic.claude-sonnet-4-6"],
+    ["anthropic", "bedrock/anthropic.claude-sonnet-4-6", "openai/gpt-4o"],
+    ["openai", "anthropic/opus-4-7", "bedrock/anthropic.claude-sonnet-4-6"],
+    ["openai", "bedrock/anthropic.claude-sonnet-4-6", "anthropic/opus-4-7"],
+    ["bedrock", "anthropic/opus-4-7", "openai/gpt-4o"],
+    ["bedrock", "openai/gpt-4o", "anthropic/opus-4-7"],
+  ])(
+    "withholds catalog authority for the %s adapter with conflicting model %s and base model %s",
+    (adapter, backend, baseModel) => {
+      expect(
+        resolveModelInfoCatalog({
+          model_name: "conflicting-evidence",
+          litellm_params: { model: backend },
+          model_info: { mode: "chat", litellm_provider: adapter, base_model: baseModel },
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it("withholds catalog metadata for a singleton deployment with contradictory provider signals", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "conflicting-evidence",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { mode: "chat", litellm_provider: "anthropic", base_model: "anthropic/opus-4-7" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "conflicting-evidence",
+      name: "conflicting-evidence (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("preserves Bedrock catalog authority", () => {
     expect(
       resolveModelInfoCatalog({

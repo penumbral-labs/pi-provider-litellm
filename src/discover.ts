@@ -195,11 +195,16 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  for (const candidate of candidates) {
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, resolved.model);
-  }
-  return undefined;
+  const resolvedCandidates = candidates
+    .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
+    .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
+  const providers = new Set([
+    ...(adapterProvider ? [adapterProvider] : []),
+    ...resolvedCandidates.map((resolved) => resolved.provider),
+  ]);
+  if (providers.size !== 1) return undefined;
+  const resolved = resolvedCandidates[0];
+  return resolved ? catalogResolution(resolved.provider, resolved.model) : undefined;
 }
 
 async function fetchJson<T>(
