@@ -115,6 +115,11 @@ function resolveCredentialRoot(
   return baseUrl ? normalizeBaseUrl(baseUrl) : undefined;
 }
 
+function requireCredentialRoot(root: string | undefined, providerName: string): string {
+  if (!root) throw new Error(`no LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
+  return root;
+}
+
 function stringSetting(value: unknown): string | undefined {
   return typeof value === "string" ? cleanConfig(value) : undefined;
 }
@@ -1067,10 +1072,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   async function authForCredential(definition: ProviderDefinition, credential?: Credential, executeHelpers = true) {
     if (credential?.type === "oauth") {
-      const baseUrl =
-        typeof credential.baseUrl === "string"
-          ? normalizeBaseUrl(credential.baseUrl)
-          : normalizeBaseUrl(requestBaseUrl(definition));
+      const baseUrl = requireCredentialRoot(resolveCredentialRoot(definition, credential), definition.name);
       return { baseUrl, apiKey: credential.access, headers: resolveHeaders(definition) };
     }
     const resolved = await resolveApiKeyAuth(
@@ -1083,8 +1085,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
     return {
-      baseUrl: normalizeBaseUrl(
-        resolveCredentialRoot(definition, credential, resolved.env?.[ENV_BASE_URL]) ?? requestBaseUrl(definition),
+      baseUrl: requireCredentialRoot(
+        resolveCredentialRoot(definition, credential, resolved.env?.[ENV_BASE_URL]),
+        definition.name,
       ),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
@@ -1114,13 +1117,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       (oauthRuntimeRoot && oauthRuntimeRoot.apiKey === apiKey ? oauthRuntimeRoot.root : undefined) ??
       provider?.baseUrl;
     if (!baseUrl || !apiKey) return undefined;
+    const runtimeRoot = requireCredentialRoot(normalizeBaseUrl(baseUrl), PROVIDER_NAME);
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
     return {
-      baseUrl: normalizeBaseUrl(baseUrl),
+      baseUrl: runtimeRoot,
       apiKey,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
     };
