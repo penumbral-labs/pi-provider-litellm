@@ -98,12 +98,52 @@ describe("reduceModelGroup", () => {
       maxTokens: 16_000,
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
+      hasCompleteMetadata: true,
       catalogAuthorityAmbiguous: true,
     };
 
     for (const order of permutations(deployments)) {
       expect(reduceModelGroup(order, resolveCatalog)).toEqual(expected);
     }
+  });
+
+  it("tracks metadata completeness independently from complete router pricing", () => {
+    const explicit = row({
+      litellm_params: { model: "internal/unknown" },
+      model_info: {
+        id: "explicit",
+        mode: "chat",
+        supports_reasoning: false,
+        supports_vision: false,
+        max_input_tokens: 32_000,
+        max_output_tokens: 4_000,
+        input_cost_per_token: 0.000003,
+        output_cost_per_token: 0.000015,
+        cache_read_input_token_cost: 0.0000003,
+        cache_creation_input_token_cost: 0.00000375,
+      },
+    });
+    const defaults: ModelInfoEntry = {
+      model_name: "route",
+      litellm_params: { model: "internal/unknown" },
+      model_info: {
+        id: "defaults",
+        mode: "chat",
+        input_cost_per_token: 0.000003,
+        output_cost_per_token: 0.000015,
+        cache_read_input_token_cost: 0.0000003,
+        cache_creation_input_token_cost: 0.00000375,
+      },
+    };
+
+    expect(reduceModelGroup([explicit], resolveCatalog)).toMatchObject({
+      hasCompleteCost: true,
+      hasCompleteMetadata: true,
+    });
+    expect(reduceModelGroup([defaults], resolveCatalog)).toMatchObject({
+      hasCompleteCost: true,
+      hasCompleteMetadata: false,
+    });
   });
 
   it("deduplicates exact rows and reduces conflicting duplicate ids conservatively", () => {

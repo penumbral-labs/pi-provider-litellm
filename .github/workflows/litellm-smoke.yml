@@ -235,10 +235,13 @@ jobs:
             `withheld-authority group must carry the permanent marker, received ${grouped[0].name}`,
           );
           assert(
-            grouped[0].cost.input === 0 && grouped[0].cost.output === 0,
-            `withheld-authority group must report unknown cost, received ${JSON.stringify(grouped[0].cost)}`,
+            grouped[0].cost.input === 0.15 && grouped[0].cost.output === 0.6,
+            `group must retain explicit router cost, received ${JSON.stringify(grouped[0].cost)}`,
           );
-          assert(grouped[0].thinkingLevelMap === undefined, "group must not adopt a catalog thinking-level map");
+          assert(
+            grouped[0].thinkingLevelMap === undefined || Object.values(grouped[0].thinkingLevelMap).every((value) => value === null),
+            "group must not adopt a catalog thinking-level value",
+          );
           NODE
 
       - name: Run provider smoke

@@ -277,8 +277,9 @@ function mapFromModelInfoGroup(
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
-    // catalog re-derivation from the model id during offline cache reads.
-    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
+    // catalog re-derivation from the model id during offline cache reads. Complete
+    // router pricing does not make catalog-derived capabilities and limits authoritative.
+    name: reduced.hasCompleteMetadata ? reduced.id : `${reduced.id} (incomplete metadata)`,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
     input: reduced.vision ? ["text", "image"] : ["text"],
@@ -389,6 +390,25 @@ function deduplicateModels(models: DiscoveredModel[]): DiscoveredModel[] {
   });
 }
 
+function wildcardMatches(route: string, modelId: string): boolean {
+  const segments = route.split("*");
+  let offset = 0;
+  for (const [index, segment] of segments.entries()) {
+    if (segment === "") continue;
+    const found = modelId.indexOf(segment, offset);
+    if (found < 0 || (index === 0 && found !== 0)) return false;
+    offset = found + segment.length;
+  }
+  const suffix = segments.at(-1);
+  return suffix === "" || modelId.endsWith(suffix ?? "");
+}
+
+function wildcardApi(modelId: string, wildcards: readonly DiscoveredModel[]): DiscoveredModel["api"] | undefined {
+  const matches = wildcards.filter((model) => wildcardMatches(model.id, modelId));
+  const api = matches[0]?.api;
+  return api && matches.every((model) => model.api === api) ? api : undefined;
+}
+
 export async function discoverModels(
   baseUrl: string,
   apiKey: string,
@@ -421,6 +441,7 @@ export async function discoverModels(
     // raw wildcard row so it doesn't surface as a phantom model choice.
     // Ref: docs.litellm.ai/docs/proxy/model_discovery
     if (models.some((m) => m.id.includes("*"))) {
+      const wildcards = models.filter((model) => model.id.includes("*"));
       // A wildcard row is not addressable. Remove it before expansion so a failed
       // `/v1/models` request cannot leak the literal wildcard into the selector.
       models = models.filter((model) => !model.id.includes("*"));
@@ -429,7 +450,11 @@ export async function discoverModels(
       if (listResult.ok) {
         const expanded = (listResult.data.data ?? [])
           .map(mapFromModelsList)
-          .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"));
+          .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"))
+          .map((model) => {
+            const api = wildcardApi(model.id, wildcards);
+            return api ? { ...model, api } : model;
+          });
         const seen = new Set<string>(models.map((m) => m.id));
         models = [...models, ...expanded.filter((m) => !seen.has(m.id))];
       }

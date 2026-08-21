@@ -29,6 +29,7 @@ export interface ReducedModelGroup {
   maxTokens: number;
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
+  hasCompleteMetadata: boolean;
   catalogProvider?: string;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
@@ -201,34 +202,36 @@ export function reduceModelGroup(
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
-  const reasoning = deployments.every(
-    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning ?? false,
+  const reasoningEvidence = deployments.map(
+    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning,
   );
-  const vision = deployments.every(
-    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision ?? false,
+  const visionEvidence = deployments.map(
+    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision,
   );
-  const contextWindow = min(
-    deployments.map(
-      (entry, index) =>
-        explicitLimit(entry.model_info?.max_input_tokens) ??
-        explicitLimit(catalogAuthority[index]?.contextWindow) ??
-        DEFAULT_CONTEXT_WINDOW,
-    ),
+  const contextWindowEvidence = deployments.map(
+    (entry, index) =>
+      explicitLimit(entry.model_info?.max_input_tokens) ?? explicitLimit(catalogAuthority[index]?.contextWindow),
   );
-  const maxTokens = min(
-    deployments.map(
-      (entry, index) =>
-        explicitLimit(entry.model_info?.max_output_tokens) ??
-        explicitLimit(catalogAuthority[index]?.maxTokens) ??
-        DEFAULT_MAX_TOKENS,
-    ),
+  const maxTokensEvidence = deployments.map(
+    (entry, index) =>
+      explicitLimit(entry.model_info?.max_output_tokens) ?? explicitLimit(catalogAuthority[index]?.maxTokens),
   );
+  const reasoning = reasoningEvidence.every((value) => value ?? false);
+  const vision = visionEvidence.every((value) => value ?? false);
+  const contextWindow = min(deployments.map((_entry, index) => contextWindowEvidence[index] ?? DEFAULT_CONTEXT_WINDOW));
+  const maxTokens = min(deployments.map((_entry, index) => maxTokensEvidence[index] ?? DEFAULT_MAX_TOKENS));
 
   const costValues = COST_FIELDS.map((field) =>
     deployments.map((entry, index) => resolvedCost(entry, catalogAuthority[index], field)),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
   const hasCompleteCost = completeCostFields.every(Boolean);
+  const hasCompleteMetadata =
+    hasCompleteCost &&
+    reasoningEvidence.every((value) => value !== undefined) &&
+    visionEvidence.every((value) => value !== undefined) &&
+    contextWindowEvidence.every((value) => value !== undefined) &&
+    maxTokensEvidence.every((value) => value !== undefined);
   const cost: DiscoveredModel["cost"] = {
     input: completeCostFields[0] ? Math.max(...(costValues[0] as number[])) : 0,
     output: completeCostFields[1] ? Math.max(...(costValues[1] as number[])) : 0,
@@ -260,6 +263,7 @@ export function reduceModelGroup(
     maxTokens,
     cost,
     hasCompleteCost,
+    hasCompleteMetadata,
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
   };

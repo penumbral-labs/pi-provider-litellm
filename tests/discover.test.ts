@@ -686,10 +686,11 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
-  it("keeps an ambiguous group with complete router pricing unsuffixed and reports withheld authority", async () => {
+  it("marks an ambiguous group incomplete despite complete router pricing and reports withheld authority", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `priced-ambiguous-${process.pid}-${Date.now()}-${Math.random()}`;
     const priced = (id: string, model: string) => ({
-      model_name: "priced-ambiguous-authority",
+      model_name: route,
       litellm_params: { model },
       model_info: {
         id,
@@ -710,15 +711,15 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      id: "priced-ambiguous-authority",
-      name: "priced-ambiguous-authority",
+      id: route,
+      name: `${route} (incomplete metadata)`,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
       contextWindow: 128_000,
       maxTokens: 16_384,
     });
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toContain("priced-ambiguous-authority");
+    expect(diagnostics[0]).toContain(route);
     expect(diagnostics[0]).toContain("catalog limits, pricing, and reasoning metadata are withheld");
   });
 
@@ -930,6 +931,8 @@ describe("discoverModels via /model/info", () => {
 
   it("reports conflicting deployment provider identity once with bounded detail", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const nonce = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const routes = Array.from({ length: 4 }, (_, index) => `diagnostic-${nonce}-${index + 1}`);
     const conflicting = (route: string) => [
       { model_name: route, model_info: { id: `${route}-a`, mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
       {
@@ -939,10 +942,7 @@ describe("discoverModels via /model/info", () => {
       },
     ];
     mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: ["route-a", "route-b", "route-c", "route-d"].flatMap(conflicting),
-        }),
+      "/model/info": () => jsonResponse(200, { data: routes.flatMap(conflicting) }),
     });
 
     await discoverModels("https://litellm.example.com", "sk-test", {});
@@ -951,13 +951,15 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("4 route group(s) have missing or conflicting deployment provider evidence");
     // Bounded: a count, at most three route ids, and no deployment ids or params.
-    expect(diagnostics[0]).toContain("route-a, route-b, route-c (+1 more)");
-    expect(diagnostics[0]).not.toContain("route-d");
-    expect(diagnostics[0]).not.toContain("route-a-a");
+    expect(diagnostics[0]).toContain(`${routes[0]}, ${routes[1]}, ${routes[2]} (+1 more)`);
+    expect(diagnostics[0]).not.toContain(routes[3]);
+    expect(diagnostics[0]).not.toContain(`${routes[0]}-a`);
   });
 
   it("reports each ambiguous route once per process, not once per discovery", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const nonce = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const routes = [`once-${nonce}-a`, `once-${nonce}-b`, `once-${nonce}-c`];
     const conflicting = (route: string) => [
       { model_name: route, model_info: { id: `${route}-a`, mode: "chat" }, litellm_params: { model: "openai/gpt-4o" } },
       {
@@ -971,48 +973,49 @@ describe("discoverModels via /model/info", () => {
       await discoverModels("https://litellm.example.com", "sk-test", {});
     };
 
-    await discover(["once-a", "once-b"]);
+    await discover(routes.slice(0, 2));
     expect(stderr.mock.calls).toHaveLength(1);
     expect(String(stderr.mock.calls[0]?.[0])).toContain("2 route group(s)");
 
     // A background refresh of the same misconfiguration must not repeat itself.
-    await discover(["once-a", "once-b"]);
+    await discover(routes.slice(0, 2));
     expect(stderr.mock.calls).toHaveLength(1);
 
     // A newly ambiguous route is still worth reporting, and only that one.
-    await discover(["once-a", "once-b", "once-c"]);
+    await discover(routes);
     expect(stderr.mock.calls).toHaveLength(2);
     const second = String(stderr.mock.calls[1]?.[0]);
     expect(second).toContain("1 route group(s)");
-    expect(second).toContain("once-c");
-    expect(second).not.toContain("once-a");
+    expect(second).toContain(routes[2]);
+    expect(second).not.toContain(routes[0]);
   });
 
   it("reports a route whose deployments supply partial provider evidence", async () => {
     // Withholding also happens when one deployment resolves a provider and another
     // supplies none, so the wording must not claim a conflict is the only cause.
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `partial-evidence-${process.pid}-${Date.now()}-${Math.random()}`;
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
             {
-              model_name: "partial-evidence",
+              model_name: route,
               model_info: { id: "a", mode: "chat" },
               litellm_params: { model: "openai/gpt-4o" },
             },
-            { model_name: "partial-evidence", model_info: { id: "b", mode: "chat" } },
+            { model_name: route, model_info: { id: "b", mode: "chat" } },
           ],
         }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.name).toBe("partial-evidence (incomplete metadata)");
+    expect(result.models[0]?.name).toBe(`${route} (incomplete metadata)`);
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("missing or conflicting");
-    expect(diagnostics[0]).toContain("partial-evidence");
+    expect(diagnostics[0]).toContain(route);
   });
 
   it("keeps catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
@@ -1097,12 +1100,65 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "lemonade/Laguna-S-2.1-GGUF-UD-IQ4_NL",
       "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL",
     ]);
+    expect(result.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "lemonade/Bonsai-1.7B-gguf", api: "openai-completions" }),
+        expect.objectContaining({ id: "lemonade/Laguna-S-2.1-GGUF-UD-IQ4_NL", api: "openai-completions" }),
+      ]),
+    );
     // the raw wildcard id must NOT surface as a selectable model
     expect(result.models.some((m) => m.id.includes("*"))).toBe(false);
     // the concrete /model/info entry is not duplicated by /v1/models
     expect(result.models.filter((m) => m.id === "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL")).toHaveLength(1);
     // /v1/models was actually queried (the expansion path ran)
     expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(true);
+  });
+
+  it("preserves a wildcard Responses route mode on expanded models", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "responses/*", model_info: { mode: "responses" } },
+            { model_name: "chat/*", model_info: { mode: "chat" } },
+          ],
+        }),
+      "/v1/models": () =>
+        jsonResponse(200, {
+          data: [
+            { id: "responses/model-a", owned_by: "openai" },
+            { id: "chat/model-b", owned_by: "openai" },
+            { id: "other/model-c", owned_by: "openai" },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "responses/model-a", api: "openai-responses" }),
+        expect.objectContaining({ id: "chat/model-b", api: "openai-completions" }),
+        expect.objectContaining({ id: "other/model-c", api: "openai-completions" }),
+      ]),
+    );
+  });
+
+  it("keeps Chat mode when overlapping wildcard routes disagree", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "team/*", model_info: { mode: "responses" } },
+            { model_name: "team/model-*", model_info: { mode: "chat" } },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model-a", owned_by: "openai" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([expect.objectContaining({ id: "team/model-a", api: "openai-completions" })]);
   });
 
   it("never exposes a literal wildcard when /v1/models expansion fails", async () => {

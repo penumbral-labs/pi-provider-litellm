@@ -20,7 +20,8 @@
 ## Discovery And Credentials
 
 - Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
-- Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
+- Prefer `/model/info` for rich metadata. Use `/v1/models` as the status-code fallback only when `/model/info`
+  returns 401, 403, or 404; after a successful `/model/info`, also query `/v1/models` only to expand wildcard routes.
 - Treat `model_name` as a public route group, not backend evidence. Reduce every deployment before choosing transport,
   capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
 - Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
