@@ -209,7 +209,7 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
-  it("reprojects matching cached hosts and rejects stale or placeholder hosts", () => {
+  it("reprojects matching cached roots and rejects stale or placeholder roots", () => {
     const baseModel = discovered("model").models[0];
     const models = toNativeModels("litellm", "https://proxy.example", [
       baseModel,
@@ -229,12 +229,31 @@ describe("createLiteLLMProvider", () => {
     expect(placeholder.filterModels?.(models, credential)).toEqual([]);
   });
 
-  it("blocks stale hosts before protocol dispatch", () => {
+  it("rejects cached models from another same-origin proxy prefix", () => {
+    const baseModel = discovered("model").models[0];
+    const models = toNativeModels("litellm", "https://gateway.example/team-a", [
+      baseModel,
+      { ...baseModel, id: "messages", api: "anthropic-messages", compat: {} },
+    ]);
+    const value = controller({ resolveCredentialRoot: () => "https://gateway.example/team-b" });
+
+    expect(value.filterModels?.(models, credential)).toEqual([]);
+    expect(() => value.stream(models[0], { messages: [] })).toThrow(
+      /stale LiteLLM model root https:\/\/gateway\.example\/team-a.*https:\/\/gateway\.example\/team-b.*network refresh/i,
+    );
+    expect(() => value.stream(models[1], { messages: [] })).toThrow(
+      /stale LiteLLM model root https:\/\/gateway\.example\/team-a.*https:\/\/gateway\.example\/team-b.*network refresh/i,
+    );
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+    expect(apiSpies.anthropic).not.toHaveBeenCalled();
+  });
+
+  it("blocks stale roots before protocol dispatch", () => {
     const value = controller({ resolveCredentialRoot: () => "https://other.example" });
 
-    expect(() => value.stream(native("stale"), { messages: [] })).toThrow(/stale LiteLLM model host.*network refresh/i);
+    expect(() => value.stream(native("stale"), { messages: [] })).toThrow(/stale LiteLLM model root.*network refresh/i);
     expect(() => value.streamSimple(native("stale"), { messages: [] })).toThrow(
-      /stale LiteLLM model host.*network refresh/i,
+      /stale LiteLLM model root.*network refresh/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });

@@ -596,6 +596,18 @@ describe("discoverModels via /model/info", () => {
     expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
+  it("does not fall through a recognized adapter miss to a provider-qualified routing model", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "contradictory-adapter",
+      litellm_params: { model: "openai/gpt-4o" },
+      model_info: { mode: "chat", litellm_provider: "anthropic" },
+    });
+
+    expect(resolved).toEqual({ semanticFamily: "openai" });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("cost");
+  });
+
   it("withholds catalog authority when routing and base model families conflict", () => {
     expect(
       resolveModelInfoCatalog({
