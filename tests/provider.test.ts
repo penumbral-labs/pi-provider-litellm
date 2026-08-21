@@ -181,6 +181,7 @@ describe("createLiteLLMProvider", () => {
     await value.refreshModels?.(context([cached], false));
 
     expect(value.getModels()).toEqual([cached]);
+    expect(discover).not.toHaveBeenCalled();
   });
 
   it("publishes and persists successful discovery", async () => {

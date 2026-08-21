@@ -1,0 +1,139 @@
+import { type AuthContext, createModels, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
+// The routing decision belongs to Pi's internal provider composer. Importing the
+// installed implementation makes this a canary for changes to that seam instead of
+// testing a local reimplementation.
+import { composeModelProvider } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/provider-composer.js";
+import { createLiteLLMProvider } from "../src/provider.js";
+import type { DiscoveredModel } from "../src/types.js";
+
+const CREDENTIAL_ROOT = "https://proxy.example.com";
+const FOREIGN_ROOT = "https://foreign.example.com";
+const CANARY_CREDENTIAL = ["canary", "credential"].join("-");
+
+type WireRequest = { url: string; authorization: string | null; tenant: string | null };
+
+function model(id: string, api: string, baseUrl: string) {
+  return {
+    id,
+    name: id,
+    provider: "litellm",
+    api,
+    baseUrl,
+    reasoning: false,
+    input: ["text"] as ("text" | "image")[],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 4096,
+    maxTokens: 1024,
+  };
+}
+
+function discovered(id: string): DiscoveredModel {
+  return {
+    id,
+    name: id,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 4096,
+    maxTokens: 1024,
+    api: "openai-completions",
+  };
+}
+
+function harness(options: { configuredModels: ReturnType<typeof model>[]; discoveredApis?: string[] }) {
+  const wire: WireRequest[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const headers = new Headers(init?.headers);
+    wire.push({
+      url: String(input),
+      authorization: headers.get("authorization"),
+      tenant: headers.get("x-tenant"),
+    });
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+      headers: { "content-type": "text/event-stream" },
+    });
+  });
+
+  const base = createLiteLLMProvider({
+    id: "litellm",
+    name: "LiteLLM",
+    baseUrl: `${CREDENTIAL_ROOT}/v1`,
+    auth: {
+      apiKey: {
+        name: "API key",
+        resolve: async () => ({
+          auth: { apiKey: CANARY_CREDENTIAL, headers: { "x-tenant": "canary-tenant" } },
+        }),
+      },
+    },
+    resolveCredentialRoot: () => CREDENTIAL_ROOT,
+    discover: async () => ({ models: [discovered("chat")], source: "model_info" }),
+  });
+  const listed = (options.discoveredApis ?? ["openai-completions"]).map((api, index) =>
+    model(`listed-${index}`, api, `${CREDENTIAL_ROOT}/v1`),
+  );
+  Object.defineProperty(base, "getModels", { value: () => listed, writable: true });
+
+  const config = {
+    getProvider: () => ({ models: options.configuredModels.map(({ id, api, baseUrl }) => ({ id, api, baseUrl })) }),
+    getProviderIds: () => ["litellm"],
+  };
+  const composed = composeModelProvider("litellm", base, config as never, undefined);
+  const authContext: AuthContext = { env: async () => undefined, fileExists: async () => false };
+  const models = createModels({
+    credentials: new InMemoryCredentialStore(),
+    modelsStore: new InMemoryModelsStore(),
+    authContext,
+  });
+  models.setProvider(composed);
+  return { wire, models };
+}
+
+describe("dispatch routing through Pi's provider composer", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("runs the LiteLLM host guard for a protocol in the discovered catalog", async () => {
+    const entry = model("configured-chat", "openai-completions", `${FOREIGN_ROOT}/v1`);
+    const { wire, models } = harness({ configuredModels: [entry] });
+
+    const result = await models.complete(entry, { messages: [] });
+
+    expect(result.stopReason).toBe("error");
+    expect(wire).toEqual([]);
+  });
+
+  it("runs the LiteLLM host guard once Responses is in the discovered catalog", async () => {
+    const entry = model("configured-responses", "openai-responses", `${FOREIGN_ROOT}/v1`);
+    const { wire, models } = harness({
+      configuredModels: [entry],
+      discoveredApis: ["openai-completions", "openai-responses"],
+    });
+
+    const result = await models.complete(entry, { messages: [] });
+
+    expect(result.stopReason).toBe("error");
+    expect(wire).toEqual([]);
+  });
+
+  // Pi currently delegates to this provider only when its discovered model list has a
+  // matching API. With no Responses model listed, the generic API path bypasses this
+  // provider's host guard while retaining its resolved auth. This canary must change as
+  // soon as Pi routes by provider-supported APIs instead of the current model list.
+  it("UPSTREAM GAP: retains provider auth when an unlisted API bypasses the LiteLLM guard", async () => {
+    const entry = model("configured-responses", "openai-responses", `${FOREIGN_ROOT}/v1`);
+    const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
+
+    await models.complete(entry, { messages: [] });
+
+    expect(wire).toEqual([
+      {
+        url: `${FOREIGN_ROOT}/v1/responses`,
+        authorization: `Bearer ${CANARY_CREDENTIAL}`,
+        tenant: "canary-tenant",
+      },
+    ]);
+  });
+});
