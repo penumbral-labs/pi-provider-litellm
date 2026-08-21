@@ -78,6 +78,16 @@ function permutations<T>(values: readonly T[]): T[][] {
   );
 }
 
+const NO_LEVELS = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: null,
+  xhigh: null,
+  max: null,
+};
+
 describe("toResponsesLevels", () => {
   it.each([
     {
@@ -144,6 +154,26 @@ describe("toResponsesLevels", () => {
     });
     expect(responses.thinkingLevelMap).toEqual(chat.thinkingLevelMap);
   });
+
+  it("denies Responses levels until reasoning_effort acceptance is evidenced", () => {
+    const input = {
+      api: "openai-responses" as const,
+      reasoning: true,
+      vendorCompat: { supportsStore: false } as const,
+      semanticLevels: { off: "off", high: "high", max: "max" },
+    };
+
+    expect(closeSerializerPolicy(input).thinkingLevelMap).toEqual(NO_LEVELS);
+    expect(closeSerializerPolicy({ ...input, acceptsResponsesReasoningControl: true }).thinkingLevelMap).toEqual({
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
+  });
 });
 
 describe("reduceModelGroup", () => {
@@ -167,6 +197,7 @@ describe("reduceModelGroup", () => {
       id: "route",
       api: "openai-completions",
       reasoning: true,
+      acceptsResponsesReasoningControl: false,
       vision: true,
       contextWindow: 150_000,
       maxTokens: 16_000,

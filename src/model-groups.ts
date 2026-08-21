@@ -37,6 +37,7 @@ export interface ReducedModelGroup {
   id: string;
   api: "openai-completions" | "openai-responses";
   reasoning: boolean;
+  acceptsResponsesReasoningControl: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision: boolean;
   contextWindow: number;
@@ -275,19 +276,28 @@ export function closeSerializerPolicy(input: {
   semanticCompat?: ReasoningPolicy["compat"];
   semanticLevels?: DiscoveredModel["thinkingLevelMap"];
   catalogLevels?: DiscoveredModel["thinkingLevelMap"];
+  acceptsResponsesReasoningControl?: boolean;
   // For callers with no level evidence at all. Distinct from "no candidate map":
   // this states the no-level conclusion explicitly, so a caller spreading the
   // policy over an earlier model cannot leave a stale map behind.
   denyLevels?: boolean;
 }): SerializerPolicy {
-  const { api, reasoning, vendorCompat, semanticCompat, semanticLevels, catalogLevels, denyLevels } = input;
+  const {
+    api,
+    reasoning,
+    vendorCompat,
+    semanticCompat,
+    semanticLevels,
+    catalogLevels,
+    acceptsResponsesReasoningControl,
+    denyLevels,
+  } = input;
   if (api === "openai-responses") {
-    // Keep route-derived compatibility intact while translating only the
-    // reasoning selector into the Responses effort vocabulary.
+    // Responses always serializes a selected level as `reasoning.effort`.
+    // Chat-only evidence such as `thinking` cannot authorize that carrier.
     const compat = vendorCompat;
-    const shared = vendorCompat as OpenAICompat | undefined;
     if (!reasoning) return { reasoning, compat };
-    if (denyLevels || shared?.supportsReasoningEffort === false) {
+    if (denyLevels || !acceptsResponsesReasoningControl) {
       return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
     }
     return { reasoning, thinkingLevelMap: toResponsesLevels(semanticLevels ?? catalogLevels), compat };
@@ -531,6 +541,7 @@ export function reduceModelGroup(
   const thinkingLevelMap =
     parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
   const acceptedOpenAIParams = intersectParams(deployments);
+  const acceptsResponsesReasoningControl = acceptedOpenAIParams.includes("reasoning_effort");
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
@@ -539,6 +550,7 @@ export function reduceModelGroup(
     id,
     api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
     reasoning,
+    acceptsResponsesReasoningControl,
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     vision,
     contextWindow,

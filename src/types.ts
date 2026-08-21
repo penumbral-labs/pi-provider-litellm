@@ -24,6 +24,9 @@ export interface LiteLLMModelPolicy {
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
   api?: LiteLLMApi;
   litellmPolicy?: LiteLLMModelPolicy;
+  // Persist the deployment's accepted Responses reasoning carrier so cached
+  // models cannot regain catalog-derived selectors without the same evidence.
+  litellmResponsesReasoningControl?: true;
 };
 
 export interface DiscoveryResult {

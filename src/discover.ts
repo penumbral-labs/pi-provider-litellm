@@ -148,6 +148,13 @@ function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
   return restored;
 }
 
+function hasResponsesReasoningControl(model: Model<Api>): boolean {
+  return (
+    (model as Model<Api> & Pick<DiscoveredModel, "litellmResponsesReasoningControl">)
+      .litellmResponsesReasoningControl === true
+  );
+}
+
 export function enrichCachedModel(input: Model<Api>): Model<Api> {
   const restored = restoreCachedModelPolicy(input);
   // A model stored by a release that predates the transmissibility gate carries
@@ -161,6 +168,7 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
       reasoning: restored.reasoning,
       vendorCompat: restored.compat,
       catalogLevels: restored.thinkingLevelMap,
+      acceptsResponsesReasoningControl: hasResponsesReasoningControl(restored),
     }),
   } as Model<Api>;
   // Reduced deployment groups use a distinct marker; this sentinel remains
@@ -193,6 +201,7 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
       reasoning: catalogModel.reasoning,
       vendorCompat: model.compat,
       catalogLevels: catalogModel.thinkingLevelMap,
+      acceptsResponsesReasoningControl: hasResponsesReasoningControl(model),
     }),
     input: catalogModel.input,
     cost: catalogModel.cost,
@@ -256,6 +265,11 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
+function qualifiedModelProvider(model: string): BuiltinProvider | undefined {
+  const separator = model.indexOf("/");
+  return separator < 1 ? undefined : adapterCatalogProvider(model.slice(0, separator));
+}
+
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
@@ -268,10 +282,19 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
   const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
+  const resolutions = candidates
+    .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
+    .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
+  const evidenceProviders = new Set(resolutions.map((resolved) => resolved.provider));
   for (const candidate of candidates) {
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved)
-      return { ...catalogResolution(resolved.provider, resolved.model), ...(model ? { semanticModel: model } : {}) };
+    const provider = qualifiedModelProvider(candidate);
+    if (provider) evidenceProviders.add(provider);
+  }
+  if (adapterProvider) evidenceProviders.add(adapterProvider);
+  if (evidenceProviders.size > 1) return undefined;
+  const resolved = resolutions[0];
+  if (resolved) {
+    return { ...catalogResolution(resolved.provider, resolved.model), ...(model ? { semanticModel: model } : {}) };
   }
   return model ? { semanticModel: model } : undefined;
 }
@@ -346,7 +369,12 @@ function mapFromModelInfoGroup(
     semanticCompat: reasoningPolicy?.compat,
     semanticLevels: reasoningPolicy?.thinkingLevelMap,
     catalogLevels: reduced.thinkingLevelMap,
+    acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
   });
+  const routeOnlyMoonshot = entries.every((entry) => !hasReadableBackendEvidence(entry)) && isMoonshotModel(reduced.id);
+  const modelPolicy =
+    reasoningDisplayPolicy(reduced.suppressReasoningVisibility) ??
+    (routeOnlyMoonshot ? moonshotPolicy(reduced.id) : undefined);
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
@@ -358,9 +386,10 @@ function mapFromModelInfoGroup(
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
-    ...(reasoningDisplayPolicy(reduced.suppressReasoningVisibility)
-      ? { litellmPolicy: reasoningDisplayPolicy(reduced.suppressReasoningVisibility) }
+    ...(reduced.api === "openai-responses" && reduced.acceptsResponsesReasoningControl
+      ? { litellmResponsesReasoningControl: true as const }
       : {}),
+    ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),
   };
 }
 

@@ -212,6 +212,42 @@ describe("native provider stream compatibility", () => {
     expect(requests[1]).not.toHaveProperty("reasoning_effort");
   });
 
+  it.each(["moonshot/kimi-k2.6", "deepseek/deepseek-v4"])(
+    "does not translate thinking-only evidence into a Responses control for %s",
+    async (backend) => {
+      const { models, model, requests, respond } = await createCompatibilityHarness([
+        {
+          model_name: "thinking-only-responses",
+          litellm_params: { model: backend, allowed_openai_params: ["thinking"] },
+          model_info: { id: "deployment", mode: "responses", supports_reasoning: true },
+        },
+      ]);
+      respond(...successfulResponsesReply("ok"));
+
+      await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+      expect(getSupportedThinkingLevels(model)).toEqual([]);
+      expect(requests[0]).not.toHaveProperty("reasoning");
+      expect(requests[0]).not.toHaveProperty("include");
+    },
+  );
+
+  it("keeps route-only Kimi normalization policy without inventing generation controls", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      { model_name: "kimi-k2.6", model_info: { id: "deployment", mode: "chat" } },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(model).toMatchObject({
+      reasoning: false,
+      litellmPolicy: { normalizeThinkTags: true, suppressReasoningVisibility: false },
+    });
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+  });
+
   it.each([
     { name: "Kimi K2.7 Code", backend: "moonshot/kimi-k2.7-code" },
     { name: "Kimi K2.6", backend: "moonshot/kimi-k2.6" },
@@ -509,6 +545,7 @@ describe("advertised levels serialize on both APIs", () => {
 
       if (model.api === "openai-responses") {
         const reasoning = body.reasoning as { effort?: string } | undefined;
+        expect(params?.includes("reasoning_effort"), `${label} lacks accepted Responses control evidence`).toBe(true);
         expect(reasoning?.effort, `${label} sent no reasoning.effort`).toBeDefined();
         // `off` and `max` are not Responses efforts; a Chat-shaped map leaking
         // through would emit exactly those.

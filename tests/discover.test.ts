@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
+  enrichCachedModel,
   moonshotPolicy,
   normalizeBaseUrl,
   resolveModelInfoCatalog,
@@ -584,6 +585,54 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "anthropic" });
   });
 
+  it.each([
+    {
+      name: "routing model conflicts with base model",
+      entry: {
+        model_name: "conflicting-models",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { mode: "chat", base_model: "anthropic/claude-sonnet-4-6" },
+      },
+    },
+    {
+      name: "adapter conflicts with the qualified model",
+      entry: {
+        model_name: "conflicting-adapter",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { mode: "chat", litellm_provider: "anthropic" },
+      },
+    },
+  ])("withholds catalog resolution when $name", ({ entry }) => {
+    expect(resolveModelInfoCatalog(entry)).toBeUndefined();
+  });
+
+  it("withholds catalog metadata for conflicting provider evidence within one deployment", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "one-conflicted-deployment",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "one", mode: "chat", base_model: "anthropic/claude-sonnet-4-6" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      name: "one-conflicted-deployment (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("preserves Bedrock catalog authority", () => {
     expect(
       resolveModelInfoCatalog({
@@ -683,6 +732,57 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("priced-ambiguous-authority");
     expect(diagnostics[0]).toContain("catalog limits, pricing, and reasoning metadata are withheld");
+  });
+
+  it("denies Responses reasoning levels without accepted reasoning_effort evidence", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "thinking-only-responses",
+              litellm_params: { model: "moonshot/kimi-k2.6", allowed_openai_params: ["thinking"] },
+              model_info: { id: "one", mode: "responses", supports_reasoning: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ api: "openai-responses", reasoning: true });
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(result.models[0]).not.toHaveProperty("litellmResponsesReasoningControl");
+  });
+
+  it("preserves accepted Responses reasoning control through cached enrichment", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "effort-responses",
+              litellm_params: { model: "moonshot/kimi-k3", allowed_openai_params: ["reasoning_effort"] },
+              model_info: { id: "one", mode: "responses", supports_reasoning: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const model = result.models[0];
+
+    expect(model).toMatchObject({ api: "openai-responses", litellmResponsesReasoningControl: true });
+    expect(model?.thinkingLevelMap).toMatchObject({ low: "low", high: "high", max: null });
+    expect(model && enrichCachedModel(model as never).thinkingLevelMap).toEqual(model?.thinkingLevelMap);
   });
 
   it("keeps baseline compatibility metadata for Responses-mode routes", async () => {
@@ -859,6 +959,24 @@ describe("discoverModels via /model/info", () => {
       expect(result.models[0]?.name).not.toContain(" (no metadata)");
       expect(result.models[0]?.name).toBe(`${result.models[0]?.id} (incomplete metadata)`);
     }
+  });
+
+  it("preserves route-only Kimi think-tag policy without enabling request controls", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "kimi-k2.6", model_info: { id: "only", mode: "chat" } }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      litellmPolicy: { normalizeThinkTags: true, suppressReasoningVisibility: false },
+    });
+    expect(result.models[0]?.reasoning).toBe(false);
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.compat).toMatchObject({ supportsReasoningEffort: false });
   });
 
   it("does not use a public route name as evidence for conflicting duplicate deployment ids", async () => {

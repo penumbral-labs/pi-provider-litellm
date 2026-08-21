@@ -1117,7 +1117,7 @@ describe("feature parity", () => {
     ).toBeUndefined();
   });
 
-  it("normalizes Kimi think tags into Pi thinking blocks", async () => {
+  it("normalizes route-only Kimi think tags from the discovered policy", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -1140,6 +1140,10 @@ describe("feature parity", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await refreshProvider(pi);
+    const discovered = pi.providers[0]?.getModels().find((model) => model.id === "kimi-k2.6") as
+      | { litellmPolicy?: Record<string, boolean> }
+      | undefined;
 
     let message: any = {
       role: "assistant",
@@ -1149,16 +1153,14 @@ describe("feature parity", () => {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     };
     for (const handler of pi.handlers.get("message_end") ?? []) {
-      const result = await handler(
-        { message },
-        messageEndCtx(message.model, {
-          normalizeThinkTags: true,
-          suppressReasoningVisibility: true,
-        }),
-      );
+      const result = await handler({ message }, messageEndCtx(message.model, discovered?.litellmPolicy));
       if (result?.message) message = result.message;
     }
 
+    expect(discovered?.litellmPolicy).toEqual({
+      normalizeThinkTags: true,
+      suppressReasoningVisibility: false,
+    });
     expect(message.content).toEqual([
       { type: "thinking", thinking: "internal reasoning" },
       { type: "text", text: "DONE" },
