@@ -261,6 +261,13 @@ describe("discovery and offline cache parity", () => {
         },
       ],
       [
+        {
+          model_name: "openai/gpt-5.5",
+          model_info: { id: "only", mode: "chat" },
+          litellm_params: { model: "internal/mystery" },
+        },
+      ],
+      [
         { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
         {
           model_name: "openai/gpt-5.5",

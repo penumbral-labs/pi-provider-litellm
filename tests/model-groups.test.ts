@@ -84,17 +84,16 @@ describe("reduceModelGroup", () => {
         litellm_params: { model: "openai/gpt-4o" },
       }),
       row({
-        model_info: { id: "deployment-c", mode: null, supported_openai_params: ["reasoning_effort"] },
+        model_info: { id: "deployment-c", mode: null },
         litellm_params: { model: "internal/unknown" },
       }),
       row({
         model_info: { id: undefined, mode: "chat", output_cost_per_token: 0.00002 },
-        litellm_params: { model: "internal/unknown", allowed_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: "internal/unknown" },
       }),
     ];
     const expected = {
       id: "route",
-      deploymentCount: 4,
       api: "openai-completions",
       reasoning: true,
       vision: true,
@@ -103,7 +102,6 @@ describe("reduceModelGroup", () => {
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
       hasCompleteCost: true,
       catalogAuthorityAmbiguous: true,
-      acceptedOpenAIParams: [],
     };
 
     for (const order of permutations(deployments)) {
@@ -122,11 +120,16 @@ describe("reduceModelGroup", () => {
     // Conflicting variants of one deployment id stay plural, so they can never be
     // mistaken for a single deployment and re-admit public route text as evidence.
     const expected = reduceModelGroup([repeated, conflicting], resolveCatalog);
-    expect(expected).toMatchObject({ deploymentCount: 2, contextWindow: 8_000 });
+    expect(expected).toMatchObject({ contextWindow: 8_000 });
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
     // Exact id-less repeats remain plural: equal content is not enough evidence
     // that two rows describe the same deployment.
-    expect(reduceModelGroup([anonymous, anonymous], resolveCatalog)?.deploymentCount).toBe(2);
+    const seen: boolean[] = [];
+    reduceModelGroup([anonymous, anonymous], (_entry, singleton) => {
+      seen.push(singleton);
+      return undefined;
+    });
+    expect(seen).toEqual([false, false]);
   });
 
   it("reports singleton status from routable deployments only", () => {
@@ -205,8 +208,7 @@ describe("reduceModelGroup", () => {
     );
     expect(result).toMatchObject({
       api: "openai-completions",
-      // The embedding row votes on transport but is not a deployment.
-      deploymentCount: 1,
+      // The embedding row votes on transport but does not reduce metadata.
       contextWindow: 200_000,
       maxTokens: 32_000,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
@@ -275,19 +277,14 @@ describe("reduceModelGroup", () => {
 
     // Unreadable: still a deployment, so its tighter limit clamps the group.
     expect(reduceModelGroup([roomy, unreadable], resolveCatalog)).toMatchObject({
-      deploymentCount: 2,
       contextWindow: 8_000,
       api: "openai-completions",
     });
     // Genuinely non-chat: excluded from metadata, and only votes on transport.
-    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toMatchObject({
-      deploymentCount: 1,
-      contextWindow: 200_000,
-    });
+    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toMatchObject({ contextWindow: 200_000 });
 
     // A lone unreadable row is surfaced conservatively rather than silently hidden.
     expect(reduceModelGroup([unreadable], resolveCatalog)).toMatchObject({
-      deploymentCount: 1,
       contextWindow: 8_000,
       api: "openai-completions",
     });
@@ -307,14 +304,6 @@ describe("reduceModelGroup", () => {
     });
 
     expect(reduceModelGroup([lying], resolveCatalog)).toMatchObject({ vision: false, reasoning: false });
-  });
-
-  it("drops non-string accepted parameters and keeps the usable ones", () => {
-    const badParams = row({
-      model_info: { id: "bad", mode: "chat", supported_openai_params: [1, "temperature"] as unknown as string[] },
-    });
-
-    expect(reduceModelGroup([badParams], resolveCatalog)?.acceptedOpenAIParams).toEqual(["temperature"]);
   });
 
   it("drops a group when every deployment is non-chat", () => {
@@ -432,7 +421,6 @@ describe("reduceModelGroup", () => {
 
     const singleton = reduceModelGroup([priced("only", 0.000003, 0.000015)], resolveCatalog);
     expect(singleton).toMatchObject({
-      deploymentCount: 1,
       hasCompleteCost: false,
       cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
@@ -443,43 +431,9 @@ describe("reduceModelGroup", () => {
     expect(
       reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)], resolveCatalog),
     ).toMatchObject({
-      deploymentCount: 2,
       hasCompleteCost: false,
       cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
-  });
-
-  it("keeps semantic family evidence when no catalog identity resolves", () => {
-    const result = reduceModelGroup(
-      [
-        row({
-          model_name: "public-route",
-          model_info: { id: "foundry", mode: "chat", litellm_provider: "azure_ai" },
-          litellm_params: { model: "azure_ai/DeepSeek-V4", allowed_openai_params: ["reasoning_effort"] },
-        }),
-      ],
-      () => ({ semanticFamily: "deepseek" }),
-    );
-
-    expect(result).toMatchObject({
-      semanticFamily: "deepseek",
-      acceptedOpenAIParams: ["reasoning_effort"],
-    });
-    expect(result).not.toHaveProperty("catalogProvider");
-  });
-
-  it("keeps semantic family separate from catalog provider identity", () => {
-    const result = reduceModelGroup(
-      [
-        row({
-          model_info: { id: "bedrock", mode: "chat", litellm_provider: "bedrock" },
-          litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
-        }),
-      ],
-      resolveCatalog,
-    );
-
-    expect(result).toMatchObject({ catalogProvider: "amazon-bedrock", semanticFamily: "claude" });
   });
 
   it("uses catalog thinking maps for unambiguous identities without a known semantic family", () => {
@@ -495,6 +449,74 @@ describe("reduceModelGroup", () => {
     }));
 
     expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
+  });
+
+  it("preserves explicit router reasoning efforts for a singleton", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: {
+            id: "reasoner",
+            mode: "chat",
+            supports_none_reasoning_effort: true,
+            supports_minimal_reasoning_effort: false,
+            supports_high_reasoning_effort: true,
+          },
+          litellm_params: { model: "internal/reasoner" },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result?.thinkingLevelMap).toEqual({ off: "none", minimal: null, high: "high" });
+  });
+
+  it("advertises a router reasoning effort only when every deployment explicitly supports it", () => {
+    const supportsLow = (id: string, low: boolean | undefined) =>
+      row({
+        model_info: {
+          id,
+          mode: "chat",
+          supports_low_reasoning_effort: low,
+          supports_high_reasoning_effort: true,
+        },
+        litellm_params: { model: `internal/${id}` },
+      });
+
+    expect(
+      reduceModelGroup([supportsLow("a", true), supportsLow("b", true)], resolveCatalog)?.thinkingLevelMap,
+    ).toEqual({ low: "low", high: "high" });
+    expect(
+      reduceModelGroup([supportsLow("a", true), supportsLow("b", undefined)], resolveCatalog)?.thinkingLevelMap,
+    ).toEqual({ low: null, high: "high" });
+    expect(
+      reduceModelGroup([supportsLow("a", true), supportsLow("b", false)], resolveCatalog)?.thinkingLevelMap,
+    ).toEqual({ low: null, high: "high" });
+  });
+
+  it("overlays conservative router reasoning evidence on catalog metadata", () => {
+    const catalogThinkingLevelMap = { off: "none", low: "low", high: "high", max: "max" } as const;
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "a", mode: "chat", supports_low_reasoning_effort: true },
+        }),
+        row({
+          model_info: { id: "b", mode: "chat", supports_low_reasoning_effort: false },
+        }),
+      ],
+      () => ({
+        provider: "openai",
+        reasoning: true,
+        thinkingLevelMap: catalogThinkingLevelMap,
+        vision: true,
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      }),
+    );
+
+    expect(result?.thinkingLevelMap).toEqual({ ...catalogThinkingLevelMap, low: null });
   });
 
   it("adopts tiered pricing when identical tiers are declared in any property order", () => {
@@ -599,7 +621,6 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result).not.toHaveProperty("catalogProvider");
-    expect(result).not.toHaveProperty("semanticFamily");
     expect(result?.thinkingLevelMap).toBeUndefined();
     // The disagreement is reportable so the silent downgrade is diagnosable.
     expect(result?.catalogAuthorityAmbiguous).toBe(true);
@@ -625,23 +646,5 @@ describe("reduceModelGroup", () => {
     // Conflicting identities, and partial evidence, both withhold authority.
     expect(reduceModelGroup([anthropic, openai], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
     expect(reduceModelGroup([anthropic, unresolved], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
-  });
-
-  it("intersects accepted parameters across deployments", () => {
-    const result = reduceModelGroup(
-      [
-        row({
-          model_info: { id: "a", mode: "chat", supported_openai_params: ["temperature", "reasoning_effort"] },
-          litellm_params: { model: "internal/a" },
-        }),
-        row({
-          model_info: { id: "b", mode: "chat", supported_openai_params: ["reasoning_effort", "thinking"] },
-          litellm_params: { model: "internal/b", allowed_openai_params: ["reasoning_effort"] },
-        }),
-      ],
-      resolveCatalog,
-    );
-
-    expect(result?.acceptedOpenAIParams).toEqual(["reasoning_effort"]);
   });
 });

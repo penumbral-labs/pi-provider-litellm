@@ -225,6 +225,58 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("maps LiteLLM reasoning effort capabilities for a singleton", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "custom/reasoner",
+            model_info: {
+              mode: "chat",
+              supports_reasoning: true,
+              supports_none_reasoning_effort: true,
+              supports_minimal_reasoning_effort: false,
+              supports_low_reasoning_effort: false,
+              supports_medium_reasoning_effort: false,
+              supports_high_reasoning_effort: true,
+              supports_xhigh_reasoning_effort: false,
+              supports_max_reasoning_effort: true,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: "none",
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    });
+  });
+
+  it("merges singleton router reasoning effort flags over catalog metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "openai/gpt-5.6-luna",
+            model_info: { mode: "chat", supports_reasoning: true, supports_xhigh_reasoning_effort: false },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: null, max: "max" });
+  });
+
   it("uses catalog costs when /model/info omits costs for Anthropic aliases", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
@@ -428,6 +480,38 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
+  it.each([
+    ["opaque backend model", { litellm_params: { model: "internal/mystery" }, model_info: {} }],
+    ["opaque base model", { model_info: { base_model: "internal/mystery" } }],
+    ["unresolved adapter", { model_info: { litellm_provider: "custom_proxy" } }],
+  ])("withholds route-text catalog metadata for a singleton with %s evidence", async (_case, evidence) => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/gpt-5.5",
+              ...evidence,
+              model_info: { ...evidence.model_info, id: "only", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("treats repeated identified deployment rows as one effective singleton", async () => {
     const deployment = {
       model_name: "openai/gpt-5.5",
@@ -451,7 +535,7 @@ describe("discoverModels via /model/info", () => {
     expect(
       resolveModelInfoCatalog({
         model_name: "public-route-without-family-text",
-        litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+        litellm_params: { model: " azure_ai/DeepSeek-V4 " },
         model_info: { mode: "chat", litellm_provider: "azure_ai" },
       }),
     ).toEqual({ semanticFamily: "deepseek" });
@@ -462,7 +546,7 @@ describe("discoverModels via /model/info", () => {
           data: [
             {
               model_name: "foundry-route",
-              litellm_params: { model: " azure_ai/DeepSeek-V4 ", allowed_openai_params: ["reasoning_effort"] },
+              litellm_params: { model: " azure_ai/DeepSeek-V4 " },
               model_info: { mode: "chat", litellm_provider: "azure_ai" },
             },
           ],
@@ -643,22 +727,6 @@ describe("discoverModels via /model/info", () => {
   it.each([
     ["a numeric mode", { model_name: "bad-mode", model_info: { id: "a", mode: 7 } }],
     ["a numeric deployment id", { model_name: "bad-id", model_info: { id: 7, mode: "chat" } }],
-    [
-      "non-string accepted params",
-      { model_name: "bad-params", model_info: { id: "a", mode: "chat", supported_openai_params: [1, "temperature"] } },
-    ],
-    [
-      "a non-array accepted params field",
-      { model_name: "bad-params-shape", model_info: { id: "a", mode: "chat", supported_openai_params: "temperature" } },
-    ],
-    [
-      "non-string allowed params",
-      {
-        model_name: "bad-allowed",
-        litellm_params: { model: "openai/gpt-4o", allowed_openai_params: [{}] },
-        model_info: { id: "a", mode: "chat" },
-      },
-    ],
     // Every untrusted string this branch newly reads. A YAML value such as
     // `model_name: 4.1` parses as a number, which is an ordinary operator typo.
     ["a numeric route name", { model_name: 4.1, model_info: { id: "a", mode: "chat" } }],
