@@ -117,6 +117,9 @@ function resolveCredentialRoot(
 
 function requireCredentialRoot(root: string | undefined, providerName: string): string {
   if (!root) throw new Error(`no LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
+  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+    throw new Error(`placeholder LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
+  }
   return root;
 }
 
@@ -1113,7 +1116,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const apiKey = auth.auth.apiKey;
     const oauthRuntimeRoot = oauthRuntimeRoots.get(PROVIDER_NAME);
     const baseUrl =
-      auth.auth.baseUrl ??
+      cleanConfig(auth.env?.[ENV_BASE_URL]) ??
       (oauthRuntimeRoot && oauthRuntimeRoot.apiKey === apiKey ? oauthRuntimeRoot.root : undefined) ??
       provider?.baseUrl;
     if (!baseUrl || !apiKey) return undefined;
@@ -1237,10 +1240,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const toAuth = auth.oauth.toAuth;
       auth.oauth.toAuth = async (credential) => {
         const resolved = await toAuth(credential);
-        const root = resolveCredentialRoot(definition, credential, resolved.baseUrl);
-        if (!root) throw new Error("LiteLLM OAuth credential has no valid base URL; run /login litellm again");
+        const root = requireCredentialRoot(resolveCredentialRoot(definition, credential), definition.name);
         oauthRuntimeRoots.set(definition.name, { apiKey: credential.access, root });
-        return { ...resolved, baseUrl: undefined };
+        return resolved;
       };
     }
     const provider = createLiteLLMProvider({

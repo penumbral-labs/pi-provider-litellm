@@ -239,6 +239,31 @@ describe("createLiteLLMProvider", () => {
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
+  it("blocks requests when active credentials have no model host", () => {
+    const value = controller({ resolveCredentialRoot: () => undefined });
+
+    expect(() => value.stream(native("missing-root"), { messages: [] })).toThrow(
+      /Active credentials do not identify a LiteLLM model host.*network refresh/i,
+    );
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
+  it("blocks cached models with unsupported transports", () => {
+    const model = { ...native("legacy"), api: "legacy-completions" } as unknown as Model<"openai-completions">;
+    const value = controller();
+
+    expect(() => value.stream(model, { messages: [] })).toThrow(/unsupported LiteLLM transport.*network refresh/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
+  it("blocks cached models with invalid URLs", () => {
+    const model = { ...native("invalid-url"), baseUrl: "not a URL" };
+    const value = controller();
+
+    expect(() => value.stream(model, { messages: [] })).toThrow(/invalid LiteLLM model URL.*network refresh/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
   it("retains previous models when discovery rejects", async () => {
     const refreshContext = context([native("old")], true);
     const discover = vi.fn(async () => {
