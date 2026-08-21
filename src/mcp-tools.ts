@@ -247,6 +247,134 @@ function parseJson(text: string, surface: string): unknown {
   }
 }
 
+function skipJsonWhitespace(text: string, start: number): number {
+  let index = start;
+  while (index < text.length && /\s/.test(text[index] ?? "")) index += 1;
+  return index;
+}
+
+function jsonStringEnd(text: string, start: number): number | undefined {
+  if (text[start] !== '"') return undefined;
+  for (let index = start + 1; index < text.length; index += 1) {
+    if (text[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (text[index] === '"') return index + 1;
+  }
+  return undefined;
+}
+
+// Advances over one JSON value without materializing it. Full syntax validation remains JSON.parse's
+// job; this scanner only needs enough structure to locate a top-level `tools` array before parsing.
+function jsonValueEnd(text: string, start: number): number {
+  const first = text[start];
+  if (first === '"') return jsonStringEnd(text, start) ?? text.length;
+  if (first !== "[" && first !== "{") {
+    let index = start;
+    while (index < text.length && !/[\s,}\]]/.test(text[index] ?? "")) index += 1;
+    return index;
+  }
+
+  let depth = 1;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      index = (jsonStringEnd(text, index) ?? text.length) - 1;
+      continue;
+    }
+    if (character === "[" || character === "{") depth += 1;
+    else if (character === "]" || character === "}") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return text.length;
+}
+
+function assertJsonArrayEntryLimit(text: string, start: number): void {
+  let depth = 1;
+  let expectingEntry = true;
+  let entries = 0;
+  const recordEntry = (): void => {
+    entries += 1;
+    expectingEntry = false;
+    if (entries > MAX_DISCOVERY_ENTRIES) {
+      throw new Error(`MCP discovery exceeds its ${MAX_DISCOVERY_ENTRIES}-entry limit`);
+    }
+  };
+
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      if (depth === 1 && expectingEntry) recordEntry();
+      index = (jsonStringEnd(text, index) ?? text.length) - 1;
+      continue;
+    }
+    if (character === "[" || character === "{") {
+      if (depth === 1 && expectingEntry) recordEntry();
+      depth += 1;
+      continue;
+    }
+    if (character === "]" || character === "}") {
+      depth -= 1;
+      if (depth === 0) return;
+      continue;
+    }
+    if (depth !== 1) continue;
+    if (character === ",") {
+      expectingEntry = true;
+      continue;
+    }
+    if (/\s/.test(character ?? "") || !expectingEntry) continue;
+    recordEntry();
+  }
+}
+
+// Rejects an excessive catalog before JSON.parse can allocate an object for every raw entry. Both
+// documented response shapes are handled, including duplicate or escaped top-level `tools` keys.
+// The response byte cap bounds this lexical pass, and the entry cap makes the hostile-array path
+// stop after the first 10,001 primitive values rather than traversing the complete payload.
+function assertDiscoveryEntryLimit(text: string): void {
+  let index = skipJsonWhitespace(text, 0);
+  if (text[index] === "[") {
+    assertJsonArrayEntryLimit(text, index);
+    return;
+  }
+  if (text[index] !== "{") return;
+  index += 1;
+
+  while (index < text.length) {
+    index = skipJsonWhitespace(text, index);
+    if (text[index] === "}") return;
+    const keyStart = index;
+    const keyEnd = jsonStringEnd(text, keyStart);
+    if (keyEnd === undefined) return;
+    index = skipJsonWhitespace(text, keyEnd);
+    if (text[index] !== ":") return;
+    index = skipJsonWhitespace(text, index + 1);
+
+    let key: unknown;
+    try {
+      key = JSON.parse(text.slice(keyStart, keyEnd));
+    } catch {
+      return;
+    }
+    if (key === "tools" && text[index] === "[") assertJsonArrayEntryLimit(text, index);
+    index = skipJsonWhitespace(text, jsonValueEnd(text, index));
+    if (text[index] === ",") {
+      index += 1;
+      continue;
+    }
+    return;
+  }
+}
+
+function parseDiscoveryJson(text: string): unknown {
+  assertDiscoveryEntryLimit(text);
+  return parseJson(text, "MCP discovery");
+}
+
 function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   const raw = asRecord(value) as RawLiteLLMMcpTool | undefined;
   if (!raw) return undefined;
@@ -313,7 +441,7 @@ export async function discoverMcpTools(
       onProgress?.(`MCP tools discovery failed with status ${response.status}`);
       throw new Error(`HTTP ${response.status}`);
     }
-    const body = parseJson(await readBoundedText(response, MAX_DISCOVERY_BODY_BYTES, "MCP discovery"), "MCP discovery");
+    const body = parseDiscoveryJson(await readBoundedText(response, MAX_DISCOVERY_BODY_BYTES, "MCP discovery"));
     const bodyRecord = asRecord(body);
     // An unrecognized body shape is not the same as an empty catalog, and reporting it as "0 raw
     // entries" would send an operator looking at the wrong thing.
@@ -543,12 +671,41 @@ function findLocalRefHazard(
     // Name-keyed containers are not schemas. Requiring an object target to have been visited where
     // keys are interpreted as schema keywords prevents a ref from turning one into a schema behind
     // the scan's back (for example, `#/dependencies`).
-    if (!record || !schemaPositionNodes.has(record)) return "unresolvable-ref";
+    if (!record || !schemaPositionNodes.has(record) || !hasValidSchemaShape(record)) return "unresolvable-ref";
     const next = record.$ref;
     if (typeof next !== "string") return undefined;
     if (!next.startsWith("#")) return "nonlocal-ref";
     pointer = next;
   }
+}
+
+function schemaPositionNodes(root: Record<string, unknown>): WeakSet<object> {
+  const positions = new WeakSet<object>();
+  const seen = new WeakSet<object>();
+
+  const visitSchema = (value: unknown): void => {
+    if (typeof value === "boolean") return;
+    const schema = asRecord(value);
+    if (!schema || seen.has(schema)) return;
+    seen.add(schema);
+    positions.add(schema);
+
+    for (const keyword of DIRECT_SCHEMA_KEYWORDS) visitSchema(schema[keyword]);
+    for (const keyword of SCHEMA_MAP_KEYWORDS) {
+      const map = asRecord(schema[keyword]);
+      if (map) for (const child of Object.values(map)) visitSchema(child);
+    }
+    for (const keyword of SCHEMA_ARRAY_KEYWORDS) {
+      const schemas = schema[keyword];
+      if (Array.isArray(schemas)) for (const child of schemas) visitSchema(child);
+    }
+    const items = schema.items;
+    if (Array.isArray(items)) for (const child of items) visitSchema(child);
+    else visitSchema(items);
+  };
+
+  visitSchema(root);
+  return positions;
 }
 
 // Walks the whole untrusted schema graph looking for anything the validator could turn into a
@@ -561,8 +718,9 @@ function findLocalRefHazard(
 // A local `#/...` ref is only accepted when the walk covers its target *and* the target resolves to
 // a usable subschema, with the reference chain proven acyclic. Any other ref form is a hazard.
 export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | undefined {
-  const seen = new WeakSet<object>();
-  const schemaPositionNodes = new WeakSet<object>();
+  const seenKeywordObjects = new WeakSet<object>();
+  const seenNameMaps = new WeakSet<object>();
+  const active = new WeakSet<object>();
   const localRefs: string[] = [];
   let budget = MAX_SCAN_NODES;
 
@@ -570,17 +728,20 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
     if (budget-- <= 0) return "budget";
     if (depth > MAX_SCHEMA_DEPTH) return "budget";
     if (value === null || typeof value !== "object") return undefined;
-    // Record this before cycle detection: every path to an object contributes evidence about its
-    // position, even when another path reached the same identity first.
-    if (!keysAreNames) schemaPositionNodes.add(value);
-    if (seen.has(value)) return "cycle";
+    if (active.has(value)) return "cycle";
+    // Shared identities need inspection once per interpretation context: a `pattern` key is an
+    // argument name under `properties`, but the same object is hazardous if also used as a schema.
+    const seen = keysAreNames ? seenNameMaps : seenKeywordObjects;
+    if (seen.has(value)) return undefined;
     seen.add(value);
+    active.add(value);
 
     if (Array.isArray(value)) {
       for (const child of value) {
         const hazard = walk(child, depth + 1, false);
         if (hazard) return hazard;
       }
+      active.delete(value);
       return undefined;
     }
 
@@ -610,13 +771,15 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
       const hazard = walk(child, depth + 1, !keysAreNames && NAME_KEYED_KEYWORDS.has(key));
       if (hazard) return hazard;
     }
+    active.delete(value);
     return undefined;
   };
 
   const walkHazard = walk(root, 0, false);
   if (walkHazard) return walkHazard;
+  const validPositions = schemaPositionNodes(root);
   for (const ref of localRefs) {
-    const refHazard = findLocalRefHazard(root, ref, schemaPositionNodes);
+    const refHazard = findLocalRefHazard(root, ref, validPositions);
     if (refHazard) return refHazard;
   }
   return undefined;

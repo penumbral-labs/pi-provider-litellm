@@ -132,18 +132,20 @@ describe("discoverMcpTools", () => {
     expect(tools.at(-1)?.name).toBe("tool-512");
   });
 
-  it("rejects excessive primitive entry arrays before normalizing or accumulating labels", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(
-        200,
-        Array.from({ length: 10_001 }, () => 0),
-      ),
-    );
+  it.each([
+    ["array response", `[${"0,".repeat(10_000)}0]`],
+    ["object response", `{"ignored":{"tools":[0]},"tools":[${"0,".repeat(10_000)}0]}`],
+    ["escaped tools key", `{"to\\u006fls":[${"0,".repeat(10_000)}0]}`],
+    ["multi-megabyte primitive array", `[${"0,".repeat(1_000_000)}0]`],
+  ])("rejects excessive entries in a %s before JSON.parse materializes them", async (_label, body) => {
+    const parse = vi.spyOn(JSON, "parse");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
     const progress: string[] = [];
 
     await expect(
       discoverMcpToolsRaw("https://litellm.example.com", "sk-test", undefined, (message) => progress.push(message)),
     ).rejects.toThrow("MCP discovery exceeds its 10000-entry limit");
+    expect(parse.mock.calls).not.toContainEqual([body]);
     expect(progress).not.toContain("Found 10001 raw MCP tools, normalizing...");
   });
 
@@ -1465,7 +1467,7 @@ describe("findSchemaHazard", () => {
     expect(findSchemaHazard({ type: "object", properties: { s: { [keyword]: 7 } } })).toBe("malformed-ref");
   });
 
-  it("only resolves local references to nodes visited as schemas", () => {
+  it("only resolves local references to independently valid schemas", () => {
     expect(
       findSchemaHazard({
         type: "object",
@@ -1480,7 +1482,47 @@ describe("findSchemaHazard", () => {
         dependencies: { patternProperties: { "^(a+)+$": { type: "string" } } },
       }),
     ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        default: { type: "object", properties: 5 },
+        properties: { s: { $ref: "#/default" } },
+      }),
+    ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        default: { type: "object", properties: {} },
+        properties: { s: { $ref: "#/default" } },
+      }),
+    ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        examples: [{ type: "array", items: 5 }],
+        properties: { s: { $ref: "#/examples/0" } },
+      }),
+    ).toBe("unresolvable-ref");
 
+    for (const schemaPositionFirst of [false, true]) {
+      const sharedSchema = { type: "object", properties: {} };
+      const sharedPositions = schemaPositionFirst
+        ? { $defs: { sharedSchema }, default: sharedSchema }
+        : { default: sharedSchema, $defs: { sharedSchema } };
+      expect(
+        findSchemaHazard({
+          type: "object",
+          ...sharedPositions,
+          properties: { s: { $ref: "#/default" } },
+        }),
+      ).toBeUndefined();
+
+      const sharedHazard = { pattern: "^(a+)+$" };
+      const hazardousPositions = schemaPositionFirst
+        ? { $defs: { sharedHazard }, default: sharedHazard }
+        : { default: sharedHazard, $defs: { sharedHazard } };
+      expect(findSchemaHazard({ type: "object", ...hazardousPositions, properties: {} })).toBe("regex");
+    }
     expect(
       findSchemaHazard({ type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } }),
     ).toBeUndefined();
@@ -1574,6 +1616,24 @@ describe("every registered schema is safe for the validator that consumes it", (
       name: "refintoexamples",
       server_name: "srv",
       inputSchema: { type: "object", examples: [{ pattern: EVIL }], properties: { s: { $ref: "#/examples/0" } } },
+    },
+    {
+      name: "refmalformeddefault",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        default: { type: "object", properties: 5 },
+        properties: { s: { $ref: "#/default" } },
+      },
+    },
+    {
+      name: "refschemalookingdefault",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        default: { type: "object", properties: {} },
+        properties: { s: { $ref: "#/default" } },
+      },
     },
     { name: "remoteref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $ref: REMOTE } } } },
     { name: "dynref", server_name: "srv", inputSchema: { type: "object", properties: { s: { $dynamicRef: "#m" } } } },
