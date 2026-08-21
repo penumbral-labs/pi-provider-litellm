@@ -7,9 +7,7 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 export type SemanticModel = "deepseek-v4" | "kimi-k2.5-k2.6" | "kimi-k2.7-code" | "kimi-k3";
 
-// Contradictory or partial deployment-family evidence must not decay into "no
-// evidence", which would allow route-name inference to re-enter later.
-export type FamilyEvidence = SemanticFamily | "conflicting";
+type FamilyEvidence = SemanticFamily | "conflicting";
 
 type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
 
@@ -51,14 +49,14 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
-  semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
   // One entry per routable deployment. Undefined means that deployment supplied
   // no usable family evidence; callers use this to gate outbound rewrites.
-  deploymentFamilies: (SemanticFamily | undefined)[];
+  deploymentFamilies: (FamilyEvidence | undefined)[];
+  normalizeThinkTags: boolean;
   suppressReasoningVisibility: boolean;
   acceptedOpenAIParams: string[];
   reasoningPolicy: ReasoningPolicy;
@@ -481,13 +479,18 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
 }
 
-function reduceFamilyEvidence(values: readonly (FamilyEvidence | undefined)[]): FamilyEvidence | undefined {
-  const declared = values.filter((value): value is FamilyEvidence => value !== undefined);
-  if (declared.length === 0) return undefined;
-  if (declared.length !== values.length) return "conflicting";
-  const distinct = new Set(declared);
-  if (distinct.has("conflicting") || distinct.size > 1) return "conflicting";
-  return declared[0];
+const KIMI_FAMILY_PATTERN = /(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/i;
+const FORCED_THINKING_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
+
+function kimiDeploymentEvidence(entry: ModelInfoEntry): { identified: boolean; forcedThinking: boolean } {
+  const identities = [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider]
+    .map((candidate) => wireString(candidate)?.trim())
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const kimi = identities.filter((identity) => KIMI_FAMILY_PATTERN.test(identity));
+  return {
+    identified: kimi.length > 0,
+    forcedThinking: kimi.some((identity) => FORCED_THINKING_PATTERN.test(identity)),
+  };
 }
 
 export function reduceModelGroup(
@@ -507,7 +510,6 @@ export function reduceModelGroup(
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
-  const semanticFamily = reduceFamilyEvidence(catalogs.map((catalog) => catalog?.semanticFamily));
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
@@ -578,20 +580,15 @@ export function reduceModelGroup(
     cost,
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
-    ...(semanticFamily ? { semanticFamily } : {}),
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
-    deploymentFamilies: catalogs.map((catalog) =>
-      catalog?.semanticFamily === "conflicting" ? undefined : catalog?.semanticFamily,
-    ),
-    suppressReasoningVisibility: deployments.some((entry) => {
-      const backend =
-        wireString(entry.litellm_params?.model)?.trim() || wireString(entry.model_info?.base_model)?.trim();
-      return (
-        backend !== undefined &&
-        /(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/i.test(backend) &&
-        !/(?:^|[-/])thinking(?:[-/]|$)/i.test(backend)
-      );
+    deploymentFamilies: catalogs.map((catalog) => catalog?.semanticFamily),
+    normalizeThinkTags:
+      deployments.some((entry) => kimiDeploymentEvidence(entry).identified) &&
+      deployments.every((entry) => !kimiDeploymentEvidence(entry).forcedThinking),
+    suppressReasoningVisibility: deployments.every((entry) => {
+      const evidence = kimiDeploymentEvidence(entry);
+      return evidence.identified && !evidence.forcedThinking;
     }),
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),

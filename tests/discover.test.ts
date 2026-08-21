@@ -482,6 +482,25 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.litellmPolicy).toBeUndefined();
   });
 
+  it("withholds provider repair policy when one deployment has contradictory family evidence", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "conflicting-family-route",
+              litellm_params: { model: "moonshot/kimi-k2.6" },
+              model_info: { id: "a", mode: "chat", base_model: "openai/gpt-4o" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy).toBeUndefined();
+  });
+
   it("trims backend candidates before catalog resolution", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -745,6 +764,34 @@ describe("discoverModels via /model/info", () => {
         maxTokens: 4_000,
       });
     }
+  });
+
+  it("keeps strict repair but withholds visibility suppression for mixed Kimi thinking modes", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "mixed-kimi-mode-route",
+              litellm_params: { model: "moonshot/kimi-k2.6" },
+              model_info: { id: "normal", mode: "chat" },
+            },
+            {
+              model_name: "mixed-kimi-mode-route",
+              litellm_params: { model: "moonshot/kimi-k2-thinking" },
+              model_info: { id: "thinking", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy).toEqual({
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: false,
+      suppressReasoningVisibility: false,
+    });
   });
 
   it("withholds strict tool repair for partial Moonshot evidence and reports the route", async () => {

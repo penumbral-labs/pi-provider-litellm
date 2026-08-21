@@ -74,11 +74,12 @@ export function moonshotPolicy(modelId: string, strictToolRepair = false): LiteL
 
 function requestPolicy(
   modelId: string,
-  deploymentFamilies: readonly (SemanticFamily | undefined)[],
+  deploymentFamilies: readonly CatalogResolution["semanticFamily"][],
+  normalizeThinkTags: boolean,
   suppressReasoningVisibility: boolean,
   strictToolRepair: boolean,
 ): LiteLLMModelPolicy | undefined {
-  const evidenced = deploymentFamilies.filter((family): family is SemanticFamily => family !== undefined);
+  const evidenced = deploymentFamilies.filter((family) => family !== undefined && family !== "conflicting");
   if (
     evidenced.length > 0 &&
     evidenced.length === deploymentFamilies.length &&
@@ -94,7 +95,7 @@ function requestPolicy(
   if (evidenced.includes("kimi")) {
     return {
       normalizeStrictToolMessages: strictToolRepair,
-      normalizeThinkTags: suppressReasoningVisibility,
+      normalizeThinkTags,
       suppressReasoningVisibility,
     };
   }
@@ -276,6 +277,14 @@ function semanticFamily(id: string): SemanticFamily | undefined {
   return undefined;
 }
 
+function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFamily"] {
+  const identities = [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider]
+    .map((candidate) => wireString(candidate)?.trim())
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const families = identities.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
+  return new Set(families).size > 1 ? "conflicting" : families[0];
+}
+
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
   azure: "azure-openai-responses",
@@ -306,8 +315,6 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
   const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
-  const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
-  const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
   // Two recognized generations are contradictory: applying one deployment
   // contract to the other would send the wrong control, so withhold both.
   const routingGeneration = routingModel ? semanticModel(routingModel) : undefined;
@@ -315,11 +322,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const contradictoryGenerations =
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
   const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
-  const adapterFamily = semanticFamily(wireString(entry.model_info?.litellm_provider)?.trim() ?? "");
-  const families = [routingFamily, baseFamily, adapterFamily].filter(
-    (family): family is SemanticFamily => family !== undefined,
-  );
-  const resolvedFamily = new Set(families).size > 1 ? "conflicting" : families[0];
+  const resolvedFamily = deploymentFamily(entry);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   const resolutions = candidates
     .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
@@ -425,7 +428,10 @@ function mapFromModelInfoGroup(
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
-    if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
+    if (resolved) return resolved;
+    const semanticFamily = deploymentFamily(entry);
+    if (semanticFamily) return { semanticFamily };
+    if (!singleton || hasReadableBackendEvidence(entry)) return undefined;
     // Preserve upstream singleton enrichment only when LiteLLM provides no
     // readable backend identity. Route text never overrides opaque evidence.
     // `reduceModelGroup` only passes rows whose route name is a readable string.
@@ -457,6 +463,7 @@ function mapFromModelInfoGroup(
   const modelPolicy = requestPolicy(
     reduced.id,
     reduced.deploymentFamilies,
+    reduced.normalizeThinkTags,
     reduced.suppressReasoningVisibility,
     unanimousMoonshot,
   );

@@ -213,6 +213,7 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: true,
       catalogAuthorityAmbiguous: true,
       deploymentFamilies: [undefined, undefined, undefined, undefined],
+      normalizeThinkTags: false,
       suppressReasoningVisibility: false,
       acceptedOpenAIParams: [],
       reasoningPolicy: { reasoning: false },
@@ -964,7 +965,27 @@ describe("reduceModelGroup", () => {
       () => undefined,
     );
 
-    expect(result?.suppressReasoningVisibility).toBe(false);
+    expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
+  });
+
+  it("does not suppress visibility when any Kimi deployment is always-thinking", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "mixed-kimi-route",
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+          model_info: { id: "normal", supports_reasoning: true },
+        }),
+        row({
+          model_name: "mixed-kimi-route",
+          litellm_params: { model: "moonshot/kimi-k2-thinking" },
+          model_info: { id: "thinking", supports_reasoning: true },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi" }),
+    );
+
+    expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
   });
 
   it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {

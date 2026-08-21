@@ -358,6 +358,35 @@ describe("native provider stream compatibility", () => {
     expect(assistant?.content).toBe(repaired ? "" : null);
   });
 
+  it("withholds visibility suppression when a Kimi route mixes normal and always-thinking deployments", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "mixed-kimi-mode-route",
+        litellm_params: { model: "moonshot/kimi-k2.6" },
+        model_info: { id: "normal", mode: "chat" },
+      },
+      {
+        model_name: "mixed-kimi-mode-route",
+        litellm_params: { model: "moonshot/kimi-k2-thinking" },
+        model_info: { id: "thinking", mode: "chat" },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }).result();
+
+    expect(model).toMatchObject({
+      litellmPolicy: {
+        normalizeStrictToolMessages: true,
+        normalizeThinkTags: false,
+        suppressReasoningVisibility: false,
+      },
+    });
+    expect(requests[0]).not.toHaveProperty("include_reasoning");
+    expect(requests[0]).not.toHaveProperty("reasoning_content");
+    expect(requests[0]).not.toHaveProperty("merge_reasoning_content_in_choices");
+  });
+
   it.each([
     { name: "Kimi K3", backend: "moonshot/kimi-k3", params: ["reasoning_effort"] },
     { name: "Kimi K2.7 Code", backend: "moonshot/kimi-k2.7-code", params: ["thinking"] },

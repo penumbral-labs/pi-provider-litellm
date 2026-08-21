@@ -54,6 +54,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('=== "chat,responses"');
     expect(workflow).toContain('grouped[0].api === "openai-completions"');
     expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
+    expect(workflow).toContain("grouped[0].cost.input > 0 &&");
+    expect(workflow).toContain("grouped[0].cost.cacheRead === 0 &&");
+    expect(workflow).not.toContain("withheld-authority group must report unknown cost");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

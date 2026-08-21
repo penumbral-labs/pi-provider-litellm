@@ -235,8 +235,11 @@ jobs:
             `withheld-authority group must carry the permanent marker, received ${grouped[0].name}`,
           );
           assert(
-            grouped[0].cost.input === 0 && grouped[0].cost.output === 0,
-            `withheld-authority group must report unknown cost, received ${JSON.stringify(grouped[0].cost)}`,
+            grouped[0].cost.input > 0 &&
+              grouped[0].cost.output > 0 &&
+              grouped[0].cost.cacheRead === 0 &&
+              grouped[0].cost.cacheWrite === 0,
+            `group must preserve known prices and zero unresolved prices, received ${JSON.stringify(grouped[0].cost)}`,
           );
           assert(grouped[0].thinkingLevelMap === undefined, "group must not adopt a catalog thinking-level map");
           NODE
