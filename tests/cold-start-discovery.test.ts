@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
@@ -15,6 +15,9 @@ const ENV_KEYS = [
   "PI_OFFLINE",
 ];
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
+});
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
