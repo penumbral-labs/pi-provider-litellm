@@ -266,15 +266,21 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   );
 }
 
+function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
+  return [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider].some(
+    (candidate) => Boolean(wireString(candidate)?.trim()),
+  );
+}
+
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const resolved = resolveModelInfoCatalog(entry);
-    if (resolved || !singleton) return resolved;
-    // Exactly one routable deployment: the public route name is the only
-    // remaining hint, and using it preserves upstream singleton behavior.
+    if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
+    // Preserve upstream singleton enrichment only when LiteLLM provides no
+    // readable backend identity. Route text never overrides opaque evidence.
     // `reduceModelGroup` only passes rows whose route name is a readable string.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
