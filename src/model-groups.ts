@@ -4,8 +4,17 @@ import type { DiscoveredModel, ModelInfoEntry } from "./types.js";
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
+export type SemanticFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
+
+export type MessagesBackendCompat = Pick<
+  NonNullable<Model<"anthropic-messages">["compat"]>,
+  "forceAdaptiveThinking" | "supportsTemperature" | "supportsStrictTools"
+>;
+
 export interface CatalogResolution {
   provider?: string;
+  semanticFamily?: SemanticFamily;
+  messagesCompat?: MessagesBackendCompat;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -21,7 +30,7 @@ export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => Cat
 
 export interface ReducedModelGroup {
   id: string;
-  api: "openai-completions" | "openai-responses";
+  api: "anthropic-messages" | "openai-completions" | "openai-responses";
   reasoning: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision: boolean;
@@ -30,6 +39,8 @@ export interface ReducedModelGroup {
   cost: DiscoveredModel["cost"];
   hasCompleteCost: boolean;
   catalogProvider?: string;
+  semanticFamily?: SemanticFamily;
+  messagesCompat?: MessagesBackendCompat;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
@@ -198,6 +209,8 @@ export function reduceModelGroup(
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
+  const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
+  const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
@@ -250,9 +263,15 @@ export function reduceModelGroup(
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
 
+  const api = candidateModes.every((mode) => mode === "responses")
+    ? "openai-responses"
+    : candidateModes.every((mode) => mode === "chat") && semanticFamily === "claude" && messagesCompat
+      ? "anthropic-messages"
+      : "openai-completions";
+
   return {
     id,
-    api: candidateModes.every((mode) => mode === "responses") ? "openai-responses" : "openai-completions",
+    api,
     reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     vision,
@@ -261,13 +280,20 @@ export function reduceModelGroup(
     cost,
     hasCompleteCost,
     ...(catalogProvider ? { catalogProvider } : {}),
+    ...(semanticFamily ? { semanticFamily } : {}),
+    ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
   };
 }
 
-export function catalogResolution(provider: string, model: Model<Api>): CatalogResolution {
+export function catalogResolution(
+  provider: string,
+  semanticFamily: SemanticFamily | undefined,
+  model: Model<Api>,
+): CatalogResolution {
   return {
     provider,
+    semanticFamily,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),

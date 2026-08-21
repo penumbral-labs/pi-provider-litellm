@@ -7,7 +7,9 @@ import {
   catalogResolution,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  type MessagesBackendCompat,
   reduceModelGroup,
+  type SemanticFamily,
   wireString,
 } from "./model-groups.js";
 import type {
@@ -59,7 +61,12 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+export function buildCompat(
+  modelId: string,
+  api: DiscoveredModel["api"] = "openai-completions",
+  semanticFamily?: SemanticFamily,
+): DiscoveredModel["compat"] {
+  if (api === "anthropic-messages") return undefined;
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -69,7 +76,7 @@ export function buildCompat(modelId: string): DiscoveredModel["compat"] {
       maxTokensField: "max_tokens",
     };
   }
-  if (ANTHROPIC_MODEL_PATTERN.test(modelId)) {
+  if (semanticFamily === "claude" || ANTHROPIC_MODEL_PATTERN.test(modelId)) {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
@@ -85,18 +92,26 @@ function toKnownProvider(provider: string | undefined): BuiltinProvider | undefi
 // second alias pattern cannot drift away from it. Every Anthropic catalog id and
 // every alias that maps onto one is canonicalized to a `claude-` lookup id,
 // including single-number names and dated snapshots.
-function catalogProviderCandidates(lookupIds: readonly string[], id: string, ownedBy?: string): BuiltinProvider[] {
-  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])];
-  if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
-  return [...new Set(candidates.filter((provider): provider is BuiltinProvider => provider !== undefined))];
+function catalogProviderCandidates(
+  lookupIds: readonly string[],
+  id: string,
+  ownedBy?: string,
+  adapterProvider?: BuiltinProvider,
+): BuiltinProvider[] {
+  const candidates = [adapterProvider, toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])].filter(
+    (provider): provider is BuiltinProvider => provider !== undefined,
+  );
+  if (!adapterProvider && lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
+  return [...new Set(candidates)];
 }
 
 function resolveCatalogModel(
   id: string,
   ownedBy?: string,
+  adapterProvider?: BuiltinProvider,
 ): { provider: BuiltinProvider; model: Model<Api> } | undefined {
   const lookupIds = catalogLookupIds(id);
-  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy)) {
+  for (const provider of catalogProviderCandidates(lookupIds, id, ownedBy, adapterProvider)) {
     const model = findCatalogModelInProvider(provider, lookupIds);
     if (model) return { provider, model };
   }
@@ -146,10 +161,19 @@ export function enrichCachedModel(model: Model<Api>): Model<Api> {
   };
 }
 
+function undecoratedBackendIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const undecorated = routed.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
+  return [
+    ...new Set([routed, routed.replace(/:\d+$/, ""), undecorated, undecorated.replace(/-\d{8}$/, "")].filter(Boolean)),
+  ];
+}
+
 function catalogLookupIds(id: string): string[] {
   const lookupIds = new Set([id]);
   const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
   lookupIds.add(unprefixed);
+  for (const candidate of undecoratedBackendIds(id)) lookupIds.add(candidate);
 
   const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
   const match = /^(?:claude-)?(opus|sonnet|haiku)-(\d+)-(\d+)$/.exec(anthropicAlias);
@@ -168,6 +192,40 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
   }
   return undefined;
 }
+
+function semanticFamily(id: string): SemanticFamily | undefined {
+  const value = id.toLowerCase();
+  if (/(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/.test(value)) return "claude";
+  if (/(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/.test(value)) return "kimi";
+  if (/(?:^|[./_-])deepseek(?:$|[./_:-])/.test(value)) return "deepseek";
+  if (/(?:^|[./_-])gemini(?:$|[./_:-])/.test(value)) return "gemini";
+  if (/(?:^|[./_-])(?:openai|gpt|o\d)(?:$|[./_:-])/.test(value)) return "openai";
+  return undefined;
+}
+
+function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined {
+  if (model.api !== "anthropic-messages") return undefined;
+  const compat = (model as Model<"anthropic-messages">).compat;
+  const carried: MessagesBackendCompat = {};
+  if (compat?.forceAdaptiveThinking !== undefined) carried.forceAdaptiveThinking = compat.forceAdaptiveThinking;
+  if (compat?.supportsTemperature !== undefined) carried.supportsTemperature = compat.supportsTemperature;
+  if (compat?.supportsStrictTools !== undefined) carried.supportsStrictTools = compat.supportsStrictTools;
+  return carried;
+}
+
+function anthropicBackendLookupIds(id: string): string[] {
+  const routed = (id.split("/").pop() ?? id).toLowerCase();
+  const base = routed.replace(/^(?:[a-z0-9-]+\.)*anthropic[./]/, "");
+  return undecoratedBackendIds(base);
+}
+
+function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefined {
+  const model = findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(id));
+  return model ? messagesCompatOf(model) : undefined;
+}
+
+const CLAUDE_CAPABLE_ADAPTERS = new Set(["anthropic", "bedrock", "bedrock_converse", "vertex_ai"]);
+const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
@@ -191,15 +249,37 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
 }
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
-  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => wireString(candidate)?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
+  const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
+  const adapterProvider = adapterCatalogProvider(adapter);
+  const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
+  const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
+  const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
+  const families = candidates.map(semanticFamily).filter((family): family is SemanticFamily => family !== undefined);
+  const semantic = families.length > 0 && families.every((family) => family === families[0]) ? families[0] : undefined;
+  const claudeEvidence =
+    adapter !== undefined &&
+    CLAUDE_CAPABLE_ADAPTERS.has(adapter) &&
+    candidates.length > 0 &&
+    candidates.every((candidate) => semanticFamily(candidate) === "claude" && CLAUDE_MODEL_PATTERN.test(candidate));
+  const compatiblePolicies = claudeEvidence ? candidates.map(messagesCompatFromBackend) : [];
+  const compat =
+    compatiblePolicies.length > 0 &&
+    compatiblePolicies.every(
+      (candidate) => candidate !== undefined && JSON.stringify(candidate) === JSON.stringify(compatiblePolicies[0]),
+    )
+      ? compatiblePolicies[0]
+      : undefined;
+
   for (const candidate of candidates) {
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
-    if (resolved) return catalogResolution(resolved.provider, resolved.model);
+    const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);
+    if (resolved) {
+      return {
+        ...catalogResolution(resolved.provider, semantic ?? semanticFamily(resolved.model.id), resolved.model),
+        ...(compat ? { messagesCompat: compat } : {}),
+      };
+    }
   }
-  return undefined;
+  return semantic ? { semanticFamily: semantic, ...(compat ? { messagesCompat: compat } : {}) } : undefined;
 }
 
 async function fetchJson<T>(
@@ -265,23 +345,32 @@ function mapFromModelInfoGroup(
     // `reduceModelGroup` only passes rows whose route name is a readable string.
     const id = entry.model_name;
     const catalog = id ? resolveCatalogModel(id) : undefined;
-    return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
+    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
-  return {
+  const shared = {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
     // catalog re-derivation from the model id during offline cache reads.
     name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
-    input: reduced.vision ? ["text", "image"] : ["text"],
+    input: (reduced.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
-    api: reduced.api,
-    compat: buildCompat(reduced.id),
+  };
+  if (reduced.api === "anthropic-messages") {
+    return { ...shared, api: "anthropic-messages", compat: reduced.messagesCompat };
+  }
+  if (reduced.api === "openai-responses") {
+    return { ...shared, api: "openai-responses", compat: buildCompat(reduced.id, "openai-responses") };
+  }
+  return {
+    ...shared,
+    api: "openai-completions",
+    compat: buildCompat(reduced.id, "openai-completions", reduced.semanticFamily),
   };
 }
 
@@ -294,10 +383,14 @@ function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | unde
   // to the `/health` route name rather than discarding a model the route could name.
   if (wireString(entry.model_name) || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  // A thinking-level map is a per-generation control, and `/health` supplies only
-  // route text for it. Other catalog metadata on this path is unchanged.
-  if (model) delete model.thinkingLevelMap;
-  return model;
+  if (!model) return undefined;
+  delete model.thinkingLevelMap;
+  if (model.api === "openai-completions") return model;
+  return {
+    ...model,
+    api: "openai-completions",
+    compat: buildCompat(model.id, "openai-completions", model.api === "anthropic-messages" ? "claude" : undefined),
+  };
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {

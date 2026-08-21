@@ -645,3 +645,53 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([anthropic, unresolved], resolveCatalog)?.catalogAuthorityAmbiguous).toBe(true);
   });
 });
+
+describe("native Messages route selection", () => {
+  const claude = (compat: { forceAdaptiveThinking?: boolean } = {}) => ({
+    provider: "amazon-bedrock",
+    semanticFamily: "claude" as const,
+    messagesCompat: compat,
+  });
+
+  it("selects Messages for a homogeneous strongly evidenced Claude group", () => {
+    const result = reduceModelGroup(
+      [
+        { model_name: "claude-route", model_info: { id: "a", mode: "chat" } },
+        { model_name: "claude-route", model_info: { id: "b", mode: "chat" } },
+      ],
+      () => claude({ forceAdaptiveThinking: true }),
+    );
+
+    expect(result).toMatchObject({
+      api: "anthropic-messages",
+      catalogProvider: "amazon-bedrock",
+      semanticFamily: "claude",
+      messagesCompat: { forceAdaptiveThinking: true },
+    });
+  });
+
+  it.each([
+    ["mixed family", [claude({}), { provider: "openai", semanticFamily: "openai" as const }]],
+    ["unknown sibling", [claude({}), undefined]],
+    ["different Messages compatibility", [claude({ forceAdaptiveThinking: true }), claude({})]],
+  ])("keeps %s groups on Chat Completions", (_name, evidence) => {
+    const result = reduceModelGroup(
+      [
+        { model_name: "mixed-route", model_info: { id: "a", mode: "chat" } },
+        { model_name: "mixed-route", model_info: { id: "b", mode: "chat" } },
+      ],
+      (_entry, _singleton) => evidence.shift(),
+    );
+
+    expect(result?.api).toBe("openai-completions");
+  });
+
+  it("keeps explicit Responses mode authoritative for Claude", () => {
+    const result = reduceModelGroup(
+      [{ model_name: "claude-route", model_info: { id: "a", mode: "responses" } }],
+      () => claude({}),
+    );
+
+    expect(result?.api).toBe("openai-responses");
+  });
+});

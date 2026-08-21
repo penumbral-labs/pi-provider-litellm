@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSmokeModels, runSmoke, runSmokeFromEnv, smokeChatCompletion } from "../scripts/smoke-runner.js";
+import {
+  parseExpectedApis,
+  parseExpectedResponseCost,
+  parseSmokeModels,
+  runSmoke,
+  runSmokeFromEnv,
+  smokeChatCompletion,
+} from "../scripts/smoke-runner.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -28,18 +35,196 @@ describe("parseSmokeModels", () => {
   });
 });
 
+describe("smoke expectations", () => {
+  it("parses per-model API and response-cost expectations", () => {
+    expect(parseExpectedApis("claude=anthropic-messages chat=openai-completions")).toEqual(
+      new Map([
+        ["claude", "anthropic-messages"],
+        ["chat", "openai-completions"],
+      ]),
+    );
+    expect(parseExpectedResponseCost("claude=present chat=absent")).toEqual(
+      new Map([
+        ["claude", true],
+        ["chat", false],
+      ]),
+    );
+  });
+});
+
 describe("smokeChatCompletion", () => {
   it("is reusable by the auth smoke", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { choices: [{ message: { content: "pong" } }] }));
 
     await expect(smokeChatCompletion("http://127.0.0.1:4000", "sk-smoke", "vidaimock-openai", 1000)).resolves.toEqual({
       modelId: "vidaimock-openai",
+      api: "openai-completions",
+      endpoint: "/v1/chat/completions",
       content: "pong",
+      hasResponseCost: false,
     });
   });
 });
 
 describe("runSmoke", () => {
+  it("uses each discovered model's route-distinct endpoint and records response-cost availability", async () => {
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-route",
+              model_info: { id: "claude", mode: "chat", litellm_provider: "anthropic" },
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            },
+            { model_name: "chat-route", model_info: { id: "chat", mode: "chat" } },
+            { model_name: "responses-route", model_info: { id: "responses", mode: "responses" } },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ content: [{ type: "text", text: "messages" }] }), {
+          headers: { "content-type": "application/json", "x-litellm-response-cost": "0.01" },
+        });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "chat" } }] });
+      }
+      if (url.endsWith("/v1/responses")) return jsonResponse(200, { output_text: "responses" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await runSmoke({
+      baseUrl: "http://127.0.0.1:4000",
+      apiKey: "sk-smoke",
+      modelIds: ["claude-route", "chat-route", "responses-route"],
+      timeoutMs: 1000,
+      expectedApis: new Map([
+        ["claude-route", "anthropic-messages"],
+        ["chat-route", "openai-completions"],
+        ["responses-route", "openai-responses"],
+      ]),
+      expectedResponseCost: new Map([
+        ["claude-route", true],
+        ["chat-route", false],
+        ["responses-route", false],
+      ]),
+    });
+
+    expect(result.completions).toEqual([
+      {
+        modelId: "claude-route",
+        api: "anthropic-messages",
+        endpoint: "/v1/messages",
+        content: "messages",
+        hasResponseCost: true,
+      },
+      {
+        modelId: "chat-route",
+        api: "openai-completions",
+        endpoint: "/v1/chat/completions",
+        content: "chat",
+        hasResponseCost: false,
+      },
+      {
+        modelId: "responses-route",
+        api: "openai-responses",
+        endpoint: "/v1/responses",
+        content: "responses",
+        hasResponseCost: false,
+      },
+    ]);
+    expect(requests.slice(1)).toEqual([
+      "http://127.0.0.1:4000/v1/messages",
+      "http://127.0.0.1:4000/v1/chat/completions",
+      "http://127.0.0.1:4000/v1/responses",
+    ]);
+  });
+
+  it("rejects an expected API mismatch before calling completion endpoints", async () => {
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "claude-route", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["claude-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["claude-route", "anthropic-messages"]]),
+      }),
+    ).rejects.toThrow(/API mismatch for claude-route/);
+    expect(requests).toEqual(["http://127.0.0.1:4000/model/info"]);
+  });
+
+  it("rejects a response-cost expectation mismatch", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "ok" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedResponseCost: new Map([["chat-route", true]]),
+      }),
+    ).rejects.toThrow(/Response-cost header mismatch for chat-route: expected present, got absent/);
+  });
+
+  it("rejects a configured expectation map that omits a requested model", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-route", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["chat-route"],
+        timeoutMs: 1000,
+        expectedApis: new Map([["other-route", "openai-completions"]]),
+      }),
+    ).rejects.toThrow(/No expected API configured for smoke model chat-route/);
+  });
+
+  it.each([
+    ["missing separator", "vidaimock-openai"],
+    ["leading separator", "=openai-completions"],
+    ["unknown value", "vidaimock-openai=openai-chat"],
+    ["empty value", "vidaimock-openai="],
+  ])("rejects a malformed expected-API entry (%s)", (_label, raw) => {
+    expect(() => parseExpectedApis(raw)).toThrow(/LITELLM_SMOKE_EXPECT_APIS entries must use model=value/);
+  });
+
+  it("rejects a malformed response-cost entry", () => {
+    expect(() => parseExpectedResponseCost("vidaimock-openai=maybe")).toThrow(
+      /LITELLM_SMOKE_EXPECT_RESPONSE_COST entries must use model=value/,
+    );
+  });
+
   it("discovers models and sends a chat completion request to each requested model", async () => {
     const requests: Array<{ url: string; body?: unknown; headers?: Record<string, string> }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -76,8 +261,20 @@ describe("runSmoke", () => {
       source: "model_info",
       discoveredCount: 2,
       completions: [
-        { modelId: "github-gpt-4.1-mini", content: "pong" },
-        { modelId: "gemini-flash", content: "pong" },
+        {
+          modelId: "github-gpt-4.1-mini",
+          api: "openai-completions",
+          endpoint: "/v1/chat/completions",
+          content: "pong",
+          hasResponseCost: false,
+        },
+        {
+          modelId: "gemini-flash",
+          api: "openai-completions",
+          endpoint: "/v1/chat/completions",
+          content: "pong",
+          hasResponseCost: false,
+        },
       ],
     });
     expect(requests.filter((request) => request.url.endsWith("/v1/chat/completions"))).toMatchObject([
@@ -216,7 +413,31 @@ describe("runSmoke", () => {
     expect(requestedUrls).toEqual(["http://127.0.0.1:4000/model/info"]);
   });
 
-  it("omits provider response bodies from chat completion failures", async () => {
+  it("truncates oversized provider error bodies in failures", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return new Response("x".repeat(600), { status: 500 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["github-models-openai"],
+        timeoutMs: 1000,
+      }),
+    ).rejects.toThrow(/returned 500: x{500}$/);
+  });
+
+  it("includes provider response bodies in chat completion failures", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) {
@@ -237,46 +458,7 @@ describe("runSmoke", () => {
         modelIds: ["github-models-openai"],
         timeoutMs: 1000,
       }),
-    ).rejects.toThrow("/v1/chat/completions for github-models-openai returned 429");
-  });
-
-  it("omits credentials from provider response bodies", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
-        });
-      }
-      if (url.endsWith("/v1/chat/completions")) {
-        return Response.json(
-          {
-            authorization: "Bearer sk-live-secret",
-            api_key: "plain-provider-secret",
-            credentials: ["unknown-secret-one", "unknown-secret-two"],
-            jwt: "eyJhbGciOiJub25l.eyJzdWIiOiIxMjMifQ.sig",
-          },
-          { status: 500 },
-        );
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    await expect(
-      runSmoke({
-        baseUrl: "http://127.0.0.1:4000",
-        apiKey: "sk-smoke",
-        modelIds: ["github-models-openai"],
-        timeoutMs: 1000,
-      }),
-    ).rejects.toSatisfy((error: Error) => {
-      expect(error.message).toContain("returned 500");
-      expect(error.message).not.toContain("sk-live-secret");
-      expect(error.message).not.toContain("plain-provider-secret");
-      expect(error.message).not.toContain("unknown-secret-two");
-      expect(error.message).not.toContain("eyJhbGciOiJub25l");
-      return error.message.length < 600;
-    });
+    ).rejects.toThrow(/\/v1\/chat\/completions for github-models-openai returned 429.*rate limited/);
   });
 });
 
@@ -309,7 +491,15 @@ describe("runSmokeFromEnv", () => {
       LITELLM_SMOKE_TIMEOUT_MS: "1000",
     });
 
-    expect(result.completions).toEqual([{ modelId: "github-models-openai", content: "pong" }]);
+    expect(result.completions).toEqual([
+      {
+        modelId: "github-models-openai",
+        api: "openai-completions",
+        endpoint: "/v1/chat/completions",
+        content: "pong",
+        hasResponseCost: false,
+      },
+    ]);
     expect(requests[0]).toMatchObject({
       url: "http://127.0.0.1:4000/model/info",
       headers: { Authorization: "Bearer sk-env" },

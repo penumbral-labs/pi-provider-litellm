@@ -65,7 +65,7 @@ export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_API_KEY="sk-..."
 ```
 
-Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`; native Messages plumbing uses the proxy root directly. Discovery keeps its existing Chat/Responses choices and does not select Messages automatically.
+Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`; native Messages uses the proxy root directly.
 
 ### Multiple LiteLLM provider aliases
 
@@ -145,6 +145,12 @@ Treat the configured LiteLLM proxy as trusted: Skills can add instructions to th
 /model
 ```
 
+## Model transport
+
+A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat mode, identifies a Claude backend through an Anthropic-, Bedrock-, or Vertex-capable adapter, and resolves the same Anthropic compatibility policy. Mixed-generation, mixed-family, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit Responses mode takes precedence. Catalog identity such as Amazon Bedrock remains separate from the selected wire protocol.
+
+Native Messages authenticates with `x-api-key` and intentionally omits `litellm_session_id`. Chat Completions and Responses keep their existing request behavior.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |
@@ -193,7 +199,7 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 ## Mocked LiteLLM smoke workflow
 
-The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
+The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock. The smoke runner discovers those models through LiteLLM, asserts each model's expected API, exercises `/v1/chat/completions`, `/v1/responses`, and `/v1/messages`, verifies the expected `x-litellm-response-cost` behavior, and proves endpoint coverage from captured LiteLLM request logs rather than response text.
 
 This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The smoke runner also asserts that discovery came from `/model/info` (`LITELLM_SMOKE_EXPECT_SOURCE`) so a silent fallback to `/v1/models` fails the run. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior, then runs a non-interactive Pi CLI smoke with `--list-models` and `-p` against both the OpenAI-compatible and Anthropic-backed routes, so extension loading, model discovery, and real completion paths are covered without opening the TUI. It also runs an interactive Pi TUI smoke covering `/login litellm` and Pi's native `/model` refresh.
 
