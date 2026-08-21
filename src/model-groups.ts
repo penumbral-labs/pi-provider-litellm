@@ -249,6 +249,40 @@ function deniesChatEffort(compat: OpenAICompat | undefined): boolean {
   return compat?.supportsReasoningEffort === false && compat?.thinkingFormat === undefined;
 }
 
+// Restrictions that only remove unsupported request fields are safe to apply as
+// soon as one deployment requires them. Shape-changing fields need every
+// deployment to agree because an unlabeled sibling may reject the alternate wire
+// form (for example, `max_tokens` instead of `max_completion_tokens`).
+const COMPAT_APPLY_IF_ANY = [
+  "supportsStore",
+  "supportsDeveloperRole",
+  "supportsReasoningEffort",
+  "supportsStrictMode",
+] as const;
+const COMPAT_REQUIRE_UNANIMITY = [
+  "maxTokensField",
+  "cacheControlFormat",
+  "thinkingFormat",
+  "requiresReasoningContentOnAssistantMessages",
+] as const;
+
+export function meetVendorCompat(
+  perDeployment: readonly (DiscoveredModel["compat"] | undefined)[],
+): DiscoveredModel["compat"] {
+  const candidates = perDeployment.map((compat) => compat as OpenAICompat | undefined);
+  if (candidates.length === 0) return undefined;
+  const met: Record<string, unknown> = {};
+  for (const field of COMPAT_APPLY_IF_ANY) {
+    const stated = candidates.map((compat) => compat?.[field]).filter((value) => value !== undefined);
+    if (stated.length > 0 && new Set(stated).size === 1) met[field] = stated[0];
+  }
+  for (const field of COMPAT_REQUIRE_UNANIMITY) {
+    const stated = candidates.map((compat) => compat?.[field]);
+    if (stated.every((value) => value !== undefined) && new Set(stated).size === 1) met[field] = stated[0];
+  }
+  return (Object.keys(met).length > 0 ? met : undefined) as DiscoveredModel["compat"];
+}
+
 // Translates a Chat-shaped map into Responses efforts, denying any level with no
 // valid Responses value instead of letting it through verbatim. pi-ai treats an
 // absent xhigh/max entry as unsupported (unlike the standard levels), so the

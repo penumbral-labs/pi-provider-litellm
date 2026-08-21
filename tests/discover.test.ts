@@ -482,15 +482,18 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.litellmPolicy).toBeUndefined();
   });
 
-  it("withholds provider repair policy when one deployment has contradictory family evidence", async () => {
+  it.each([
+    ["Kimi", "moonshot/kimi-k2.6", "openai/gpt-4o"],
+    ["DeepSeek", "openai/gpt-4o", "deepseek-v4"],
+  ])("withholds %s policy when one deployment has contradictory family evidence", async (_case, routing, base) => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
             {
               model_name: "conflicting-family-route",
-              litellm_params: { model: "moonshot/kimi-k2.6" },
-              model_info: { id: "a", mode: "chat", base_model: "openai/gpt-4o" },
+              litellm_params: { model: routing, allowed_openai_params: ["thinking", "reasoning_effort"] },
+              model_info: { id: "a", mode: "chat", base_model: base, supports_reasoning: true },
             },
           ],
         }),
@@ -499,6 +502,8 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]?.litellmPolicy).toBeUndefined();
+    expect(result.models[0]?.compat).toEqual({ supportsStore: false });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
   it("trims backend candidates before catalog resolution", async () => {
@@ -808,6 +813,32 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
+  it("applies complete Moonshot compat to a vanity route from unanimous deployment evidence", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "internal/prod-chat",
+              litellm_params: { model: "MoOnShOt/KiMi-K2.6" },
+              model_info: { id: "one", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.compat).toEqual({
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false,
+      maxTokensField: "max_tokens",
+    });
+    expect(result.models[0]?.litellmPolicy?.normalizeStrictToolMessages).toBe(true);
+  });
+
   it("keeps strict repair but withholds visibility suppression for mixed Kimi thinking modes", async () => {
     mockEndpoints({
       "/model/info": () =>
@@ -836,7 +867,7 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("withholds strict tool repair for partial Moonshot evidence and reports the route", async () => {
+  it("withholds strict tool repair for partial Moonshot evidence and reports a vanity route", async () => {
     const writes: string[] = [];
     vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
       writes.push(String(chunk));
@@ -847,12 +878,12 @@ describe("discoverModels via /model/info", () => {
         jsonResponse(200, {
           data: [
             {
-              model_name: "mixed-tool-route",
+              model_name: "internal/mixed-tool-route",
               litellm_params: { model: "moonshot/kimi-k2.6" },
               model_info: { id: "a", mode: "chat" },
             },
             {
-              model_name: "mixed-tool-route",
+              model_name: "internal/mixed-tool-route",
               litellm_params: { model: "internal/opaque" },
               model_info: { id: "b", mode: "chat" },
             },
@@ -867,7 +898,7 @@ describe("discoverModels via /model/info", () => {
       normalizeThinkTags: true,
     });
     expect(writes.filter((line) => line.includes("strict tool-message repair is withheld"))).toHaveLength(1);
-    expect(writes.join("\n")).toContain("mixed-tool-route");
+    expect(writes.join("\n")).toContain("internal/mixed-tool-route");
   });
 
   it("keeps an ambiguous group with complete router pricing unsuffixed and reports withheld authority", async () => {
@@ -1518,6 +1549,47 @@ describe("discoverModels response-mode models", () => {
 });
 
 describe("catalog provider candidates", () => {
+  it.each([
+    ["decorated mixed-case Kimi", "ToGeThEr/MoOnShOtAi/KiMi-K2.6@prod", "together_ai", 262_144],
+    ["mixed-case Claude", "AnThRoPiC/ClAuDe-SoNnEt-4-6", undefined, 1_000_000],
+    ["decorated Claude", "BeDrOcK/US.AnThRoPiC.ClAuDe-SoNnEt-4-6-V1:0", "bedrock", 1_000_000],
+  ])("retains catalog metadata for a $name provider-qualified backend", async (_case, backend, adapter, context) => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "private/catalog-route",
+              litellm_params: { model: backend },
+              model_info: { mode: "chat", ...(adapter ? { litellm_provider: adapter } : {}) },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "private/catalog-route",
+      name: "private/catalog-route",
+      contextWindow: context,
+      maxTokens: expect.any(Number),
+    });
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("does not strip arbitrary suffixes while normalizing provider-qualified ids", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "private/catalog-route",
+      litellm_params: { model: "anthropic/Claude-Sonnet-4-6-preview" },
+      model_info: { mode: "chat" },
+    });
+
+    expect(resolved).toEqual({ semanticFamily: "claude" });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("cost");
+  });
+
   it.each([
     "claude-opus-5",
     "claude-sonnet-5",

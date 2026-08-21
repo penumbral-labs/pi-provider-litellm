@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   isResponsesMode,
+  meetVendorCompat,
   reduceModelGroup,
   type SemanticFamily,
   type SemanticModel,
@@ -79,12 +80,11 @@ function requestPolicy(
   suppressReasoningVisibility: boolean,
   strictToolRepair: boolean,
 ): LiteLLMModelPolicy | undefined {
-  const evidenced = deploymentFamilies.filter((family) => family !== undefined && family !== "conflicting");
-  if (
-    evidenced.length > 0 &&
-    evidenced.length === deploymentFamilies.length &&
-    evidenced.every((family) => family === "gemini")
-  ) {
+  // A contradiction within one deployment is evidence against applying any
+  // family-specific request policy; do not discard it like a missing label.
+  if (deploymentFamilies.includes("conflicting")) return undefined;
+  const evidenced = deploymentFamilies.filter((family) => family !== undefined);
+  if (evidenced.length === deploymentFamilies.length && evidenced.every((family) => family === "gemini")) {
     return {
       normalizeStrictToolMessages: false,
       normalizeThinkTags: false,
@@ -103,8 +103,13 @@ function requestPolicy(
   return undefined;
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
-  if (isMoonshotModel(modelId)) {
+export function buildCompat(
+  modelId: string,
+  semanticFamily?: CatalogResolution["semanticFamily"],
+): DiscoveredModel["compat"] {
+  // Conflicting deployment evidence must not re-enable route-name inference.
+  if (semanticFamily === "conflicting") return { supportsStore: false };
+  if (semanticFamily === "kimi" || (semanticFamily === undefined && isMoonshotModel(modelId))) {
     return {
       supportsStore: false,
       supportsDeveloperRole: false,
@@ -113,7 +118,7 @@ export function buildCompat(modelId: string): DiscoveredModel["compat"] {
       maxTokensField: "max_tokens",
     };
   }
-  if (ANTHROPIC_MODEL_PATTERN.test(modelId)) {
+  if (semanticFamily === "claude" || (semanticFamily === undefined && ANTHROPIC_MODEL_PATTERN.test(modelId))) {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
@@ -233,12 +238,28 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
   };
 }
 
-function catalogLookupIds(id: string): string[] {
-  const lookupIds = new Set([id]);
-  const unprefixed = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
-  lookupIds.add(unprefixed);
+// LiteLLM backend ids may carry provider paths, Bedrock/Vertex version
+// decoration, and dated release snapshots. Normalize those forms before catalog
+// lookup so the same deployment evidence resolves consistently across providers.
+function undecoratedBackendIds(id: string): string[] {
+  const normalized = id.toLowerCase();
+  const unprefixed = normalized.includes("/") ? normalized.slice(normalized.indexOf("/") + 1) : normalized;
+  const routed = normalized.split("/").pop() ?? normalized;
+  const variants = (candidate: string): string[] => {
+    const undecorated = candidate.replace(/-v\d+(?::\d+)?$/, "").replace(/@[a-z0-9-]+$/, "");
+    return [candidate, candidate.replace(/:\d+$/, ""), undecorated, undecorated.replace(/-\d{8}$/, "")];
+  };
+  return [...new Set([...variants(unprefixed), ...variants(routed)].filter(Boolean))];
+}
 
-  const anthropicAlias = unprefixed.toLowerCase().replaceAll(".", "-");
+function catalogLookupIds(id: string): string[] {
+  const normalized = id.toLowerCase();
+  const lookupIds = new Set([normalized]);
+  const unprefixed = normalized.includes("/") ? normalized.slice(normalized.indexOf("/") + 1) : normalized;
+  lookupIds.add(unprefixed);
+  for (const candidate of undecoratedBackendIds(id)) lookupIds.add(candidate);
+
+  const anthropicAlias = unprefixed.replaceAll(".", "-");
   const match = /^(?:claude-)?(opus|sonnet|haiku)-(\d+)-(\d+)$/.exec(anthropicAlias);
   if (match) lookupIds.add(`claude-${match[1]}-${match[2]}-${match[3]}`);
   if (anthropicAlias === "fable-5" || anthropicAlias === "opus-5") lookupIds.add(`claude-${anthropicAlias}`);
@@ -247,10 +268,13 @@ function catalogLookupIds(id: string): string[] {
 }
 
 function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string[]): Model<Api> | undefined {
+  const models = getModels(provider);
   for (const lookupId of lookupIds) {
-    const exact = getModels(provider).find((model) => model.id === lookupId);
+    const normalized = lookupId.toLowerCase();
+    const exact = models.find((model) => model.id.toLowerCase() === normalized);
     if (exact) return exact;
-    const providerQualified = getModels(provider).find((model) => model.id === `${provider}/${lookupId}`);
+    const qualified = `${provider}/${normalized}`;
+    const providerQualified = models.find((model) => model.id.toLowerCase() === qualified);
     if (providerQualified) return providerQualified;
   }
   return undefined;
@@ -321,8 +345,12 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const baseGeneration = baseModel ? semanticModel(baseModel) : undefined;
   const contradictoryGenerations =
     routingGeneration !== undefined && baseGeneration !== undefined && routingGeneration !== baseGeneration;
-  const model = contradictoryGenerations ? undefined : (routingGeneration ?? baseGeneration);
   const resolvedFamily = deploymentFamily(entry);
+  // Family disagreement invalidates generation-specific policy even when only one
+  // side names a recognized generation. Otherwise OpenAI/Kimi or OpenAI/DeepSeek
+  // evidence can inherit controls, replay, and suppression from one side.
+  const model =
+    contradictoryGenerations || resolvedFamily === "conflicting" ? undefined : (routingGeneration ?? baseGeneration);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
   const resolutions = candidates
     .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
@@ -416,7 +444,11 @@ function reportWithheldToolRepair(routes: readonly string[]): void {
 function reportWithheldToolRepairForModels(models: readonly DiscoveredModel[]): void {
   reportWithheldToolRepair(
     models
-      .filter((model) => isMoonshotModel(model.id) && model.litellmPolicy?.normalizeStrictToolMessages === false)
+      .filter(
+        (model) =>
+          model.litellmPolicy?.normalizeStrictToolMessages === false &&
+          model.litellmPolicy.normalizeGeminiReasoningEffort !== true,
+      )
       .map((model) => model.id),
   );
 }
@@ -455,8 +487,18 @@ function mapFromModelInfoGroup(
   const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
   const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
   // The semantic policy's compat only applies on Chat, so its level map must be
-  // gated the same way. Generic provider compatibility remains route-derived.
-  const vendorCompat = buildCompat(reduced.id);
+  // gated the same way. Vendor compatibility is reduced from deployment
+  // evidence; route text is consulted only when no deployment identifies a
+  // family. This gives vanity Kimi routes the complete strict-schema block while
+  // withholding shape-changing fields from mixed or unidentified groups.
+  const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
+  const vendorCompat = unlabeled
+    ? buildCompat(reduced.id)
+    : meetVendorCompat(
+        reduced.deploymentFamilies.map((family) =>
+          family === undefined ? undefined : buildCompat(reduced.id, family),
+        ),
+      );
   const policy = closeSerializerPolicy({
     api: reduced.api,
     reasoning,
@@ -467,10 +509,12 @@ function mapFromModelInfoGroup(
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
     denyLevels: options.denyLevels,
   });
-  const unlabeled = reduced.deploymentFamilies.every((family) => family === undefined);
+  const hasConflictingFamily = reduced.deploymentFamilies.includes("conflicting");
   const unanimousMoonshot =
     reduced.deploymentFamilies.length > 0 && reduced.deploymentFamilies.every((family) => family === "kimi");
-  const moonshotEvidence = reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id));
+  const moonshotEvidence =
+    !hasConflictingFamily &&
+    (reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id)));
   if (moonshotEvidence && !unanimousMoonshot) options.withheldRepairRoutes?.push(reduced.id);
   const modelPolicy = requestPolicy(
     reduced.id,

@@ -3,6 +3,7 @@ import {
   type CatalogResolution,
   type CatalogResolver,
   closeSerializerPolicy,
+  meetVendorCompat,
   reduceModelGroup,
   toResponsesLevels,
 } from "../src/model-groups.js";
@@ -181,6 +182,40 @@ describe("toResponsesLevels", () => {
       xhigh: null,
       max: null,
     });
+  });
+});
+
+describe("meetVendorCompat", () => {
+  it("keeps Moonshot restrictions but withholds shape changes from an unidentified sibling", () => {
+    expect(
+      meetVendorCompat([
+        {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: false,
+          supportsStrictMode: false,
+          maxTokensField: "max_tokens",
+        },
+        undefined,
+      ]),
+    ).toEqual({
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false,
+    });
+  });
+
+  it("retains the complete Moonshot block only when every deployment agrees", () => {
+    const moonshot = {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false,
+      maxTokensField: "max_tokens" as const,
+    };
+
+    expect(meetVendorCompat([moonshot, moonshot])).toEqual(moonshot);
   });
 });
 
