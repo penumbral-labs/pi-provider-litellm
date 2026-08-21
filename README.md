@@ -28,7 +28,7 @@ git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extens
 Pi loads the TypeScript source entrypoint declared in `package.json` `pi.extensions`, so a source install needs no
 build step and no `node_modules`. Install dependencies only to run the test suite or the local checks.
 
-Version 2.2.0 was also importable as `pi-provider-litellm` from JavaScript or TypeScript. The source-only package no longer exposes that library import; it is supported only as a Pi extension.
+The previously published 2.2.0 package was also importable as `pi-provider-litellm` from JavaScript or TypeScript. The source-only package no longer exposes that library import; it is supported only as a Pi extension.
 
 </details>
 
