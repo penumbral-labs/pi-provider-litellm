@@ -503,7 +503,15 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]?.litellmPolicy).toBeUndefined();
     expect(result.models[0]?.compat).toEqual({ supportsStore: false });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
   });
 
   it("trims backend candidates before catalog resolution", async () => {
@@ -762,6 +770,34 @@ describe("discoverModels via /model/info", () => {
     expect(result).toEqual({ semanticFamily: "openai" });
   });
 
+  it.each([
+    "moonshot/kimi-k2.7",
+    "moonshot/kimi-k2.7-instruct",
+    "moonshot/kimi-k2.7-codec",
+    "moonshot/kimi-k2.7-highspeedy",
+  ])("does not classify K2.7 without an exact Code suffix: %s", (model) => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "unknown-k2.7-variant",
+        litellm_params: { model, allowed_openai_params: ["thinking"] },
+        model_info: { mode: "chat", supports_reasoning: true },
+      }),
+    ).toEqual({ semanticFamily: "kimi" });
+  });
+
+  it.each(["moonshot/kimi-k2.7-code", "moonshot/kimi-k2.7_highspeed", "moonshot/kimi-k2.7.code"])(
+    "classifies the supported K2.7 Code suffix: %s",
+    (model) => {
+      expect(
+        resolveModelInfoCatalog({
+          model_name: "known-k2.7-variant",
+          litellm_params: { model, allowed_openai_params: ["thinking"] },
+          model_info: { mode: "chat", supports_reasoning: true },
+        }),
+      ).toMatchObject({ semanticFamily: "kimi", semanticModel: "kimi-k2.7-code" });
+    },
+  );
+
   it("withholds same-provider conflicting catalog metadata from the published model", async () => {
     const rows = [
       {
@@ -1005,6 +1041,63 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("priced-ambiguous-authority");
     expect(diagnostics[0]).toContain("catalog limits, pricing, and reasoning metadata are withheld");
+  });
+
+  it("denies Chat reasoning levels without an accepted carrier", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "opaque-chat-reasoner",
+              litellm_params: { model: "internal/reasoner" },
+              model_info: { id: "one", mode: "chat", supports_reasoning: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ api: "openai-completions", reasoning: true });
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+  });
+
+  it("denies Responses reasoning levels when the only accepted control is Chat thinking", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "thinking-only-responses",
+              litellm_params: { model: "moonshot/kimi-k2.6", allowed_openai_params: ["thinking"] },
+              model_info: { id: "one", mode: "responses", supports_reasoning: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ api: "openai-responses", reasoning: true });
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
+    expect(result.models[0]).not.toHaveProperty("litellmResponsesReasoningControl");
   });
 
   it("denies Responses reasoning levels unless every deployment accepts reasoning_effort", async () => {

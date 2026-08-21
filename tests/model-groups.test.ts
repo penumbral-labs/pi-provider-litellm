@@ -183,6 +183,25 @@ describe("toResponsesLevels", () => {
       max: null,
     });
   });
+
+  it("denies implicit Chat levels until a carrier is evidenced", () => {
+    const input = {
+      api: "openai-completions" as const,
+      reasoning: true,
+      vendorCompat: { supportsStore: false } as const,
+    };
+
+    expect(closeSerializerPolicy({ ...input, requireChatCarrier: true }).thinkingLevelMap).toEqual(NO_LEVELS);
+    expect(
+      closeSerializerPolicy({
+        ...input,
+        vendorCompat: { supportsStore: false, supportsReasoningEffort: true },
+      }),
+    ).toEqual({
+      reasoning: true,
+      compat: { supportsStore: false, supportsReasoningEffort: true },
+    });
+  });
 });
 
 describe("meetVendorCompat", () => {
@@ -1009,20 +1028,23 @@ describe("reduceModelGroup", () => {
     expect(result?.reasoningPolicy).toEqual({ reasoning: false, compat: { supportsReasoningEffort: false } });
   });
 
-  it("preserves always-thinking Kimi display behavior from deployment evidence", () => {
-    const result = reduceModelGroup(
-      [
-        row({
-          model_name: "misleading-public-route",
-          litellm_params: { model: "moonshot/kimi-k2-thinking" },
-          model_info: { supports_reasoning: true },
-        }),
-      ],
-      () => undefined,
-    );
+  it.each(["moonshot/kimi-k2-thinking", "moonshot/kimi_k2_thinking", "moonshot/kimi.k2.thinking"])(
+    "preserves always-thinking Kimi display behavior for %s",
+    (model) => {
+      const result = reduceModelGroup(
+        [
+          row({
+            model_name: "misleading-public-route",
+            litellm_params: { model },
+            model_info: { supports_reasoning: true },
+          }),
+        ],
+        () => undefined,
+      );
 
-    expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
-  });
+      expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
+    },
+  );
 
   it("does not suppress visibility when any Kimi deployment is always-thinking", () => {
     const result = reduceModelGroup(

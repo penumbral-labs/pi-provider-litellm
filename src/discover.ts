@@ -283,7 +283,7 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
 function semanticModel(id: string): SemanticModel | undefined {
   const value = id.toLowerCase();
   if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?[56](?:$|[./_:-])/.test(value)) return "kimi-k2.5-k2.6";
-  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?7(?:[-_/]?(?:code|highspeed))?(?:$|[./_:-])/.test(value)) {
+  if (/(?:^|[./_-])kimi[-_/]?k?2[._-]?7[./_-]?(?:code|highspeed)(?:$|[./_:-])/.test(value)) {
     return "kimi-k2.7-code";
   }
   if (/(?:^|[./_-])kimi[-_/]?k?3(?:$|[./_:-])/.test(value)) return "kimi-k3";
@@ -561,6 +561,7 @@ function mapFromModelInfoGroup(
     semanticCompat: reasoningPolicy?.compat,
     semanticLevels: reasoningPolicy?.thinkingLevelMap,
     catalogLevels: reduced.thinkingLevelMap,
+    requireChatCarrier: true,
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
     denyLevels: options.denyLevels,
   });

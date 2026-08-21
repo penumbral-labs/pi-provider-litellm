@@ -318,6 +318,7 @@ export function closeSerializerPolicy(input: {
   semanticCompat?: ReasoningPolicy["compat"];
   semanticLevels?: DiscoveredModel["thinkingLevelMap"];
   catalogLevels?: DiscoveredModel["thinkingLevelMap"];
+  requireChatCarrier?: boolean;
   acceptsResponsesReasoningControl?: boolean;
   // For callers with no level evidence at all. Distinct from "no candidate map":
   // this states the no-level conclusion explicitly, so a caller spreading the
@@ -331,6 +332,7 @@ export function closeSerializerPolicy(input: {
     semanticCompat,
     semanticLevels,
     catalogLevels,
+    requireChatCarrier,
     acceptsResponsesReasoningControl,
     denyLevels,
   } = input;
@@ -356,9 +358,13 @@ export function closeSerializerPolicy(input: {
     return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
   }
   const candidateLevels = semanticLevels ?? catalogLevels;
-  // No candidate map: pi-ai offers the standard levels and serializes them through
-  // `reasoning_effort`, which this compat permits, so there is nothing to close.
-  if (candidateLevels === undefined) return { reasoning, compat };
+  if (candidateLevels === undefined) {
+    // An absent map enables pi-ai's standard levels, so freshly discovered
+    // routes without an explicit carrier must be represented as a denial.
+    return requireChatCarrier
+      ? { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat }
+      : { reasoning, compat };
+  }
   if (chatCarrier(merged)) return { reasoning, thinkingLevelMap: candidateLevels, compat };
   // Advertising a specific map without an explicit carrier would lean on pi-ai's
   // default for a litellm provider; state the carrier this policy concluded.
@@ -514,7 +520,7 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
 }
 
 const KIMI_FAMILY_PATTERN = /(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/i;
-const FORCED_THINKING_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
+const FORCED_THINKING_PATTERN = /(?:^|[./_-])thinking(?:$|[./_:-])/i;
 
 function kimiDeploymentEvidence(entry: ModelInfoEntry): { identified: boolean; forcedThinking: boolean } {
   const identities = [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider]
