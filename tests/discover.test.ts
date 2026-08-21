@@ -1465,6 +1465,114 @@ describe("discoverModels fallback to /v1/models", () => {
 });
 
 describe("discoverModels fallback to /health", () => {
+  it.each([
+    ["uuid-claude", "uuid-openai"],
+    ["uuid-openai", "uuid-claude"],
+  ])("reduces every healthy deployment before selecting route transport in order %j", async (...endpointIds) => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-claude": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-health-route",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: {
+                id: "claude",
+                mode: "chat",
+                litellm_provider: "anthropic",
+                supports_reasoning: true,
+                supports_vision: true,
+                max_input_tokens: 200_000,
+                max_output_tokens: 64_000,
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000003,
+                cache_creation_input_token_cost: 0.00000375,
+              },
+            },
+          ],
+        }),
+      "/model/info?litellm_model_id=uuid-openai": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-health-route",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: {
+                id: "openai",
+                mode: "chat",
+                litellm_provider: "openai",
+                supports_reasoning: false,
+                supports_vision: false,
+                max_input_tokens: 64_000,
+                max_output_tokens: 8_192,
+              },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: endpointIds.map((model_id) => ({ model: "shared-health-route", model_id })),
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "shared-health-route",
+      name: "shared-health-route (incomplete metadata)",
+      api: "openai-completions",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 64_000,
+      maxTokens: 8_192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("selects native Messages only after every healthy deployment proves the same Claude backend", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-one": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-claude-route",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: { id: "one", mode: "chat", litellm_provider: "anthropic" },
+            },
+          ],
+        }),
+      "/model/info?litellm_model_id=uuid-two": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "shared-claude-route",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: { id: "two", mode: "chat", litellm_provider: "anthropic" },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "shared-claude-route", model_id: "uuid-one" },
+            { model: "shared-claude-route", model_id: "uuid-two" },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([expect.objectContaining({ id: "shared-claude-route", api: "anthropic-messages" })]);
+  });
+
   it("reports completed health detail requests rather than endpoint indexes", async () => {
     const endpoints = Array.from({ length: 11 }, (_, index) => ({
       model: `model-${index + 1}`,

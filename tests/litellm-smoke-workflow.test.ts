@@ -145,7 +145,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
     expect(workflow).toContain("-e LITELLM_LICENSE");
     expect(workflow).toContain("Start LiteLLM smoke database");
-    expect(workflow).toContain("postgres:16-alpine");
+    expect(workflow).toMatch(/postgres:16-alpine@sha256:[a-f0-9]{64}/);
     expect(workflow).toContain('admin_only_routes: ["/key/generate"]');
     expect(workflow).toContain("Run community auth smoke");
     expect(workflow).toContain("Run Enterprise auth smoke");
@@ -234,7 +234,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(enterpriseStep).toContain("run: npx tsx scripts/smoke-auth.ts");
   });
 
-  it("uses minimal permissions and a repository-pinned VidaiMock checksum", () => {
+  it("pins downloaded and container smoke dependencies by repository-owned digests", () => {
     const workflow = readWorkflow();
 
     expect(workflow).toMatch(/permissions:\n {2}contents: read/);
@@ -244,6 +244,8 @@ describe("LiteLLM smoke workflow", () => {
       /echo "\$\{VIDAIMOCK_LINUX_X64_SHA256\} {2}\$\{asset\}" \| \(cd \.tmp && sha256sum -c -\)/,
     );
     expect(workflow).not.toMatch(/\$\{asset%\.tar\.gz\}\.sha256/);
+    expect(workflow).toMatch(/postgres:16-alpine@sha256:[a-f0-9]{64}/);
+    expect(workflow).not.toMatch(/\s+postgres:16-alpine\s*$/m);
   });
 
   it("preserves the workflow environment in the terminal smoke", () => {

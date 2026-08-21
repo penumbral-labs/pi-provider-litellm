@@ -400,47 +400,40 @@ function mapFromModelInfoGroup(
   };
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
-  return mapFromModelInfoGroup([entry]);
+interface HealthDeployment {
+  entry: ModelInfoEntry;
+  // Detail route presence is separate from the public `/health` route: missing
+  // detail identity cannot authorize Messages-only request controls.
+  hasDetailRoute: boolean;
+  endpointOnly: boolean;
 }
 
-function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  // Branch on the readable name, not the raw field: an unreadable one must fall back
-  // to the `/health` route name rather than discarding a model the route could name.
-  if (wireString(entry.model_name) || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  if (!model) return undefined;
-  delete model.thinkingLevelMap;
-  if (model.api !== "anthropic-messages") return model;
-  // Replacing an unreadable detail-row name with `/health` route text makes a
-  // synthetic identity. That is insufficient for Messages backend proof, while
-  // an explicit Responses mode remains authoritative transport evidence.
+function healthDeployment(
+  detail: ModelInfoEntry | undefined,
+  fallbackRoute: string | undefined,
+  deploymentId: string | undefined,
+): HealthDeployment | undefined {
+  const detailRoute = wireString(detail?.model_name)?.trim() || undefined;
+  const route = fallbackRoute?.trim() || detailRoute;
+  if (!route) return undefined;
+  if (!detail) {
+    return {
+      entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
+      hasDetailRoute: false,
+      endpointOnly: true,
+    };
+  }
   return {
-    ...model,
-    api: "openai-completions",
-    compat: buildCompat(model.id, "openai-completions", "claude"),
-  };
-}
-
-function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
-  const id = wireString(entry.model);
-  if (!id) return undefined;
-  const catalogModel = findCatalogModel(id);
-  return {
-    id,
-    // `/health` route text is never authorized for later cache re-enrichment, so
-    // an unresolved route is marked permanently rather than borrowing the
-    // `/v1/models` sentinel or presenting unknown cost as free.
-    name: catalogModel?.name ?? `${id} (incomplete metadata)`,
-    reasoning: catalogModel?.reasoning ?? false,
-    // A thinking-level map is a per-generation control, and route text is the only
-    // input here, so no map is derived. Other catalog metadata is unchanged.
-    input: catalogModel?.input ?? ["text"],
-    cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    api: "openai-completions",
-    compat: buildCompat(id),
+    entry: {
+      ...detail,
+      model_name: route,
+      model_info: {
+        ...detail.model_info,
+        ...(wireString(detail.model_info?.id)?.trim() || !deploymentId ? {} : { id: deploymentId }),
+      },
+    },
+    hasDetailRoute: detailRoute !== undefined,
+    endpointOnly: false,
   };
 }
 
@@ -475,26 +468,63 @@ async function discoverFromHealth(
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
   progress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
   let completed = 0;
-  const models = await Promise.all(
+  const deployments = await Promise.all(
     endpoints.map(async (endpoint) => {
-      let model = mapFromHealthEndpoint(endpoint);
-      if (endpoint.model_id) {
+      const route = wireString(endpoint.model)?.trim() || undefined;
+      const deploymentId = wireString(endpoint.model_id)?.trim() || undefined;
+      let detail: ModelInfoEntry | undefined;
+      if (deploymentId) {
         const infoResult = await fetchJson<ModelInfoResponse>(
-          `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id)}`,
+          `${base}/model/info?litellm_model_id=${encodeURIComponent(deploymentId)}`,
           apiKey,
           options,
         );
-        const entry = infoResult.ok ? infoResult.data.data?.[0] : undefined;
-        if (entry) model = mapFromHealthModelInfo(entry, endpoint.model);
+        detail = infoResult.ok ? infoResult.data.data?.[0] : undefined;
       }
       completed++;
       if (completed % 10 === 0 || completed === endpoints.length) {
         progress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
-      return model;
+      return healthDeployment(detail, route, deploymentId);
     }),
   );
-  return models.filter((model): model is DiscoveredModel => model !== undefined);
+  // `/health` lists deployments, not route groups. Reduce every deployment for
+  // a public route before selecting its transport or publishing its metadata.
+  const groups = new Map<string, HealthDeployment[]>();
+  for (const deployment of deployments) {
+    const route = wireString(deployment?.entry.model_name);
+    if (!deployment || !route) continue;
+    const group = groups.get(route) ?? [];
+    group.push(deployment);
+    groups.set(route, group);
+  }
+  const ambiguousRoutes: string[] = [];
+  const models = [...groups.values()]
+    .map((group) => {
+      let model = mapFromModelInfoGroup(
+        group.map(({ entry }) => entry),
+        ambiguousRoutes,
+      );
+      if (!model) return undefined;
+      if (group.some(({ hasDetailRoute }) => !hasDetailRoute)) {
+        delete model.thinkingLevelMap;
+        if (model.api === "anthropic-messages") {
+          model = {
+            ...model,
+            api: "openai-completions",
+            compat: buildCompat(model.id, "openai-completions", "claude"),
+          };
+        }
+      }
+      if (group.every(({ endpointOnly }) => endpointOnly)) {
+        const catalogName = findCatalogModel(model.id)?.name;
+        if (catalogName) model = { ...model, name: catalogName };
+      }
+      return model;
+    })
+    .filter((model): model is DiscoveredModel => model !== undefined);
+  reportAmbiguousCatalogAuthority(ambiguousRoutes);
+  return models;
 }
 
 function deduplicateModels(models: DiscoveredModel[]): DiscoveredModel[] {
