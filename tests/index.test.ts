@@ -556,7 +556,6 @@ describe("extension startup", () => {
     ).resolves.toMatchObject({
       auth: {
         apiKey: "context-key",
-        baseUrl: "https://context.example.com/v1",
         headers: { "x-tenant": "context" },
       },
       source: "LITELLM_API_KEY",
@@ -634,7 +633,7 @@ describe("extension startup", () => {
         LITELLM_API_KEY: "context-default-key",
       }),
     ).resolves.toMatchObject({
-      auth: { apiKey: "context-configured-key", baseUrl: "https://context.example.com/v1" },
+      auth: { apiKey: "context-configured-key" },
       source: "$CUSTOM_LITELLM_KEY",
     });
     expect(await readHelperCount(agentDir)).toBe(0);
@@ -870,7 +869,7 @@ describe("extension startup", () => {
     });
     await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
       apiKey: "sk-virtual-abc",
-      baseUrl: "https://litellm.example.com/v1",
+      baseUrl: undefined,
     });
     expect(seenRequests).toContainEqual(
       expect.objectContaining({

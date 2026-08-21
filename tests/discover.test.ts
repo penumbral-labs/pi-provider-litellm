@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildCompat, discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "../src/discover.js";
+import {
+  buildCompat,
+  discoverModels,
+  modelProtocol,
+  normalizeBaseUrl,
+  shouldSuppressReasoningContent,
+} from "../src/discover.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -38,6 +44,23 @@ describe("normalizeBaseUrl", () => {
 
   it("preserves a base path that is not /v1", () => {
     expect(normalizeBaseUrl("https://x.example.com/proxy")).toBe("https://x.example.com/proxy");
+  });
+});
+
+describe("modelProtocol", () => {
+  it("pairs each upstream-selected mode with protocol-specific compatibility", () => {
+    expect(modelProtocol("openai/gpt-4o")).toEqual({
+      api: "openai-completions",
+      compat: { supportsStore: false },
+    });
+    expect(modelProtocol("openai/gpt-4o", "responses")).toEqual({
+      api: "openai-responses",
+      compat: undefined,
+    });
+    expect(modelProtocol("moonshotai/kimi-k2", "responses")).toEqual({
+      api: "openai-responses",
+      compat: { supportsDeveloperRole: false },
+    });
   });
 });
 
@@ -393,6 +416,26 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
 });
 
 describe("discoverModels response-mode models", () => {
+  it("retains upstream automatic API choices and never selects Messages", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "anthropic/claude-sonnet-4-6", model_info: { mode: "chat" } },
+          { model_name: "openai/gpt-5.3-codex-openai", model_info: { mode: "responses" } },
+          { model_name: "unknown-mode", model_info: { mode: "messages" } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "anthropic/claude-sonnet-4-6", api: "openai-completions" },
+      { id: "openai/gpt-5.3-codex-openai", api: "openai-responses" },
+    ]);
+    expect(result.models.some((model) => model.api === "anthropic-messages")).toBe(false);
+  });
+
   it("keeps /model/info response-mode models with a Responses API override", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
