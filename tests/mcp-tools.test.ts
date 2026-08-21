@@ -1651,8 +1651,11 @@ describe("reference resolution hazards", () => {
 });
 
 describe("unrecognized discovery body shapes", () => {
-  it("rejects a non-array tools container instead of reporting an empty catalog", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: { a: { name: "x" } } }));
+  it.each([
+    ["an object without tools", { detail: "proxy-owned-error" }],
+    ["a non-array tools container", { tools: { a: { name: "x" } } }],
+  ])("rejects %s instead of reporting an empty catalog", async (_label, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
     await expect(discoverMcpToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow(
       "MCP discovery returned an unexpected body shape",
     );

@@ -221,7 +221,7 @@ So a pass that is refused partway leaves the tools registered up to that point, 
 
 Network discovery is separate and remains retryable: a catalog that yields no registrable tool is not recorded as settled, so a later refresh tries again, and the empty result is reported rather than passing in silence. A tool that disappears from the proxy's catalog stays registered until Pi restarts.
 
-MCP tools run in Pi's parallel tool mode. **Changed in this release:** each side-effecting `POST /mcp-rest/tools/call` is now attempted exactly once — timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried, where previously one retry was made for transport errors and for 408/425/429/500/502/503/504, and failures were returned as ordinary tool text rather than as errors. Pi cancellation now aborts an in-flight call and preserves its original cancellation reason, where previously the tool signal was not consulted at all. Both are model-visible contract changes. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text to 64 KiB with a truncation marker.
+MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once: timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text to 64 KiB with a truncation marker.
 
 A passed-through schema's `format` keyword is evaluated, using the validator's own built-in expressions rather than anything the proxy supplies.
 

@@ -316,13 +316,7 @@ export async function discoverMcpTools(
     const bodyRecord = asRecord(body);
     // An unrecognized body shape is not the same as an empty catalog, and reporting it as "0 raw
     // entries" would send an operator looking at the wrong thing.
-    const rawTools = Array.isArray(body)
-      ? body
-      : Array.isArray(bodyRecord?.tools)
-        ? bodyRecord.tools
-        : bodyRecord !== undefined && !("tools" in bodyRecord)
-          ? []
-          : undefined;
+    const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : undefined;
     if (rawTools === undefined) throw new Error("MCP discovery returned an unexpected body shape");
     onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
     const tools: LiteLLMMcpTool[] = [];

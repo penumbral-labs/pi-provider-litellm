@@ -378,6 +378,76 @@ describe("extension startup", () => {
     );
   });
 
+  it("keeps partial MCP registrations and stops after a fatal registration refusal", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    const proxyText = "proxy-description-must-not-leak";
+    const refusal = `extension stale ${"x".repeat(500)}`;
+    let listCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        listCalls += 1;
+        return jsonResponse(200, {
+          tools: ["first", "second", "third"].map((name) => ({
+            name,
+            server_name: "server",
+            description: proxyText,
+            inputSchema: { type: "object", properties: {} },
+          })),
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await extension(pi);
+    const registeredNames: string[] = [];
+    pi.registerTool = (tool) => {
+      if (registeredNames.length === 1) throw new Error(refusal);
+      registeredNames.push(tool.name);
+      pi.tools.push(tool);
+    };
+
+    const refresh = () =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: {
+          type: "api_key",
+          key: "sk-test",
+          env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+        },
+        signal: new AbortController().signal,
+      });
+
+    const fatalLines = () =>
+      stderr.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("registration stopped"));
+
+    await refresh();
+    await vi.waitFor(() => expect(listCalls).toBe(1));
+    await vi.waitFor(() => expect(registeredNames).toEqual([named("mcp_server_first")]));
+    await vi.waitFor(() => expect(fatalLines()).toHaveLength(1));
+    await refresh();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(listCalls).toBe(1);
+    expect(pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mcp_"))).toEqual([
+      named("mcp_server_first"),
+    ]);
+    expect(fatalLines()).toHaveLength(1);
+    expect(fatalLines()[0]).toContain("registration stopped after 1 of 3 MCP tools");
+    expect(fatalLines()[0]).toContain("no further attempts will be made by this extension instance");
+    expect(fatalLines()[0]).toContain("…");
+    expect(Buffer.byteLength(fatalLines()[0] ?? "", "utf8")).toBeLessThan(400);
+    expect(fatalLines()[0]).not.toContain(proxyText);
+    expect(fatalLines()[0]).not.toContain(refusal);
+  });
+
   it("skips re-registration for an unchanged identity after a fully successful pass", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let listCalls = 0;
