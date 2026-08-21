@@ -1418,8 +1418,28 @@ describe("findSchemaHazard", () => {
     expect(findSchemaHazard({ $ref: "https://evil.example/x.json" })).toBe("nonlocal-ref");
     expect(findSchemaHazard({ $dynamicRef: "#meta" })).toBe("nonlocal-ref");
     expect(findSchemaHazard({ $recursiveRef: "#" })).toBe("nonlocal-ref");
-    // A local pointer is safe: this walk covers the whole document, so the target was inspected.
-    expect(findSchemaHazard({ $defs: { s: { type: "string" } }, $ref: "#/$defs/s" })).toBeUndefined();
+  });
+
+  it("only resolves local references to nodes visited as schemas", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        properties: { s: { $ref: "#/dependencies" } },
+        dependencies: { pattern: "^(a+)+$" },
+      }),
+    ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        properties: { s: { $ref: "#/dependencies" } },
+        dependencies: { patternProperties: { "^(a+)+$": { type: "string" } } },
+      }),
+    ).toBe("unresolvable-ref");
+
+    expect(
+      findSchemaHazard({ type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } }),
+    ).toBeUndefined();
+    expect(findSchemaHazard({ type: "object", properties: { s: { $ref: "#" } } })).toBeUndefined();
   });
 
   it("degrades rather than recursing without bound on a deep graph", () => {
@@ -1475,6 +1495,24 @@ describe("every registered schema is safe for the validator that consumes it", (
         type: "object",
         properties: { k: {} },
         dependencies: { k: { properties: { s: { pattern: EVIL } } } },
+      },
+    },
+    {
+      name: "refdependenciespattern",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        properties: { s: { $ref: "#/dependencies" } },
+        dependencies: { pattern: EVIL },
+      },
+    },
+    {
+      name: "refdependenciespatternproperties",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        properties: { s: { $ref: "#/dependencies" } },
+        dependencies: { patternProperties: { [EVIL]: { type: "string" } } },
       },
     },
     {
@@ -1565,7 +1603,7 @@ describe("every registered schema is safe for the validator that consumes it", (
     expect(serialized).not.toContain("$dynamicRef");
   });
 
-  it("keeps a legitimate local reference as passthrough rather than over-degrading", async () => {
+  it("keeps legitimate $defs and document-root references as passthrough", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         tools: [
@@ -1574,12 +1612,21 @@ describe("every registered schema is safe for the validator that consumes it", (
             server_name: "srv",
             inputSchema: { type: "object", $defs: { s: { type: "string" } }, properties: { s: { $ref: "#/$defs/s" } } },
           },
+          {
+            name: "selfref",
+            server_name: "srv",
+            inputSchema: { type: "object", properties: { s: { $ref: "#" } } },
+          },
         ],
       }),
     );
     const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
     expect(report.enveloped).toBe(0);
-    expect(JSON.stringify(definitions[0]?.parameters)).toContain("$ref");
+    expect(definitions).toHaveLength(2);
+    expect(definitions.map((definition) => JSON.stringify(definition.parameters))).toEqual([
+      expect.stringContaining('"$ref":"#/$defs/s"'),
+      expect.stringContaining('"$ref":"#"'),
+    ]);
   });
 });
 

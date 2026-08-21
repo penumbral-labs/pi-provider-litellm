@@ -513,7 +513,11 @@ function resolvePointer(root: unknown, fragment: string): unknown {
 // until the stack is gone, and a missing target silently resolves to `false` — a tool that can never
 // validate any argument. Object identity cannot see any of these, because each pointer hop is a
 // different object.
-function findLocalRefHazard(root: Record<string, unknown>, ref: string): SchemaHazard | undefined {
+function findLocalRefHazard(
+  root: Record<string, unknown>,
+  ref: string,
+  schemaPositionNodes: WeakSet<object>,
+): SchemaHazard | undefined {
   const visited = new Set<string>();
   let pointer = ref;
   for (;;) {
@@ -522,10 +526,13 @@ function findLocalRefHazard(root: Record<string, unknown>, ref: string): SchemaH
     if (visited.size > MAX_REF_HOPS) return "budget";
     const target = resolvePointer(root, pointer.slice(1));
     if (target === POINTER_MISSING) return "unresolvable-ref";
-    // A boolean is a valid subschema in its own right.
+    // A boolean is always a complete schema, independent of where it appears in the document.
     if (typeof target === "boolean") return undefined;
     const record = asRecord(target);
-    if (!record) return "unresolvable-ref";
+    // Name-keyed containers are not schemas. Requiring an object target to have been visited where
+    // keys are interpreted as schema keywords prevents a ref from turning one into a schema behind
+    // the scan's back (for example, `#/dependencies`).
+    if (!record || !schemaPositionNodes.has(record)) return "unresolvable-ref";
     const next = record.$ref;
     if (typeof next !== "string") return undefined;
     if (!next.startsWith("#")) return "nonlocal-ref";
@@ -544,12 +551,17 @@ function findLocalRefHazard(root: Record<string, unknown>, ref: string): SchemaH
 // a usable subschema, with the reference chain proven acyclic. Any other ref form is a hazard.
 export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | undefined {
   const seen = new WeakSet<object>();
+  const schemaPositionNodes = new WeakSet<object>();
+  const localRefs: string[] = [];
   let budget = MAX_SCAN_NODES;
 
   const walk = (value: unknown, depth: number, keysAreNames: boolean): SchemaHazard | undefined => {
     if (budget-- <= 0) return "budget";
     if (depth > MAX_SCHEMA_DEPTH) return "budget";
     if (value === null || typeof value !== "object") return undefined;
+    // Record this before cycle detection: every path to an object contributes evidence about its
+    // position, even when another path reached the same identity first.
+    if (!keysAreNames) schemaPositionNodes.add(value);
     if (seen.has(value)) return "cycle";
     seen.add(value);
 
@@ -574,8 +586,9 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
         // safe if it also resolves to something the validator can use as a schema.
         if (key === "$ref" && typeof child === "string") {
           if (!child.startsWith("#")) return "nonlocal-ref";
-          const refHazard = findLocalRefHazard(root, child);
-          if (refHazard) return refHazard;
+          // Resolve after the complete walk so acceptance cannot depend on whether the referenced
+          // schema appeared before or after this `$ref` in object insertion order.
+          localRefs.push(child);
         }
         if ((NONLOCAL_REF_KEYS as readonly string[]).includes(key) && typeof child === "string") {
           return "nonlocal-ref";
@@ -587,7 +600,13 @@ export function findSchemaHazard(root: Record<string, unknown>): SchemaHazard | 
     return undefined;
   };
 
-  return walk(root, 0, false);
+  const walkHazard = walk(root, 0, false);
+  if (walkHazard) return walkHazard;
+  for (const ref of localRefs) {
+    const refHazard = findLocalRefHazard(root, ref, schemaPositionNodes);
+    if (refHazard) return refHazard;
+  }
+  return undefined;
 }
 
 function isValidSchema(value: unknown): boolean {
