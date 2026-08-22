@@ -183,8 +183,10 @@ describe("discoverModels via /model/info", () => {
             },
             {
               model_name: "openai/gpt-4o",
+              litellm_params: { model: "openai/gpt-4o" },
               model_info: {
                 mode: "chat",
+                litellm_provider: "openai",
                 max_input_tokens: 128000,
                 max_output_tokens: 16384,
               },
@@ -266,7 +268,13 @@ describe("discoverModels via /model/info", () => {
         data: [
           {
             model_name: "openai/gpt-5.6-luna",
-            model_info: { mode: "chat", supports_reasoning: true, supports_xhigh_reasoning_effort: false },
+            litellm_params: { model: "openai/gpt-5.6-luna" },
+            model_info: {
+              mode: "chat",
+              litellm_provider: "openai",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: false,
+            },
           },
         ],
       }),
@@ -277,12 +285,18 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: null, max: "max" });
   });
 
-  it("uses catalog costs when /model/info omits costs for Anthropic aliases", async () => {
+  it("uses catalog costs when /model/info identifies an Anthropic backend", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) {
         return jsonResponse(200, {
-          data: [{ model_name: "opus-4.8", model_info: { mode: "chat" } }],
+          data: [
+            {
+              model_name: "opus-4.8",
+              litellm_params: { model: "anthropic/opus-4.8" },
+              model_info: { mode: "chat", litellm_provider: "anthropic" },
+            },
+          ],
         });
       }
       throw new Error(`unexpected URL: ${url}`);
@@ -297,7 +311,13 @@ describe("discoverModels via /model/info", () => {
   it("preserves catalog pricing tiers for /model/info models", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "openai/gpt-5.5", model_info: { mode: "chat" } }],
+        data: [
+          {
+            model_name: "openai/gpt-5.5",
+            litellm_params: { model: "openai/gpt-5.5" },
+            model_info: { mode: "chat", litellm_provider: "openai" },
+          },
+        ],
       }),
     );
 
@@ -311,7 +331,13 @@ describe("discoverModels via /model/info", () => {
   it("preserves catalog max thinking metadata for /model/info models", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "openai/gpt-5.6-luna", model_info: { mode: "chat" } }],
+        data: [
+          {
+            model_name: "openai/gpt-5.6-luna",
+            litellm_params: { model: "openai/gpt-5.6-luna" },
+            model_info: { mode: "chat", litellm_provider: "openai" },
+          },
+        ],
       }),
     );
 
@@ -481,6 +507,7 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
+    ["no backend", { model_info: {} }],
     ["opaque backend model", { litellm_params: { model: "internal/mystery" }, model_info: {} }],
     ["opaque base model", { model_info: { base_model: "internal/mystery" } }],
     ["unresolved adapter", { model_info: { litellm_provider: "custom_proxy" } }],
@@ -512,10 +539,11 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
-  it("treats repeated identified deployment rows as one effective singleton", async () => {
+  it("treats repeated identified deployment rows as one effective deployment", async () => {
     const deployment = {
       model_name: "openai/gpt-5.5",
-      model_info: { id: "deployment-a", mode: "chat" },
+      litellm_params: { model: "openai/gpt-5.5" },
+      model_info: { id: "deployment-a", mode: "chat", litellm_provider: "openai" },
     };
     const fetchMock = vi.spyOn(globalThis, "fetch");
     for (const data of [[deployment], [deployment, deployment]]) {
@@ -667,6 +695,39 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("marks unresolved non-cost metadata incomplete when every router price is present", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/gpt-5.5",
+              model_info: {
+                id: "only",
+                mode: "chat",
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000003,
+                cache_creation_input_token_cost: 0.00000375,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+  });
+
   it("keeps proven display prices while marking any unresolved cost field incomplete", async () => {
     // Display cost reduces per field. Proven input/output survive, only unresolved
     // fields fall to zero, and the model is still marked incomplete so unknown
@@ -704,7 +765,7 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
-  it("keeps an ambiguous group with complete router pricing unsuffixed and reports withheld authority", async () => {
+  it("marks an ambiguous group incomplete despite complete router pricing and reports withheld authority", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const priced = (id: string, model: string) => ({
       model_name: "priced-ambiguous-authority",
@@ -729,7 +790,7 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "priced-ambiguous-authority",
-      name: "priced-ambiguous-authority",
+      name: "priced-ambiguous-authority (incomplete metadata)",
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
       contextWindow: 128_000,
       maxTokens: 16_384,
@@ -1033,15 +1094,18 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics[0]).toContain("partial-evidence");
   });
 
-  it("keeps catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
-    // An embedding sibling votes on transport but is not a deployment, so the group
-    // is still a singleton and its route name remains a usable catalog hint. If the
-    // count were taken before the mode filter, this route would lose its metadata.
+  it("keeps backend-derived catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
+    // An embedding sibling votes on transport but is not a routable deployment, so
+    // it cannot interfere with the chat deployment's backend-derived metadata.
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
-            { model_name: "openai/gpt-5.5", model_info: { id: "chat", mode: "chat" } },
+            {
+              model_name: "openai/gpt-5.5",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "chat", mode: "chat", litellm_provider: "openai" },
+            },
             { model_name: "openai/gpt-5.5", model_info: { id: "embed", mode: "embedding" } },
           ],
         }),
@@ -1284,9 +1348,9 @@ describe("discoverModels response-mode models", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
-  it("does not derive thinking controls from a health endpoint without deployment detail", async () => {
-    // No `model_id`, so the route name is the only input. It still enriches
-    // limits and pricing, but it must not produce a reasoning selector.
+  it("does not derive metadata from a health endpoint without deployment detail", async () => {
+    // No `model_id`, so the public route name is the only input and cannot
+    // authorize catalog capabilities, limits, or pricing.
     mockEndpoints({
       "/model/info": () => jsonResponse(404, {}),
       "/v1/models": () => jsonResponse(404, {}),
@@ -1296,7 +1360,15 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("health");
-    expect(result.models[0]).toMatchObject({ id: "openai/gpt-5.5", reasoning: true });
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 });
@@ -1315,9 +1387,18 @@ describe("catalog provider candidates", () => {
     "opus-4.7",
     "fable-5",
     "opus-5",
-  ])("resolves the bare Anthropic catalog id %s from the shared lookup rule", async (id) => {
+  ])("resolves the Anthropic backend id %s from the shared lookup rule", async (id) => {
     mockEndpoints({
-      "/model/info": () => jsonResponse(200, { data: [{ model_name: id, model_info: { mode: "chat" } }] }),
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: `route-${id}`,
+              litellm_params: { model: `anthropic/${id}` },
+              model_info: { mode: "chat", litellm_provider: "anthropic" },
+            },
+          ],
+        }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
@@ -1707,10 +1788,9 @@ describe("discoverModels fallback to /health", () => {
     expect(result.models[0]?.name).toBe("azure/gpt-35-turbo (incomplete metadata)");
   });
 
-  it("marks evidence-free health routes and leaves catalog-resolved ones plain", async () => {
-    // `/health` route text is never authorized for later cache re-enrichment, so an
-    // unresolved route carries the permanent marker rather than the `/v1/models`
-    // sentinel. A route the catalog resolves has real metadata and stays plain.
+  it("marks all health routes without deployment detail incomplete", async () => {
+    // `/health` route text is never authoritative backend evidence, even when it
+    // happens to identify a Pi catalog model.
     mockEndpoints({
       "/model/info": () => jsonResponse(404, {}),
       "/v1/models": () => jsonResponse(404, {}),
@@ -1723,7 +1803,7 @@ describe("discoverModels fallback to /health", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("health");
-    const [unresolved, resolved] = result.models;
+    const [unresolved, catalogNamedRoute] = result.models;
     expect(unresolved).toMatchObject({
       id: "totally-unknown-route",
       name: "totally-unknown-route (incomplete metadata)",
@@ -1732,8 +1812,15 @@ describe("discoverModels fallback to /health", () => {
       maxTokens: 16_384,
     });
     expect(unresolved?.name).not.toContain(" (no metadata)");
-    expect(resolved?.name).toBe("Claude Opus 4.7");
-    expect(resolved?.cost.input).toBeGreaterThan(0);
+    expect(catalogNamedRoute).toMatchObject({
+      id: "anthropic/claude-opus-4-7",
+      name: "anthropic/claude-opus-4-7 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
   });
 
   it("marks an unresolved health route reached through per-endpoint /model/info", async () => {

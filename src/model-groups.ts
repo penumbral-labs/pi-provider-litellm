@@ -23,10 +23,7 @@ export interface CatalogResolution {
   cost?: DiscoveredModel["cost"];
 }
 
-// `singleton` is true only when the group reduces to exactly one routable
-// deployment, which is the only case where a public route name may be used as a
-// catalog hint. Resolvers must not treat route text as evidence otherwise.
-export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => CatalogResolution | undefined;
+export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | undefined;
 
 export interface ReducedModelGroup {
   id: string;
@@ -37,7 +34,7 @@ export interface ReducedModelGroup {
   contextWindow: number;
   maxTokens: number;
   cost: DiscoveredModel["cost"];
-  hasCompleteCost: boolean;
+  hasCompleteMetadata: boolean;
   catalogProvider?: string;
   semanticFamily?: SemanticFamily;
   messagesCompat?: MessagesBackendCompat;
@@ -206,42 +203,44 @@ export function reduceModelGroup(
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
-  const singleton = deployments.length === 1;
-  const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
+  const catalogs = deployments.map((entry) => resolveCatalog(entry));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
-  const reasoning = deployments.every(
-    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning ?? false,
+  const reasoningValues = deployments.map(
+    (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning,
   );
-  const vision = deployments.every(
-    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision ?? false,
+  const visionValues = deployments.map(
+    (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision,
   );
-  const contextWindow = min(
-    deployments.map(
-      (entry, index) =>
-        explicitLimit(entry.model_info?.max_input_tokens) ??
-        explicitLimit(catalogAuthority[index]?.contextWindow) ??
-        DEFAULT_CONTEXT_WINDOW,
-    ),
+  const contextWindowValues = deployments.map(
+    (entry, index) =>
+      explicitLimit(entry.model_info?.max_input_tokens) ?? explicitLimit(catalogAuthority[index]?.contextWindow),
   );
-  const maxTokens = min(
-    deployments.map(
-      (entry, index) =>
-        explicitLimit(entry.model_info?.max_output_tokens) ??
-        explicitLimit(catalogAuthority[index]?.maxTokens) ??
-        DEFAULT_MAX_TOKENS,
-    ),
+  const maxTokensValues = deployments.map(
+    (entry, index) =>
+      explicitLimit(entry.model_info?.max_output_tokens) ?? explicitLimit(catalogAuthority[index]?.maxTokens),
   );
+  const reasoning = reasoningValues.every((value) => value ?? false);
+  const vision = visionValues.every((value) => value ?? false);
+  const contextWindow = min(contextWindowValues.map((value) => value ?? DEFAULT_CONTEXT_WINDOW));
+  const maxTokens = min(maxTokensValues.map((value) => value ?? DEFAULT_MAX_TOKENS));
 
   const costValues = COST_FIELDS.map((field) =>
     deployments.map((entry, index) => resolvedCost(entry, catalogAuthority[index], field)),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
   const hasCompleteCost = completeCostFields.every(Boolean);
+  const hasCompleteMetadata =
+    hasCompleteCost &&
+    candidateModes.every((mode) => mode !== "unknown") &&
+    reasoningValues.every((value) => value !== undefined) &&
+    visionValues.every((value) => value !== undefined) &&
+    contextWindowValues.every((value) => value !== undefined) &&
+    maxTokensValues.every((value) => value !== undefined);
   const cost: DiscoveredModel["cost"] = {
     input: completeCostFields[0] ? Math.max(...(costValues[0] as number[])) : 0,
     output: completeCostFields[1] ? Math.max(...(costValues[1] as number[])) : 0,
@@ -291,7 +290,7 @@ export function reduceModelGroup(
     contextWindow,
     maxTokens,
     cost,
-    hasCompleteCost,
+    hasCompleteMetadata,
     ...(catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),

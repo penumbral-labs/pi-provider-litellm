@@ -353,33 +353,18 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   );
 }
 
-function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
-  return [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider].some(
-    (candidate) => Boolean(wireString(candidate)?.trim()),
-  );
-}
-
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
-  const reduced = reduceModelGroup(entries, (entry, singleton) => {
-    const resolved = resolveModelInfoCatalog(entry);
-    if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
-    // Preserve upstream singleton enrichment only when LiteLLM provides no
-    // readable backend identity. Route text never overrides opaque evidence.
-    // `reduceModelGroup` only passes rows whose route name is a readable string.
-    const id = entry.model_name;
-    const catalog = id ? resolveCatalogModel(id) : undefined;
-    return catalog ? catalogResolution(catalog.provider, semanticFamily(catalog.model.id), catalog.model) : undefined;
-  });
+  const reduced = reduceModelGroup(entries, resolveModelInfoCatalog);
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   const shared = {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
     // catalog re-derivation from the model id during offline cache reads.
-    name: reduced.hasCompleteCost ? reduced.id : `${reduced.id} (incomplete metadata)`,
+    name: reduced.hasCompleteMetadata ? reduced.id : `${reduced.id} (incomplete metadata)`,
     reasoning: reduced.reasoning,
     ...(reduced.thinkingLevelMap ? { thinkingLevelMap: reduced.thinkingLevelMap } : {}),
     input: (reduced.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
@@ -405,7 +390,6 @@ interface HealthDeployment {
   // Detail route presence is separate from the public `/health` route: missing
   // detail identity cannot authorize Messages-only request controls.
   hasDetailRoute: boolean;
-  endpointOnly: boolean;
 }
 
 function healthDeployment(
@@ -420,7 +404,6 @@ function healthDeployment(
     return {
       entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
       hasDetailRoute: false,
-      endpointOnly: true,
     };
   }
   return {
@@ -433,7 +416,6 @@ function healthDeployment(
       },
     },
     hasDetailRoute: detailRoute !== undefined,
-    endpointOnly: false,
   };
 }
 
@@ -515,10 +497,6 @@ async function discoverFromHealth(
             compat: buildCompat(model.id, "openai-completions", "claude"),
           };
         }
-      }
-      if (group.every(({ endpointOnly }) => endpointOnly)) {
-        const catalogName = findCatalogModel(model.id)?.name;
-        if (catalogName) model = { ...model, name: catalogName };
       }
       return model;
     })

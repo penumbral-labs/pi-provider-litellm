@@ -97,7 +97,7 @@ describe("reduceModelGroup", () => {
       contextWindow: 150_000,
       maxTokens: 16_000,
       cost: { input: 3, output: 20, cacheRead: 0.3, cacheWrite: 3.75 },
-      hasCompleteCost: true,
+      hasCompleteMetadata: false,
       catalogAuthorityAmbiguous: true,
     };
 
@@ -121,44 +121,12 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([conflicting, repeated], resolveCatalog)).toEqual(expected);
     // Exact id-less repeats remain plural: equal content is not enough evidence
     // that two rows describe the same deployment.
-    const seen: boolean[] = [];
-    reduceModelGroup([anonymous, anonymous], (_entry, singleton) => {
-      seen.push(singleton);
+    let seen = 0;
+    reduceModelGroup([anonymous, anonymous], () => {
+      seen++;
       return undefined;
     });
-    expect(seen).toEqual([false, false]);
-  });
-
-  it("reports singleton status from routable deployments only", () => {
-    const seen: boolean[] = [];
-    const record: CatalogResolver = (_entry, singleton) => {
-      seen.push(singleton);
-      return undefined;
-    };
-    const chat = row({ model_info: { id: "chat", mode: "chat" } });
-    const embedding = row({ model_info: { id: "embed", mode: "embedding" } });
-    const other = row({ model_info: { id: "other", mode: "chat" } });
-    const conflicting = row({ model_info: { id: "chat", mode: "chat", max_input_tokens: 8_000 } });
-
-    reduceModelGroup([chat], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, chat], record);
-    expect(seen).toEqual([true]);
-
-    // An unsupported sibling is not a routable deployment.
-    seen.length = 0;
-    reduceModelGroup([chat, embedding], record);
-    expect(seen).toEqual([true]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, other], record);
-    expect(seen).toEqual([false, false]);
-
-    seen.length = 0;
-    reduceModelGroup([chat, conflicting], record);
-    expect(seen).toEqual([false, false]);
+    expect(seen).toBe(2);
   });
 
   it("selects Responses only when every deployment explicitly reports it", () => {
@@ -355,6 +323,28 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("marks metadata complete only when every published field is resolved", () => {
+    const fullyExplicit = row();
+    expect(reduceModelGroup([fullyExplicit], resolveCatalog)).toMatchObject({ hasCompleteMetadata: true });
+
+    const pricedOnly = row({
+      model_info: {
+        id: "priced-only",
+        mode: "chat",
+        supports_reasoning: undefined,
+        supports_vision: undefined,
+        max_input_tokens: undefined,
+        max_output_tokens: undefined,
+      },
+      litellm_params: { model: "internal/unknown" },
+    });
+    expect(reduceModelGroup([pricedOnly], resolveCatalog)).toMatchObject({
+      hasCompleteMetadata: false,
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+  });
+
   it("uses the maximum complete display price and marks incomplete price evidence unknown", () => {
     const cheaper = row({
       model_info: {
@@ -378,7 +368,7 @@ describe("reduceModelGroup", () => {
     });
     const complete = reduceModelGroup([cheaper, pricier], resolveCatalog);
     expect(complete).toMatchObject({
-      hasCompleteCost: true,
+      hasCompleteMetadata: true,
       cost: { input: 4, output: 20, cacheWrite: 4 },
     });
     expect(complete?.cost.cacheRead).toBeCloseTo(0.4);
@@ -393,7 +383,7 @@ describe("reduceModelGroup", () => {
       litellm_params: { model: "internal/unknown" },
     });
     expect(reduceModelGroup([cheaper, incomplete], resolveCatalog)).toMatchObject({
-      hasCompleteCost: false,
+      hasCompleteMetadata: false,
       cost: { input: 4, output: 0, cacheRead: 0.3, cacheWrite: 3.75 },
     });
   });
@@ -402,7 +392,7 @@ describe("reduceModelGroup", () => {
     // Characterization of the existing per-field cost block. No backend resolves,
     // so cache pricing is genuinely unknown rather than free: input and output
     // survive at their proven values, the unresolved cache fields read zero, and
-    // `hasCompleteCost` stays false so the model can be marked incomplete.
+    // `hasCompleteMetadata` stays false so the model can be marked incomplete.
     const priced = (id: string, input: number, output: number) =>
       row({
         model_info: {
@@ -418,7 +408,7 @@ describe("reduceModelGroup", () => {
 
     const singleton = reduceModelGroup([priced("only", 0.000003, 0.000015)], resolveCatalog);
     expect(singleton).toMatchObject({
-      hasCompleteCost: false,
+      hasCompleteMetadata: false,
       cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
     expect(singleton).not.toHaveProperty("catalogProvider");
@@ -428,7 +418,7 @@ describe("reduceModelGroup", () => {
     expect(
       reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)], resolveCatalog),
     ).toMatchObject({
-      hasCompleteCost: false,
+      hasCompleteMetadata: false,
       cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
   });
@@ -534,8 +524,7 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup(rows, withTiers(tiers))?.cost.tiers).toEqual(tiers);
     // Property order is not evidence of disagreement.
     let call = 0;
-    const alternating: CatalogResolver = (entry, singleton) =>
-      withTiers(call++ === 0 ? tiers : reordered)(entry, singleton);
+    const alternating: CatalogResolver = (entry) => withTiers(call++ === 0 ? tiers : reordered)(entry);
     expect(reduceModelGroup(rows, alternating)?.cost.tiers).toEqual(tiers);
   });
 
@@ -560,8 +549,7 @@ describe("reduceModelGroup", () => {
       });
 
     let call = 0;
-    const swapped: CatalogResolver = (entry, singleton) =>
-      withLadder(call++ === 0 ? ladder : [...ladder].reverse())(entry, singleton);
+    const swapped: CatalogResolver = (entry) => withLadder(call++ === 0 ? ladder : [...ladder].reverse())(entry);
     expect(reduceModelGroup(rows, swapped)?.cost.tiers).toBeUndefined();
 
     // Identical ladders in identical order still adopt, so the check above is not
@@ -680,7 +668,7 @@ describe("native Messages route selection", () => {
         { model_name: "mixed-route", model_info: { id: "a", mode: "chat" } },
         { model_name: "mixed-route", model_info: { id: "b", mode: "chat" } },
       ],
-      (_entry, _singleton) => evidence.shift(),
+      () => evidence.shift(),
     );
 
     expect(result?.api).toBe("openai-completions");
