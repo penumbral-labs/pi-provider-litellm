@@ -149,6 +149,12 @@ export function reportMcpRegistrationFatal(registered: number, attempted: number
   );
 }
 
+// A successful pass clears any fatal incident left by an earlier extension instance, so the same
+// failure is reported if it later recurs.
+export function reportMcpRegistrationSuccess(): void {
+  clearIncident("registration-fatal");
+}
+
 // Reports a discovery that yielded no registrable tool, so the silence is explained. A pass that did
 // register something clears the incident, so a later recurrence is reported rather than suppressed as
 // an unchanged message.

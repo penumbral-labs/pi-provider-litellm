@@ -467,6 +467,45 @@ describe("extension startup", () => {
     expect(fatalLines()[0]).not.toContain(refusal);
   });
 
+  it("clears a prior instance's fatal diagnostic after successful registration", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(await makeAgentDir());
+    const fatalReporter = await import("../src/mcp-tools.js");
+    const fatalLines = () =>
+      stderr.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("registration stopped"));
+
+    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
+    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
+    expect(fatalLines()).toHaveLength(1);
+
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
+      signal: new AbortController().signal,
+    });
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
+
+    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
+    expect(fatalLines()).toHaveLength(2);
+  });
+
   it("skips re-registration for an unchanged identity after a fully successful pass", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let listCalls = 0;
