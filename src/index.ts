@@ -1173,7 +1173,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           reportMcpRegistrationFatal(registered, definitions.length, error);
           return;
         }
-        if (registered > 0) reportMcpRegistrationSuccess();
+        reportMcpRegistrationSuccess();
         if (isVerboseDiscovery()) {
           process.stderr.write(
             `LiteLLM MCP: registered ${registered} of ${definitions.length} prepared MCP tools ` +

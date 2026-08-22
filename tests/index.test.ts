@@ -467,27 +467,26 @@ describe("extension startup", () => {
     expect(fatalLines()[0]).not.toContain(refusal);
   });
 
-  it("clears a prior instance's fatal diagnostic after successful registration", async () => {
+  it.each([
+    ["registered tools", [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }]],
+    ["an empty catalog", []],
+  ])("clears a prior instance's fatal diagnostic after a successful pass with %s", async (_label, tools) => {
     process.env.LITELLM_MODELS_DEV = "0";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) {
         return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
       }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        return jsonResponse(200, {
-          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-        });
-      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools });
       throw new Error(`unexpected URL: ${url}`);
     });
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const extension = await loadExtension(await makeAgentDir());
     const fatalReporter = await import("../src/mcp-tools.js");
-    const fatalLines = () =>
-      stderr.mock.calls
-        .map(([message]) => String(message))
-        .filter((message) => message.includes("registration stopped"));
+    const diagnosticLines = () => stderr.mock.calls.map(([message]) => String(message));
+    const fatalLines = () => diagnosticLines().filter((message) => message.includes("registration stopped"));
+    const emptyCatalogLines = () =>
+      diagnosticLines().filter((message) => message.includes("no MCP tools were registered from 0 raw entries"));
 
     fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
     fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
@@ -495,12 +494,20 @@ describe("extension startup", () => {
 
     const pi = createPi();
     await extension(pi);
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
-      signal: new AbortController().signal,
-    });
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
+    const refresh = () =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://litellm.example.com" } },
+        signal: new AbortController().signal,
+      });
+    await refresh();
+    if (tools.length > 0) {
+      await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
+    } else {
+      await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(1));
+      await refresh();
+      expect(emptyCatalogLines()).toHaveLength(1);
+    }
 
     fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
     expect(fatalLines()).toHaveLength(2);
