@@ -376,7 +376,11 @@ function mapFromModelInfoGroup(
     return { ...shared, api: "anthropic-messages", compat: reduced.messagesCompat };
   }
   if (reduced.api === "openai-responses") {
-    return { ...shared, api: "openai-responses", compat: buildCompat(reduced.id, "openai-responses") };
+    return {
+      ...shared,
+      api: "openai-responses",
+      compat: buildCompat(reduced.id, "openai-responses", reduced.semanticFamily),
+    };
   }
   return {
     ...shared,

@@ -824,17 +824,23 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("keeps the Anthropic prompt-cache marker on a Responses-mode alias", async () => {
+  it("keeps the Anthropic prompt-cache marker on a Responses-mode Claude backend alias", async () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
-          data: [{ model_name: "anthropic/claude-sonnet-4-6", model_info: { id: "one", mode: "responses" } }],
+          data: [
+            {
+              model_name: "team-fast",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: { id: "one", mode: "responses", litellm_provider: "anthropic" },
+            },
+          ],
         }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]).toMatchObject({ api: "openai-responses" });
+    expect(result.models[0]).toMatchObject({ id: "team-fast", api: "openai-responses" });
     expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
   });
 
@@ -1856,17 +1862,17 @@ describe("discoverModels timeout", () => {
 
 describe("native Messages backend evidence conflicts", () => {
   it("does not let a Claude base_model override a contrary routed family", () => {
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "contrary-route",
-        litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
-        model_info: {
-          mode: "chat",
-          litellm_provider: "bedrock",
-          base_model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0",
-        },
-      }),
-    ).not.toMatchObject({ semanticFamily: "claude", messagesCompat: expect.anything() });
+    const resolved = resolveModelInfoCatalog({
+      model_name: "contrary-route",
+      litellm_params: { model: "bedrock/amazon.nova-pro-v1:0" },
+      model_info: {
+        mode: "chat",
+        litellm_provider: "bedrock",
+        base_model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0",
+      },
+    });
+
+    expect(resolved).toBeUndefined();
   });
 
   it("uses Claude base_model evidence for an opaque adapter target", () => {

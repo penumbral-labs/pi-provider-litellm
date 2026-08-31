@@ -723,6 +723,16 @@ describe("extension startup", () => {
   it("clears the remembered OAuth base URL when API-key auth resolves", async () => {
     process.env.LITELLM_BASE_URL = "https://api-key.example.com";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
     await extension(pi);
@@ -738,8 +748,9 @@ describe("extension startup", () => {
     await provider.auth.oauth?.toAuth(oauthCredential);
     await resolveApiKey(provider, { type: "api_key", key: "shared-key" });
 
-    expect(() =>
-      provider.stream(
+    let stream: ReturnType<typeof provider.stream> | undefined;
+    expect(() => {
+      stream = provider.stream(
         {
           id: "api-key-model",
           name: "API-key model",
@@ -754,8 +765,12 @@ describe("extension startup", () => {
         },
         { messages: [] },
         { apiKey: "shared-key" },
-      ),
-    ).not.toThrow();
+      );
+    }).not.toThrow();
+    const result = await stream!.result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual(["https://api-key.example.com/v1/chat/completions"]);
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {

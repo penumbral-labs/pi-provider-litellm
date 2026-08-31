@@ -55,7 +55,7 @@ jobs:
           node-version: '26.5.0'
           cache: 'npm'
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
 
       - name: Install VidaiMock

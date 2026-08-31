@@ -108,6 +108,8 @@ describe("LiteLLM smoke workflow", () => {
 
     expect(workflow).toContain("Start VidaiMock");
     expect(workflow).toContain("Wait for VidaiMock");
+    expect(workflow).toContain("run: npm ci --ignore-scripts");
+    expect(workflow).not.toMatch(/run: npm ci\s*$/m);
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database@sha256:");

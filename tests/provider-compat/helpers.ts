@@ -199,6 +199,18 @@ export async function createCompatibilityHarness(
     }
     const history = JSON.stringify(requestBody.messages ?? requestBody.input);
     if (history.includes("Overflow the context")) {
+      if (isAnthropicRequest) {
+        return Response.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "Requested token count exceeds the model's maximum context length of 4096 tokens",
+            },
+          },
+          { status: 400 },
+        );
+      }
       return Response.json(
         {
           error: {
