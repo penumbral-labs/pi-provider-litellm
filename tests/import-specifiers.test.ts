@@ -60,6 +60,7 @@ describe("importSpecifiers", () => {
     ["resolver after a regex containing quotes", 'const re = /[`"]+/; require("pkg");'],
     ["resolver after a regex containing comment markers", 'const re = /\\/\\/* not a comment/; eval("1");'],
     ["resolver in a template substitution", 'const value = `\u0024{require("pkg")}`;'],
+    ["resolver after a nested brace in a template substitution", 'const value = `\u0024{({}), eval("1")}`;'],
     ["resolver after a conditional regex", 'if (ok) /safe/.test(value); require("pkg");'],
     ["resolver after division", 'const ratio = total / count; require("pkg");'],
   ] as const)("rejects %s as a forbidden resolver", ([, source]) => {

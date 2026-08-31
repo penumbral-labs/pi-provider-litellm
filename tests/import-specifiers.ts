@@ -63,7 +63,7 @@ function tokenEndsExpression(kind: SyntaxKind): boolean {
 function scanTokens(source: string): Array<{ kind: SyntaxKind; text: string }> {
   const scanner = createScanner(true, undefined, source);
   const tokens: Array<{ kind: SyntaxKind; text: string }> = [];
-  let templateExpressionDepth = 0;
+  const templateBraceDepths: number[] = [];
   let previousKind: SyntaxKind | undefined;
 
   while (true) {
@@ -77,13 +77,20 @@ function scanTokens(source: string): Array<{ kind: SyntaxKind; text: string }> {
     if (kind === SyntaxKind.EndOfFile) break;
 
     const text = scanner.getTokenText();
-    if (kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle) templateExpressionDepth += 1;
+    if (kind === SyntaxKind.TemplateHead) templateBraceDepths.push(0);
     tokens.push({ kind, text });
 
-    if (kind === SyntaxKind.CloseBraceToken && templateExpressionDepth > 0) {
-      kind = scanner.reScanTemplateToken(false);
-      tokens.push({ kind, text: scanner.getTokenText() });
-      if (kind === SyntaxKind.TemplateTail) templateExpressionDepth -= 1;
+    const templateIndex = templateBraceDepths.length - 1;
+    if (kind === SyntaxKind.OpenBraceToken && templateIndex >= 0) {
+      templateBraceDepths[templateIndex] += 1;
+    } else if (kind === SyntaxKind.CloseBraceToken && templateIndex >= 0) {
+      if (templateBraceDepths[templateIndex] > 0) {
+        templateBraceDepths[templateIndex] -= 1;
+      } else {
+        kind = scanner.reScanTemplateToken(false);
+        tokens.push({ kind, text: scanner.getTokenText() });
+        if (kind === SyntaxKind.TemplateTail) templateBraceDepths.pop();
+      }
     }
     previousKind = kind;
   }

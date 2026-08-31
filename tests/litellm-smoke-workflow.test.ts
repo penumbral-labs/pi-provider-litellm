@@ -258,8 +258,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("## Mocked LiteLLM smoke workflow");
     expect(readme).toContain("VidaiMock");
     expect(readme).toContain("does not call real LLM APIs");
-    expect(readme).toContain("No provider API keys or GitHub");
-    expect(readme).toContain("Models permission are required");
+    expect(readme).toContain("No provider API keys or GitHub Models permission are required");
     expect(readme).toContain("OpenAI-compatible and Anthropic routes");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
