@@ -5,7 +5,7 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
 export interface CatalogResolution {
-  provider?: string;
+  provider: string;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;

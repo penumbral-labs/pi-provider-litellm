@@ -1109,6 +1109,100 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(true);
   });
 
+  it("preserves incomplete conservative wildcard metadata on expanded catalog-matching ids", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/*",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: {
+                id: "openai-route",
+                mode: "responses",
+                supports_vision: true,
+                max_input_tokens: 32_000,
+                max_output_tokens: 4_000,
+                input_cost_per_token: 0.000004,
+                output_cost_per_token: 0.00002,
+                cache_read_input_token_cost: 0.0000004,
+                cache_creation_input_token_cost: 0.000005,
+              },
+            },
+            {
+              model_name: "openai/*",
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+              model_info: {
+                id: "anthropic-route",
+                mode: "responses",
+                supports_reasoning: false,
+                supports_vision: false,
+                max_input_tokens: 16_000,
+                max_output_tokens: 2_000,
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000003,
+                cache_creation_input_token_cost: 0.00000375,
+              },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "openai/gpt-4o", owned_by: "openai" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "openai/gpt-4o",
+        name: "openai/gpt-4o (incomplete metadata)",
+        api: "openai-responses",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 16_000,
+        maxTokens: 2_000,
+        cost: expect.objectContaining({ input: 4, output: 20, cacheWrite: 5 }),
+      }),
+    ]);
+    expect(stderr).toHaveBeenCalled();
+  });
+
+  it("preserves unresolved conservative wildcard metadata on expanded catalog-matching ids", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/*",
+              litellm_params: { model: "private/unknown" },
+              model_info: {
+                mode: "chat",
+                supports_reasoning: false,
+                max_input_tokens: 8_000,
+                input_cost_per_token: 0.000001,
+              },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "openai/gpt-4o", owned_by: "openai" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "openai/gpt-4o",
+        name: "openai/gpt-4o (incomplete metadata)",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 8_000,
+        maxTokens: 16_384,
+        cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ]);
+  });
+
   it("preserves a wildcard Responses route mode on expanded models", async () => {
     mockEndpoints({
       "/model/info": () =>

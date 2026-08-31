@@ -403,10 +403,23 @@ function wildcardMatches(route: string, modelId: string): boolean {
   return suffix === "" || modelId.endsWith(suffix ?? "");
 }
 
-function wildcardApi(modelId: string, wildcards: readonly DiscoveredModel[]): DiscoveredModel["api"] | undefined {
-  const matches = wildcards.filter((model) => wildcardMatches(model.id, modelId));
-  const api = matches[0]?.api;
-  return api && matches.every((model) => model.api === api) ? api : undefined;
+function mapFromWildcardExpansion(
+  entry: ModelsListEntry,
+  wildcards: readonly DiscoveredModel[],
+): DiscoveredModel | undefined {
+  const id = wireString(entry.id);
+  if (!id || id.includes("*")) return undefined;
+  const matches = wildcards.filter((model) => wildcardMatches(model.id, id));
+  const wildcard = matches[0];
+  if (!wildcard) return mapFromModelsList(entry);
+  const api = matches.every((model) => model.api === wildcard.api) ? wildcard.api : "openai-completions";
+  const incomplete = wildcard.name.endsWith(" (incomplete metadata)");
+  return {
+    ...wildcard,
+    id,
+    name: incomplete ? `${id} (incomplete metadata)` : id,
+    api,
+  };
 }
 
 export async function discoverModels(
@@ -449,12 +462,8 @@ export async function discoverModels(
       const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
       if (listResult.ok) {
         const expanded = (listResult.data.data ?? [])
-          .map(mapFromModelsList)
-          .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"))
-          .map((model) => {
-            const api = wildcardApi(model.id, wildcards);
-            return api ? { ...model, api } : model;
-          });
+          .map((entry) => mapFromWildcardExpansion(entry, wildcards))
+          .filter((model): model is DiscoveredModel => model !== undefined);
         const seen = new Set<string>(models.map((m) => m.id));
         models = [...models, ...expanded.filter((m) => !seen.has(m.id))];
       }
