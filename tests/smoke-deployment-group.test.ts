@@ -1,6 +1,9 @@
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   captureGroupedDeployments,
@@ -10,6 +13,9 @@ import {
 } from "../scripts/smoke-deployment-group.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const execFileAsync = promisify(execFile);
+const scriptPath = resolve(repoRoot, "scripts/smoke-deployment-group.ts");
+const tsxPath = resolve(repoRoot, "node_modules/.bin/tsx");
 
 function deployment(id: string, mode: string, modelName = GROUPED_MODEL_NAME) {
   return {
@@ -143,6 +149,67 @@ describe("captureGroupedDeployments", () => {
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/model/info", {
       headers: { Authorization: "Bearer sk-smoke" },
       signal: expect.any(AbortSignal),
+    });
+  });
+});
+
+describe("smoke-deployment-group script", () => {
+  it("executes directly and prints only the redacted deployment summary", async () => {
+    const secret = "sk-direct-execution-secret";
+    const rows = [
+      {
+        ...deployment("chat", "chat"),
+        litellm_params: {
+          api_key: secret,
+          model: "openai/private-chat-backend",
+          allowed_openai_params: ["reasoning_effort"],
+        },
+      },
+      deployment("responses", "responses"),
+    ];
+    const server = createServer((request, response) => {
+      if (request.url !== "/model/info" || request.headers.authorization !== `Bearer ${secret}`) {
+        response.writeHead(404).end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: rows }));
+    });
+    server.listen(0, "127.0.0.1");
+    await new Promise<void>((resolveListen) => server.once("listening", resolveListen));
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+      const { stdout, stderr } = await execFileAsync(tsxPath, [scriptPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          LITELLM_BASE_URL: `http://127.0.0.1:${address.port}`,
+          LITELLM_API_KEY: secret,
+        },
+      });
+
+      expect(JSON.parse(stdout)).toEqual(summarizeGroupedDeployments(rows));
+      expect(stdout).not.toContain(secret);
+      expect(stdout).not.toContain("private-chat-backend");
+      expect(stderr).toBe("");
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) =>
+        server.close((error) => (error ? rejectClose(error) : resolveClose())),
+      );
+    }
+  });
+
+  it("exits unsuccessfully with a concise error when required environment is missing", async () => {
+    await expect(
+      execFileAsync(tsxPath, [scriptPath], {
+        cwd: repoRoot,
+        env: { ...process.env, LITELLM_BASE_URL: "", LITELLM_API_KEY: "" },
+      }),
+    ).rejects.toMatchObject({
+      code: 1,
+      stdout: "",
+      stderr: "LITELLM_BASE_URL and LITELLM_API_KEY must be set\n",
     });
   });
 });
