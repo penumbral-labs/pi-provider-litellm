@@ -26,11 +26,15 @@ interface ServiceAccountCredentials {
 type GoogleCredentials = AuthorizedUserCredentials | ServiceAccountCredentials | { type?: string };
 
 function isAuthorizedUserCredentials(credentials: GoogleCredentials): credentials is AuthorizedUserCredentials {
+  const authorizedUser = credentials as Partial<AuthorizedUserCredentials>;
   return (
     credentials.type === "authorized_user" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_id === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).client_secret === "string" &&
-    typeof (credentials as Partial<AuthorizedUserCredentials>).refresh_token === "string"
+    typeof authorizedUser.client_id === "string" &&
+    authorizedUser.client_id.trim() !== "" &&
+    typeof authorizedUser.client_secret === "string" &&
+    authorizedUser.client_secret.trim() !== "" &&
+    typeof authorizedUser.refresh_token === "string" &&
+    authorizedUser.refresh_token.trim() !== ""
   );
 }
 

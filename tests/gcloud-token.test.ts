@@ -42,6 +42,30 @@ describe("getGcloudToken", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["client_id", ""],
+    ["client_id", " \t"],
+    ["client_secret", ""],
+    ["client_secret", " \n"],
+    ["refresh_token", ""],
+    ["refresh_token", " \r\n"],
+  ] as const)("rejects a blank %s in authorized_user ADC", async (field, value) => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "client-id",
+      client_secret: "client-secret",
+      refresh_token: "refresh-token",
+      [field]: value,
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(hasGcloudAdcCredentials()).resolves.toBe(false);
+    await expect(getGcloudToken()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown credential type"));
+  });
+
   it("exchanges authorized_user ADC credentials for an access token", async () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
       type: "authorized_user",
