@@ -7,6 +7,8 @@ import {
 } from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
+type ModelCost = NonNullable<CatalogResolution["cost"]>;
+
 const catalog = new Map<string, CatalogResolution>([
   [
     "openai/gpt-4o",
@@ -696,6 +698,14 @@ describe("reduceModelGroup", () => {
   });
 
   it("constructs a safe piecewise envelope for different tier thresholds regardless of order", () => {
+    const rateAt = (cost: ModelCost, inputTokens: number): ModelCost =>
+      [...(cost.tiers ?? [])]
+        .sort((left, right) => right.inputTokensAbove - left.inputTokensAbove)
+        .find((tier) => tier.inputTokensAbove < inputTokens) ?? cost;
+    const sampledCost = (cost: ModelCost, inputTokens: number, outputTokens: number): number => {
+      const rate = rateAt(cost, inputTokens);
+      return rate.input * inputTokens + rate.output * outputTokens;
+    };
     const rows = ["a", "b", "c"].map((id) =>
       row({
         model_info: {
@@ -750,8 +760,16 @@ describe("reduceModelGroup", () => {
         maxTokens: 64_000,
         cost: order[call++],
       }));
-      expect(result?.cost).toEqual(expected);
+      expect(result).toBeDefined();
+      if (!result) throw new Error("expected a reduced model group");
+      expect(result.cost).toEqual(expected);
       expect(result).toMatchObject({ hasCompleteCost: true, hasCompleteMetadata: true });
+      for (const inputTokens of [0, 200_000, 200_001, 400_000, 400_001, 500_000, 500_001]) {
+        const envelopeCost = sampledCost(result.cost, inputTokens, 1_000);
+        for (const source of costs) {
+          expect(envelopeCost).toBeGreaterThanOrEqual(sampledCost(source, inputTokens, 1_000));
+        }
+      }
     }
   });
 
