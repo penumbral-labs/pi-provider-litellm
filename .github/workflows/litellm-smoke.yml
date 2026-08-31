@@ -214,17 +214,47 @@ jobs:
           assert(Array.isArray(payload.data), "/model/info response has no data array");
           const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
           assert(rows.length === 2, `expected two grouped deployments, received ${rows.length}`);
+          const { pathToFileURL } = await import("node:url");
+          const { discoverModels, resolveModelInfoCatalog } = await import(pathToFileURL("dist/discover.js").href);
+          const costSources = {
+            input: "input_cost_per_token",
+            output: "output_cost_per_token",
+            cacheRead: "cache_read_input_token_cost",
+            cacheWrite: "cache_creation_input_token_cost",
+          };
+          const catalogs = rows.map((row) => resolveModelInfoCatalog(row));
+          const catalogProvider = catalogs[0]?.provider;
+          const hasCatalogAuthority =
+            catalogProvider !== undefined && catalogs.every((catalog) => catalog?.provider === catalogProvider);
+          const deploymentCosts = rows.map((row, index) => {
+            const catalogCost = hasCatalogAuthority ? catalogs[index]?.cost : undefined;
+            return Object.fromEntries(
+              Object.entries(costSources).map(([field, source]) => {
+                const perToken = row.model_info?.[source];
+                const explicit =
+                  typeof perToken === "number" && Number.isFinite(perToken) && perToken >= 0
+                    ? perToken * 1_000_000
+                    : undefined;
+                return [field, explicit ?? catalogCost?.[field]];
+              }),
+            );
+          });
+          const expectedCost = Object.fromEntries(
+            Object.keys(costSources).map((field) => {
+              const values = deploymentCosts.map((cost) => cost[field]);
+              const complete = values.every((value) => value !== undefined);
+              return [field, complete ? Math.max(...values) : 0];
+            }),
+          );
           const summary = rows
-            .map((row) => ({ id: row.model_info?.id, mode: row.model_info?.mode }))
+            .map((row, index) => ({ id: row.model_info?.id, mode: row.model_info?.mode, cost: deploymentCosts[index] }))
             .sort((left, right) => String(left.mode).localeCompare(String(right.mode)));
-          console.log(JSON.stringify(summary, null, 2));
+          console.log(JSON.stringify({ deployments: summary, expectedCost }, null, 2));
           for (const row of summary) assert(row.id, "grouped deployment is missing model_info.id");
           assert(
             summary.map((row) => row.mode).join(",") === "chat,responses",
             `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
           );
-          const { pathToFileURL } = await import("node:url");
-          const { discoverModels } = await import(pathToFileURL("dist/discover.js").href);
           const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY);
           const grouped = result.models.filter((model) => model.id === "grouped-vidaimock");
           console.log(JSON.stringify(grouped, null, 2));
@@ -234,10 +264,14 @@ jobs:
             grouped[0].name === "grouped-vidaimock (incomplete metadata)",
             `withheld-authority group must carry the permanent marker, received ${grouped[0].name}`,
           );
-          assert(
-            grouped[0].cost.input === 0.15 && grouped[0].cost.output === 0.6,
-            `group must retain explicit router cost, received ${JSON.stringify(grouped[0].cost)}`,
-          );
+          for (const field of Object.keys(costSources)) {
+            assert(
+              grouped[0].cost[field] === expectedCost[field],
+              `group ${field} cost must equal the maximum complete deployment cost; ` +
+                `expected ${expectedCost[field]}, received ${JSON.stringify(grouped[0].cost)} from ` +
+                `${JSON.stringify(summary)}`,
+            );
+          }
           assert(
             grouped[0].thinkingLevelMap === undefined || Object.values(grouped[0].thinkingLevelMap).every((value) => value === null),
             "group must not adopt a catalog thinking-level value",
