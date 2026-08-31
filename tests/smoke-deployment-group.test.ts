@@ -1,7 +1,17 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { captureGroupedDeployments, validateGroupedDeployments } from "../scripts/smoke-deployment-group.js";
+import {
+  captureGroupedDeployments,
+  GROUPED_MODEL_NAME,
+  summarizeGroupedDeployments,
+  validateGroupedDeployments,
+} from "../scripts/smoke-deployment-group.js";
 
-function deployment(id: string, mode: string, modelName = "grouped-vidaimock") {
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+function deployment(id: string, mode: string, modelName = GROUPED_MODEL_NAME) {
   return {
     model_name: modelName,
     model_info: {
@@ -20,6 +30,13 @@ afterEach(() => {
 });
 
 describe("validateGroupedDeployments", () => {
+  it("uses the grouped model name configured by the smoke workflow", () => {
+    const workflow = readFileSync(resolve(repoRoot, ".github/workflows/litellm-smoke.yml"), "utf8");
+    const configuredNames = workflow.match(/^\s*- model_name:\s*(\S+)\s*$/gm) ?? [];
+
+    expect(configuredNames.filter((line) => line.trim() === `- model_name: ${GROUPED_MODEL_NAME}`)).toHaveLength(2);
+  });
+
   it("returns the two grouped deployments when their ids are unique and their modes are exactly chat and responses", () => {
     const chat = deployment("deployment-chat", "chat");
     const responses = deployment("deployment-responses", "responses");
@@ -55,7 +72,7 @@ describe("validateGroupedDeployments", () => {
     [
       "model_info.id",
       {
-        model_name: "grouped-vidaimock",
+        model_name: GROUPED_MODEL_NAME,
         model_info: { mode: "chat", supported_openai_params: [] },
         litellm_params: { allowed_openai_params: [] },
       },
@@ -63,7 +80,7 @@ describe("validateGroupedDeployments", () => {
     [
       "supported_openai_params",
       {
-        model_name: "grouped-vidaimock",
+        model_name: GROUPED_MODEL_NAME,
         model_info: { id: "chat", mode: "chat" },
         litellm_params: { allowed_openai_params: [] },
       },
@@ -71,7 +88,7 @@ describe("validateGroupedDeployments", () => {
     [
       "allowed_openai_params",
       {
-        model_name: "grouped-vidaimock",
+        model_name: GROUPED_MODEL_NAME,
         model_info: { id: "chat", mode: "chat", supported_openai_params: [] },
         litellm_params: {},
       },
@@ -80,6 +97,40 @@ describe("validateGroupedDeployments", () => {
     expect(() => validateGroupedDeployments({ data: [invalidChat, deployment("responses", "responses")] })).toThrow(
       `grouped deployment is missing ${field}`,
     );
+  });
+});
+
+describe("summarizeGroupedDeployments", () => {
+  it("reports only deployment ids, modes, and parameter names", () => {
+    const chat = {
+      ...deployment("chat-id", "chat"),
+      litellm_params: {
+        api_key: "sk-must-not-leak",
+        model: "openai/gpt-4o-mini",
+        allowed_openai_params: ["reasoning_effort"],
+      },
+    };
+
+    const summary = summarizeGroupedDeployments(
+      validateGroupedDeployments({ data: [chat, deployment("responses-id", "responses")] }),
+    );
+
+    expect(summary).toEqual([
+      {
+        id: "chat-id",
+        mode: "chat",
+        supported_openai_params: ["temperature"],
+        allowed_openai_params: ["reasoning_effort"],
+      },
+      {
+        id: "responses-id",
+        mode: "responses",
+        supported_openai_params: ["temperature"],
+        allowed_openai_params: ["reasoning_effort"],
+      },
+    ]);
+    expect(JSON.stringify(summary)).not.toContain("sk-must-not-leak");
+    expect(JSON.stringify(summary)).not.toContain("openai/gpt-4o-mini");
   });
 });
 

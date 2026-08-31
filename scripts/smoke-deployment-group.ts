@@ -1,4 +1,4 @@
-const GROUPED_MODEL_NAME = "grouped-vidaimock";
+export const GROUPED_MODEL_NAME = "grouped-vidaimock";
 const EXPECTED_MODES = ["chat", "responses"] as const;
 const DEFAULT_TIMEOUT_MS = 3000;
 
@@ -58,6 +58,15 @@ export function validateGroupedDeployments(payload: unknown): GroupedDeployment[
   return deployments;
 }
 
+export function summarizeGroupedDeployments(deployments: GroupedDeployment[]) {
+  return deployments.map((deployment) => ({
+    id: deployment.model_info.id,
+    mode: deployment.model_info.mode,
+    supported_openai_params: deployment.model_info.supported_openai_params,
+    allowed_openai_params: deployment.litellm_params.allowed_openai_params,
+  }));
+}
+
 export async function captureGroupedDeployments(
   baseUrl: string,
   apiKey: string,
@@ -82,7 +91,7 @@ export async function captureGroupedDeploymentsFromEnv(
 
 if (import.meta.main) {
   captureGroupedDeploymentsFromEnv()
-    .then((rows) => console.log(JSON.stringify(rows, null, 2)))
+    .then((rows) => console.log(JSON.stringify(summarizeGroupedDeployments(rows), null, 2)))
     .catch((error) => {
       console.error(error instanceof Error ? error.message : error);
       process.exitCode = 1;
