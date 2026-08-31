@@ -436,7 +436,10 @@ function mapFromWildcardExpansion(
   const maxTokens = Math.min(...matches.map((model) => model.maxTokens));
   const thinkingLevelMap = intersectThinkingLevelMaps(matches);
   const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
-  const costTiers = incomplete ? undefined : conservativeCostTiers(matches.map((model) => model.cost));
+  // Preserve every known tier even when a sibling has incomplete metadata. Omitting
+  // a complete sibling's higher tier would understate the known worst-case rate;
+  // the incomplete marker continues to signal that the resulting envelope is partial.
+  const costTiers = conservativeCostTiers(matches.map((model) => model.cost));
   return {
     id,
     name: incomplete ? `${id} (incomplete metadata)` : id,

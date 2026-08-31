@@ -1369,6 +1369,45 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     ]);
   });
 
+  it("retains known higher tiers when an overlapping wildcard has incomplete metadata", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "*",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "complete", mode: "chat" },
+            },
+            {
+              model_name: "team/*",
+              litellm_params: { model: "internal/unknown" },
+              model_info: {
+                id: "incomplete",
+                mode: "chat",
+                input_cost_per_token: 0.000002,
+                output_cost_per_token: 0.00001,
+                cache_read_input_token_cost: 0.0000002,
+                cache_creation_input_token_cost: 0.0000025,
+              },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.name).toBe("team/model (incomplete metadata)");
+    expect(result.models[0]?.cost).toEqual({
+      input: 5,
+      output: 30,
+      cacheRead: 0.5,
+      cacheWrite: 2.5,
+      tiers: [{ inputTokensAbove: 272_000, input: 10, output: 45, cacheRead: 1, cacheWrite: 2.5 }],
+    });
+  });
+
   it("combines overlapping wildcard metadata conservatively regardless of route order", async () => {
     const broad = {
       model_name: "*",
