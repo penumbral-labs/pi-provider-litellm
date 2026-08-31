@@ -105,6 +105,13 @@ function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsu
   return "unsupported";
 }
 
+export function hasMixedIncompatibleDeploymentModes(entries: readonly ModelInfoEntry[]): boolean {
+  const modes = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name))).map((entry) =>
+    normalizedMode(entry.model_info?.mode),
+  );
+  return modes.includes("unsupported") && modes.some((mode) => mode !== "unsupported");
+}
+
 // Canonicalization is depth-bounded because deployment metadata is untrusted.
 const MAX_CANONICAL_DEPTH = 12;
 
@@ -340,8 +347,12 @@ export function closeSerializerPolicy(input: {
     // Responses always serializes a selected level as `reasoning.effort`.
     // Chat-only evidence such as `thinking` cannot authorize that carrier.
     const compat = vendorCompat;
-    if (!reasoning) return { reasoning, compat };
-    if (denyLevels || !acceptsResponsesReasoningControl) {
+    const deniedCompat = { ...compat, supportsReasoningEffort: false } as DiscoveredModel["compat"];
+    if (!reasoning) return { reasoning, compat: denyLevels ? deniedCompat : compat };
+    if (denyLevels) {
+      return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat: deniedCompat };
+    }
+    if (!acceptsResponsesReasoningControl) {
       return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
     }
     return { reasoning, thinkingLevelMap: toResponsesLevels(semanticLevels ?? catalogLevels), compat };
@@ -351,8 +362,11 @@ export function closeSerializerPolicy(input: {
   const stated = vendorCompat !== undefined || semanticCompat !== undefined;
   const merged = { ...(vendorCompat as OpenAICompat), ...semanticCompat } as OpenAICompat;
   const compat = (stated ? merged : undefined) as DiscoveredModel["compat"];
-  if (!reasoning) return { reasoning, compat };
-  if (denyLevels) return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };
+  const deniedCompat = { ...merged, supportsReasoningEffort: false } as DiscoveredModel["compat"];
+  if (!reasoning) return { reasoning, compat: denyLevels ? deniedCompat : compat };
+  if (denyLevels) {
+    return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat: deniedCompat };
+  }
   if (deniesChatEffort(merged)) {
     // The vendor denies effort and named no format: nothing can carry a level.
     return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat };

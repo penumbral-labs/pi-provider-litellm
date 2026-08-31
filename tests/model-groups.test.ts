@@ -166,6 +166,26 @@ describe("closeSerializerPolicy", () => {
     });
   });
 
+  it.each(["openai-completions", "openai-responses"] as const)(
+    "makes denyLevels explicitly disable reasoning effort for %s",
+    (api) => {
+      expect(
+        closeSerializerPolicy({
+          api,
+          reasoning: true,
+          vendorCompat: { supportsStore: false, supportsReasoningEffort: true },
+          catalogLevels: { low: "low", high: "high" },
+          acceptsResponsesReasoningControl: true,
+          denyLevels: true,
+        }),
+      ).toEqual({
+        reasoning: true,
+        thinkingLevelMap: NO_LEVELS,
+        compat: { supportsStore: false, supportsReasoningEffort: false },
+      });
+    },
+  );
+
   it("denies Responses levels until reasoning_effort acceptance is evidenced", () => {
     const input = {
       api: "openai-responses" as const,

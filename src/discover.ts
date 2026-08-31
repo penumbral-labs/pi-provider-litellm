@@ -8,6 +8,7 @@ import {
   closeSerializerPolicy,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  hasMixedIncompatibleDeploymentModes,
   isResponsesMode,
   meetVendorCompat,
   reduceModelGroup,
@@ -457,6 +458,18 @@ function reportBoundedRoutes(
   process.stderr.write(`${describe(unreported.length)}: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`);
 }
 
+const reportedIncompatibleModeRoutes = new Set<string>();
+
+function reportIncompatibleDeploymentModes(routes: readonly string[]): void {
+  reportBoundedRoutes(
+    reportedIncompatibleModeRoutes,
+    routes,
+    (count) =>
+      `LiteLLM discovery: ${count} route group(s) mix chat-style and explicitly incompatible deployment modes; ` +
+      "the routes are withheld because not every deployment can accept chat requests",
+  );
+}
+
 const reportedAmbiguousRoutes = new Set<string>();
 
 function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
@@ -713,26 +726,30 @@ async function discoverFromHealth(
     group.push(deployment);
     groups.set(route, group);
   }
+  const incompatibleModeRoutes: string[] = [];
   const ambiguousRoutes: string[] = [];
   const conflictingFamilyRoutes: string[] = [];
   const withheldRepairRoutes: string[] = [];
   const discovered = [...groups.values()]
     .map((group) => {
-      const model = mapFromModelInfoGroup(
-        group.map(({ entry }) => entry),
-        {
-          ambiguousRoutes,
-          conflictingFamilyRoutes,
-          withheldRepairRoutes,
-          allowRouteCatalogFallback: group.every(({ allowRouteCatalogFallback }) => allowRouteCatalogFallback),
-          denyLevels: group.some(({ denyLevels }) => denyLevels),
-        },
-      );
+      const entries = group.map(({ entry }) => entry);
+      if (hasMixedIncompatibleDeploymentModes(entries)) {
+        const route = wireString(entries[0]?.model_name);
+        if (route) incompatibleModeRoutes.push(route);
+      }
+      const model = mapFromModelInfoGroup(entries, {
+        ambiguousRoutes,
+        conflictingFamilyRoutes,
+        withheldRepairRoutes,
+        allowRouteCatalogFallback: group.every(({ allowRouteCatalogFallback }) => allowRouteCatalogFallback),
+        denyLevels: group.some(({ denyLevels }) => denyLevels),
+      });
       if (!model || !group.every(({ endpointOnly }) => endpointOnly)) return model;
       const catalogName = findCatalogModel(model.id)?.name;
       return catalogName ? { ...model, name: catalogName } : model;
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
+  reportIncompatibleDeploymentModes(incompatibleModeRoutes);
   reportAmbiguousCatalogAuthority(ambiguousRoutes);
   reportConflictingFamilyEvidence(conflictingFamilyRoutes);
   reportWithheldToolRepair(withheldRepairRoutes);
@@ -767,12 +784,20 @@ export async function discoverModels(
       group.push(entry);
       groups.set(route, group);
     }
+    const incompatibleModeRoutes: string[] = [];
     const ambiguousRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
     const withheldRepairRoutes: string[] = [];
     let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, { ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes }))
+      .map((group) => {
+        if (hasMixedIncompatibleDeploymentModes(group)) {
+          const route = wireString(group[0]?.model_name);
+          if (route) incompatibleModeRoutes.push(route);
+        }
+        return mapFromModelInfoGroup(group, { ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes });
+      })
       .filter((m): m is DiscoveredModel => m !== undefined);
+    reportIncompatibleDeploymentModes(incompatibleModeRoutes);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
     reportConflictingFamilyEvidence(conflictingFamilyRoutes);
     reportWithheldToolRepair(withheldRepairRoutes);

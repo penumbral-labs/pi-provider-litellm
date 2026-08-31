@@ -1494,20 +1494,51 @@ describe("discoverModels via /model/info", () => {
     ["embedding first", "embedding", "chat"],
     ["Responses first", "responses", "embedding"],
     ["embedding before Responses", "embedding", "responses"],
-  ])("withholds a mixed chat-style and incompatible route with $0", async (_case, firstMode, secondMode) => {
-    mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            { model_name: "mixed-route", model_info: { id: "first", mode: firstMode } },
-            { model_name: "mixed-route", model_info: { id: "second", mode: secondMode } },
-          ],
-        }),
-    });
+  ])(
+    "withholds and diagnoses a mixed chat-style and incompatible route with $0",
+    async (caseName, firstMode, secondMode) => {
+      const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      const route = `mixed-route-${caseName.replaceAll(" ", "-")}`;
+      mockEndpoints({
+        "/model/info": () =>
+          jsonResponse(200, {
+            data: [
+              { model_name: route, model_info: { id: "first", mode: firstMode } },
+              { model_name: route, model_info: { id: "second", mode: secondMode } },
+            ],
+          }),
+      });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models).toEqual([]);
+      expect(result.models).toEqual([]);
+      expect(stderr).toHaveBeenCalledTimes(1);
+      expect(String(stderr.mock.calls[0]?.[0])).toContain(
+        "1 route group(s) mix chat-style and explicitly incompatible deployment modes",
+      );
+      expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
+    },
+  );
+
+  it("bounds incompatible-mode diagnostics and reports each route once", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const mixed = (route: string) => [
+      { model_name: route, model_info: { id: `${route}-chat`, mode: "chat" } },
+      { model_name: route, model_info: { id: `${route}-embedding`, mode: "embedding" } },
+    ];
+    const routes = ["bounded-mode-a", "bounded-mode-b", "bounded-mode-c", "bounded-mode-d"];
+    const discover = async () => {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: routes.flatMap(mixed) }) });
+      await discoverModels("https://litellm.example.com", "sk-test", {});
+    };
+
+    await discover();
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("bounded-mode-a, bounded-mode-b, bounded-mode-c (+1 more)");
+    expect(String(stderr.mock.calls[0]?.[0])).not.toContain("bounded-mode-d");
+
+    await discover();
+    expect(stderr).toHaveBeenCalledTimes(1);
   });
 
   it("stays silent when provider identity is unanimous or wholly unknown", async () => {
@@ -1636,6 +1667,33 @@ describe("discoverModels response-mode models", () => {
       contextWindow: 272000,
       maxTokens: 128000,
     });
+  });
+
+  it("diagnoses a /health route that mixes chat and incompatible deployment modes", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info?litellm_model_id=chat-id": () =>
+        jsonResponse(200, { data: [{ model_name: "health-mixed-mode", model_info: { mode: "chat" } }] }),
+      "/model/info?litellm_model_id=embed-id": () =>
+        jsonResponse(200, { data: [{ model_name: "health-mixed-mode", model_info: { mode: "embedding" } }] }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "health-mixed-mode", model_id: "chat-id" },
+            { model: "health-mixed-mode", model_id: "embed-id" },
+          ],
+        }),
+    });
+
+    await expect(discoverModels("https://litellm.example.com", "sk-test", {})).rejects.toThrow(
+      "/v1/models returned 404",
+    );
+
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("health-mixed-mode");
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("explicitly incompatible deployment modes");
   });
 
   it("keeps /health response-mode model_info fallbacks on Chat", async () => {

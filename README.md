@@ -234,7 +234,7 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 
 LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model:
 
-- Responses is selected only when every row explicitly reports Responses mode; mixed or unknown groups use Chat.
+- Responses is selected only when every row explicitly reports Responses mode; mixed Chat/Responses or unknown groups use Chat. A route that combines a chat-style deployment with an explicitly incompatible mode such as `embedding` is withheld entirely, because LiteLLM could otherwise select a deployment that cannot accept the request.
 - Vision and reasoning are advertised only when every routable deployment resolves them as supported. Router-reported reasoning-effort levels are exposed only when every deployment explicitly supports the level.
 - Context and output limits use the minimum resolved value across deployments.
 - Each displayed price field uses the maximum only when every deployment resolves that field; unresolved fields remain zero and the model name is suffixed with `(incomplete metadata)`.
@@ -264,6 +264,7 @@ Unknown generations and mixed deployment evidence expose no speculative selector
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `LiteLLM discovery: ... route group(s) have missing or conflicting deployment provider evidence` | One or more deployments lack a resolvable backend provider or resolve to different providers. Add consistent `litellm_params.model`, `model_info.base_model`, or adapter metadata; catalog-derived limits, pricing, and reasoning metadata are withheld meanwhile. |
+| `LiteLLM discovery: ... route group(s) mix chat-style and explicitly incompatible deployment modes` | The same public `model_name` targets both Chat/Responses and a non-chat mode such as `embedding`. Split those deployments into distinct route names or make their modes consistently chat-compatible; the mixed route is withheld to prevent requests from reaching an incompatible deployment. |
 | A model is marked `(incomplete metadata)` | `/model/info` or `/health` did not provide enough authoritative metadata. Explicit fields remain usable, but unknown cost fields are shown as zero and route-name cache enrichment stays disabled. |
 | Reasoning model has no selectable thinking level | Ensure every deployment declares its supported `thinking` or `reasoning_effort` field in `supported_openai_params` or `allowed_openai_params`; unsupported and mixed groups fail closed |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
