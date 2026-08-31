@@ -5,6 +5,7 @@ import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import {
   type CatalogResolution,
   catalogResolution,
+  conservativeCostTiers,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   reduceModelGroup,
@@ -419,26 +420,6 @@ function intersectThinkingLevelMaps(
   return Object.keys(intersection).length > 0 ? intersection : undefined;
 }
 
-function compatibleCostTiers(models: readonly DiscoveredModel[]): DiscoveredModel["cost"]["tiers"] {
-  // This reducer combines only identical thresholds; incompatible tier ladders
-  // are intentionally omitted.
-  const tierLists = models.map((model) => model.cost.tiers);
-  const first = tierLists[0];
-  if (!first || tierLists.some((tiers) => !tiers || tiers.length !== first.length)) return undefined;
-  if (
-    tierLists.some((tiers) => tiers?.some((tier, index) => tier.inputTokensAbove !== first[index]?.inputTokensAbove))
-  ) {
-    return undefined;
-  }
-  return first.map((tier, index) => ({
-    inputTokensAbove: tier.inputTokensAbove,
-    input: Math.max(...tierLists.map((tiers) => tiers?.[index]?.input ?? 0)),
-    output: Math.max(...tierLists.map((tiers) => tiers?.[index]?.output ?? 0)),
-    cacheRead: Math.max(...tierLists.map((tiers) => tiers?.[index]?.cacheRead ?? 0)),
-    cacheWrite: Math.max(...tierLists.map((tiers) => tiers?.[index]?.cacheWrite ?? 0)),
-  }));
-}
-
 function mapFromWildcardExpansion(
   entry: ModelsListEntry,
   wildcards: readonly DiscoveredModel[],
@@ -454,8 +435,8 @@ function mapFromWildcardExpansion(
   const contextWindow = Math.min(...matches.map((model) => model.contextWindow));
   const maxTokens = Math.min(...matches.map((model) => model.maxTokens));
   const thinkingLevelMap = intersectThinkingLevelMaps(matches);
-  const costTiers = compatibleCostTiers(matches);
   const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
+  const costTiers = incomplete ? undefined : conservativeCostTiers(matches.map((model) => model.cost));
   return {
     id,
     name: incomplete ? `${id} (incomplete metadata)` : id,

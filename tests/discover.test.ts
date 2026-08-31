@@ -1341,7 +1341,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     ]);
   });
 
-  it("omits tiered pricing when overlapping wildcard thresholds are incompatible", async () => {
+  it("constructs a safe tier envelope when overlapping wildcard thresholds differ", async () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -1363,7 +1363,10 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.cost.tiers).toBeUndefined();
+    expect(result.models[0]?.cost.tiers).toEqual([
+      { inputTokensAbove: 200_000, input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      { inputTokensAbove: 272_000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 },
+    ]);
   });
 
   it("combines overlapping wildcard metadata conservatively regardless of route order", async () => {

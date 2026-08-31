@@ -49,6 +49,8 @@ const REASONING_EFFORT_FLAGS = [
   ["max", "max", "supports_max_reasoning_effort"],
 ] as const;
 type CostField = (typeof COST_FIELDS)[number];
+type ModelCost = DiscoveredModel["cost"];
+type ModelCostTier = NonNullable<ModelCost["tiers"]>[number];
 
 // `/model/info` is parsed JSON from operator-authored proxy config, so a field
 // declared as a string can arrive as a number. Reading it as one must withhold
@@ -180,6 +182,56 @@ function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
 }
 
+function ratesAboveThreshold(cost: ModelCost, threshold: number): ModelCost {
+  let matchedThreshold = -1;
+  let matches: ModelCostTier[] = [];
+  for (const tier of cost.tiers ?? []) {
+    if (tier.inputTokensAbove < 0 || tier.inputTokensAbove > threshold) continue;
+    if (tier.inputTokensAbove > matchedThreshold) {
+      matchedThreshold = tier.inputTokensAbove;
+      matches = [tier];
+    } else if (tier.inputTokensAbove === matchedThreshold) {
+      // Pi uses the first duplicate threshold. Taking the per-field maximum is
+      // conservative if malformed catalog data supplies conflicting duplicates.
+      matches.push(tier);
+    }
+  }
+  if (matches.length === 0) return cost;
+  return {
+    input: Math.max(...matches.map((tier) => tier.input)),
+    output: Math.max(...matches.map((tier) => tier.output)),
+    cacheRead: Math.max(...matches.map((tier) => tier.cacheRead)),
+    cacheWrite: Math.max(...matches.map((tier) => tier.cacheWrite)),
+  };
+}
+
+// Builds the per-field upper envelope of complete request-wide price ladders.
+// Every source threshold is retained because crossing it can change which
+// deployment is most expensive, even when the ladders use different breakpoints.
+export function conservativeCostTiers(costs: readonly ModelCost[]): ModelCost["tiers"] {
+  const thresholds = [
+    ...new Set(
+      costs.flatMap((cost) =>
+        (cost.tiers ?? [])
+          .map((tier) => tier.inputTokensAbove)
+          .filter((threshold) => Number.isFinite(threshold) && threshold >= 0),
+      ),
+    ),
+  ].sort((left, right) => left - right);
+  if (thresholds.length === 0) return undefined;
+
+  return thresholds.map((inputTokensAbove) => {
+    const rates = costs.map((cost) => ratesAboveThreshold(cost, inputTokensAbove));
+    return {
+      inputTokensAbove,
+      input: Math.max(...rates.map((rate) => rate.input)),
+      output: Math.max(...rates.map((rate) => rate.output)),
+      cacheRead: Math.max(...rates.map((rate) => rate.cacheRead)),
+      cacheWrite: Math.max(...rates.map((rate) => rate.cacheWrite)),
+    };
+  });
+}
+
 export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
@@ -239,8 +291,15 @@ export function reduceModelGroup(
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
   if (hasCompleteCost && catalogProvider) {
-    const tiers = unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.cost?.tiers)));
-    if (tiers) cost.tiers = JSON.parse(tiers);
+    const deploymentCosts = deployments.map((_entry, index) => ({
+      input: costValues[0][index] as number,
+      output: costValues[1][index] as number,
+      cacheRead: costValues[2][index] as number,
+      cacheWrite: costValues[3][index] as number,
+      ...(catalogAuthority[index]?.cost?.tiers ? { tiers: catalogAuthority[index].cost.tiers } : {}),
+    }));
+    const tiers = conservativeCostTiers(deploymentCosts);
+    if (tiers) cost.tiers = tiers;
   }
   const catalogThinkingLevelMap = catalogProvider
     ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))

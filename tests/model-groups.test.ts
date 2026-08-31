@@ -596,63 +596,171 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup(rows, alternating)?.cost.tiers).toEqual(tiers);
   });
 
-  it("treats a reordered tier ladder as disagreement rather than as equal", () => {
-    // Tier order is semantic: the ladder is evaluated in sequence. Canonicalization
-    // sorts object KEYS but must not sort array ELEMENTS, or two different ladders
-    // would compare equal and one deployment's pricing would be adopted for both.
-    const ladder = [
-      { inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 },
-      { inputTokensAbove: 400_000, input: 9, output: 30, cacheRead: 0.9, cacheWrite: 11.25 },
+  it("merges different rates at identical tier thresholds conservatively regardless of order", () => {
+    const rows = ["a", "b"].map((id) =>
+      row({
+        model_info: {
+          id,
+          mode: "chat",
+          input_cost_per_token: undefined,
+          output_cost_per_token: undefined,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+      }),
+    );
+    const costs = [
+      {
+        input: 3,
+        output: 15,
+        cacheRead: 0.3,
+        cacheWrite: 3.75,
+        tiers: [{ inputTokensAbove: 200_000, input: 6, output: 20, cacheRead: 0.6, cacheWrite: 7.5 }],
+      },
+      {
+        input: 4,
+        output: 12,
+        cacheRead: 0.4,
+        cacheWrite: 4,
+        tiers: [{ inputTokensAbove: 200_000, input: 5, output: 22.5, cacheRead: 0.5, cacheWrite: 8 }],
+      },
     ];
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
-    const withLadder =
-      (value: typeof ladder): CatalogResolver =>
-      () => ({
+
+    for (const order of permutations(costs)) {
+      let call = 0;
+      const result = reduceModelGroup(rows, () => ({
         provider: "anthropic",
         reasoning: true,
         vision: true,
         contextWindow: 200_000,
         maxTokens: 64_000,
-        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: value },
+        cost: order[call++],
+      }));
+      expect(result).toMatchObject({
+        cost: {
+          input: 4,
+          output: 15,
+          cacheRead: 0.4,
+          cacheWrite: 4,
+          tiers: [{ inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 8 }],
+        },
+        hasCompleteCost: true,
+        hasCompleteMetadata: true,
       });
-
-    let call = 0;
-    const swapped: CatalogResolver = (entry, singleton) =>
-      withLadder(call++ === 0 ? ladder : [...ladder].reverse())(entry, singleton);
-    expect(reduceModelGroup(rows, swapped)?.cost.tiers).toBeUndefined();
-
-    // Identical ladders in identical order still adopt, so the check above is not
-    // simply rejecting every multi-element ladder.
-    expect(reduceModelGroup(rows, withLadder(ladder))?.cost.tiers).toEqual(ladder);
+    }
   });
 
-  it("withholds tiered pricing when deployments genuinely disagree", () => {
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
-    let call = 0;
-    const conflicting: CatalogResolver = () => ({
-      provider: "anthropic",
-      reasoning: true,
-      vision: true,
-      contextWindow: 200_000,
-      maxTokens: 64_000,
-      cost: {
+  it("constructs a safe piecewise envelope for different tier thresholds regardless of order", () => {
+    const rows = ["a", "b", "c"].map((id) =>
+      row({
+        model_info: {
+          id,
+          mode: "chat",
+          input_cost_per_token: undefined,
+          output_cost_per_token: undefined,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+      }),
+    );
+    const costs = [
+      {
         input: 3,
         output: 15,
         cacheRead: 0.3,
         cacheWrite: 3.75,
         tiers: [
-          {
-            inputTokensAbove: call++ === 0 ? 200_000 : 400_000,
-            input: 6,
-            output: 22.5,
-            cacheRead: 0.6,
-            cacheWrite: 7.5,
-          },
+          { inputTokensAbove: 200_000, input: 6, output: 18, cacheRead: 0.6, cacheWrite: 7.5 },
+          { inputTokensAbove: 500_000, input: 12, output: 36, cacheRead: 1.2, cacheWrite: 15 },
         ],
       },
+      {
+        input: 4,
+        output: 16,
+        cacheRead: 0.4,
+        cacheWrite: 4,
+        tiers: [{ inputTokensAbove: 400_000, input: 8, output: 32, cacheRead: 0.8, cacheWrite: 8 }],
+      },
+      { input: 5, output: 14, cacheRead: 0.5, cacheWrite: 5 },
+    ];
+    const expected = {
+      input: 5,
+      output: 16,
+      cacheRead: 0.5,
+      cacheWrite: 5,
+      tiers: [
+        { inputTokensAbove: 200_000, input: 6, output: 18, cacheRead: 0.6, cacheWrite: 7.5 },
+        { inputTokensAbove: 400_000, input: 8, output: 32, cacheRead: 0.8, cacheWrite: 8 },
+        { inputTokensAbove: 500_000, input: 12, output: 36, cacheRead: 1.2, cacheWrite: 15 },
+      ],
+    };
+
+    for (const order of permutations(costs)) {
+      let call = 0;
+      const result = reduceModelGroup(rows, () => ({
+        provider: "anthropic",
+        reasoning: true,
+        vision: true,
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        cost: order[call++],
+      }));
+      expect(result?.cost).toEqual(expected);
+      expect(result).toMatchObject({ hasCompleteCost: true, hasCompleteMetadata: true });
+    }
+  });
+
+  it("does not attach catalog tiers when base price evidence is incomplete", () => {
+    const rows = [
+      row({
+        model_info: {
+          id: "a",
+          mode: "chat",
+          input_cost_per_token: undefined,
+          output_cost_per_token: undefined,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+      }),
+      row({
+        model_info: {
+          id: "b",
+          mode: "chat",
+          input_cost_per_token: undefined,
+          output_cost_per_token: undefined,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+      }),
+    ];
+    let call = 0;
+    const result = reduceModelGroup(rows, () => {
+      const cost =
+        call++ === 0
+          ? {
+              input: 3,
+              output: 15,
+              cacheRead: 0.3,
+              cacheWrite: 3.75,
+              tiers: [{ inputTokensAbove: 200_000, input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5 }],
+            }
+          : undefined;
+      return {
+        provider: "anthropic",
+        reasoning: true,
+        vision: true,
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        cost,
+      };
     });
 
-    expect(reduceModelGroup(rows, conflicting)?.cost.tiers).toBeUndefined();
+    expect(result).toMatchObject({
+      hasCompleteCost: false,
+      hasCompleteMetadata: false,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result?.cost.tiers).toBeUndefined();
   });
 
   it("omits tiered pricing and thinking maps entirely when no catalog declares them", () => {
