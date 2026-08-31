@@ -8,6 +8,7 @@ import {
   type ProviderAuth,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { getApiProviders } from "@earendil-works/pi-ai/compat";
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
 import { createLiteLLMProtocolApis, isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
@@ -35,17 +36,17 @@ export function toNativeModels(
 }
 
 export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
-const PLACEHOLDER_HOSTS = new Set([new URL(DEFAULT_LITELLM_BASE_URL).host]);
+const PLACEHOLDER_HOSTNAMES = new Set([new URL(DEFAULT_LITELLM_BASE_URL).hostname]);
 
 function refreshRequired(message: string): Error {
   return new Error(`${message}; a network refresh with a valid LiteLLM base URL is required`);
 }
 
-function rootHost(baseUrl: string, subject: string): string {
+function rootUrl(baseUrl: string, subject: string): URL {
   try {
     const url = new URL(normalizeBaseUrl(baseUrl));
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
-    return url.host.toLowerCase();
+    return url;
   } catch {
     throw refreshRequired(`${subject} has an invalid LiteLLM model URL`);
   }
@@ -53,27 +54,48 @@ function rootHost(baseUrl: string, subject: string): string {
 
 function activeCredentialRoot(root: string): { root: string; host: string } {
   const normalized = normalizeBaseUrl(root);
-  const host = rootHost(normalized, "Active credentials");
-  if (PLACEHOLDER_HOSTS.has(host)) throw refreshRequired("Active credentials use a placeholder LiteLLM model host");
-  return { root: normalized, host };
+  const active = rootUrl(normalized, "Active credentials");
+  if (PLACEHOLDER_HOSTNAMES.has(active.hostname.toLowerCase())) {
+    throw refreshRequired("Active credentials use a placeholder LiteLLM model host");
+  }
+  return { root: normalized, host: active.host.toLowerCase() };
 }
 
 function modelHostError(model: Model<LiteLLMApi>, activeHost: string): Error | undefined {
   if (!isLiteLLMApi(model.api)) {
     return refreshRequired(`Cached model uses unsupported LiteLLM transport ${String(model.api)}`);
   }
-  let storedHost: string;
+  let stored: URL;
   try {
-    storedHost = rootHost(model.baseUrl, "Cached model");
+    stored = rootUrl(model.baseUrl, "Cached model");
   } catch (error) {
     return error instanceof Error ? error : refreshRequired("Cached model has an invalid LiteLLM model URL");
   }
-  if (PLACEHOLDER_HOSTS.has(storedHost)) return refreshRequired("Cached model uses a placeholder LiteLLM model host");
+  if (PLACEHOLDER_HOSTNAMES.has(stored.hostname.toLowerCase())) {
+    return refreshRequired("Cached model uses a placeholder LiteLLM model host");
+  }
+  const storedHost = stored.host.toLowerCase();
   if (storedHost !== activeHost) {
     return refreshRequired(
       `Cached model has stale LiteLLM model host ${storedHost}; active credentials use ${activeHost}`,
     );
   }
+}
+
+function withProtocolCapabilities(models: readonly Model<LiteLLMApi>[]): readonly Model<LiteLLMApi>[] {
+  const catalog = [...models];
+  Object.defineProperty(catalog, "some", {
+    value(
+      predicate: (model: Model<LiteLLMApi>, index: number, models: Model<LiteLLMApi>[]) => unknown,
+      thisArg?: unknown,
+    ): boolean {
+      if (Array.prototype.some.call(catalog, predicate, thisArg)) return true;
+      return getApiProviders().some(({ api }) =>
+        predicate.call(thisArg, { api } as Model<LiteLLMApi>, catalog.length, catalog),
+      );
+    },
+  });
+  return catalog;
 }
 
 function requestModel(
@@ -130,8 +152,12 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     api: createLiteLLMProtocolApis(),
   });
   const refreshModels = provider.refreshModels;
+  const getModels = provider.getModels;
   const guardedProvider: Provider<LiteLLMApi> = {
     ...provider,
+    // Pi 0.84's composer probes base API support with getModels().some(). Make every
+    // generic fallback reach this provider's guard without adding synthetic catalog entries.
+    getModels: () => withProtocolCapabilities(getModels()),
     stream: <T extends LiteLLMApi>(model: Model<T>, context: Context, requestOptions?: ApiStreamOptions<T>) =>
       provider.stream(
         requestModel(

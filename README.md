@@ -183,10 +183,6 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 
 Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
 
-## Credential-routing warning
-
-Pi's provider composer can send a configured model through a generic API implementation when this provider's current discovered catalog has no model using that API. That path does not run this provider's host guard, but it retains the selected provider's resolved API key and headers. Do not configure a model under `litellm` or a registered LiteLLM alias with a base URL that you would not trust with that provider's credentials. Keep each configured API represented in the proxy's discovered catalog, and inspect the effective model URL before sending sensitive prompts.
-
 ## LiteLLM Skill Hub
 
 If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills are fetched before each agent turn and appended to the system prompt as a `litellm_skills` section. The extension falls back to the legacy `/v1/skills` Skills Gateway path when Skill Hub is unavailable. It also registers Pi tools for basic skill management:

@@ -117,7 +117,7 @@ function resolveCredentialRoot(
 
 function requireCredentialRoot(root: string | undefined, providerName: string): string {
   if (!root) throw new Error(`no LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
-  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+  if (new URL(root).hostname.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).hostname.toLowerCase()) {
     throw new Error(`placeholder LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
   }
   return root;

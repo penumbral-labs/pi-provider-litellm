@@ -55,6 +55,9 @@ function harness(options: { configuredModels: ReturnType<typeof model>[]; discov
     });
   });
 
+  const listed = (options.discoveredApis ?? ["openai-completions"]).map((api, index) =>
+    model(`listed-${index}`, api, `${CREDENTIAL_ROOT}/v1`),
+  );
   const base = createLiteLLMProvider({
     id: "litellm",
     name: "LiteLLM",
@@ -67,13 +70,10 @@ function harness(options: { configuredModels: ReturnType<typeof model>[]; discov
         }),
       },
     },
+    models: listed as never,
     resolveCredentialRoot: () => CREDENTIAL_ROOT,
     discover: async () => ({ models: [discovered("chat")], source: "model_info" }),
   });
-  const listed = (options.discoveredApis ?? ["openai-completions"]).map((api, index) =>
-    model(`listed-${index}`, api, `${CREDENTIAL_ROOT}/v1`),
-  );
-  Object.defineProperty(base, "getModels", { value: () => listed, writable: true });
 
   const config = {
     getProvider: () => ({ models: options.configuredModels.map(({ id, api, baseUrl }) => ({ id, api, baseUrl })) }),
@@ -118,19 +118,35 @@ describe("dispatch routing through Pi's provider composer", () => {
     expect(wire).toEqual([]);
   });
 
-  // Pi currently delegates to this provider only when its discovered model list has a
-  // matching API. With no Responses model listed, the generic API path bypasses this
-  // provider's host guard while retaining its resolved auth. This canary must change as
-  // soon as Pi routes by provider-supported APIs instead of the current model list.
-  it("UPSTREAM GAP: retains provider auth when an unlisted API bypasses the LiteLLM guard", async () => {
+  it("runs the LiteLLM host guard when the configured API is absent from the catalog", async () => {
     const entry = model("configured-responses", "openai-responses", `${FOREIGN_ROOT}/v1`);
+    const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
+
+    const result = await models.complete(entry, { messages: [] });
+
+    expect(result.stopReason).toBe("error");
+    expect(wire).toEqual([]);
+  });
+
+  it("rejects an unsupported configured API before generic dispatch", async () => {
+    const entry = model("configured-google", "google-generative-ai", FOREIGN_ROOT);
+    const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
+
+    const result = await models.complete(entry, { messages: [] });
+
+    expect(result.stopReason).toBe("error");
+    expect(wire).toEqual([]);
+  });
+
+  it("routes an unlisted supported API to the active LiteLLM host", async () => {
+    const entry = model("configured-responses", "openai-responses", `${CREDENTIAL_ROOT}/v1`);
     const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
 
     await models.complete(entry, { messages: [] });
 
     expect(wire).toEqual([
       {
-        url: `${FOREIGN_ROOT}/v1/responses`,
+        url: `${CREDENTIAL_ROOT}/v1/responses`,
         authorization: `Bearer ${CANARY_CREDENTIAL}`,
         tenant: "canary-tenant",
       },

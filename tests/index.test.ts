@@ -673,6 +673,25 @@ describe("extension startup", () => {
     expect(vi.mocked(globalThis.fetch).mock.calls.every(([url]) => !String(url).endsWith("/model/info"))).toBe(true);
   });
 
+  it("rejects OAuth placeholder base URLs on non-default ports", async () => {
+    delete process.env.LITELLM_BASE_URL;
+    delete process.env.LITELLM_API_KEY;
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      pi.providers[0]?.auth.oauth?.toAuth({
+        type: "oauth",
+        access: "sk-oauth",
+        refresh: "",
+        expires: Number.MAX_SAFE_INTEGER,
+        baseUrl: "https://litellm.example.com:8443",
+      }),
+    ).rejects.toThrow(/placeholder LiteLLM base URL/);
+  });
+
   it("uses the OAuth credential base URL when ambient configuration is unset", async () => {
     delete process.env.LITELLM_BASE_URL;
     delete process.env.LITELLM_API_KEY;

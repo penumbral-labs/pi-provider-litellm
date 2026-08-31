@@ -210,6 +210,17 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
+  it("advertises registered API protocols without adding models to the catalog", () => {
+    const value = controller({ models: [native("listed")] });
+
+    expect(value.getModels().map((model) => model.id)).toEqual(["listed"]);
+    expect(
+      ["anthropic-messages", "google-generative-ai", "openai-completions", "openai-responses"].every((api) =>
+        value.getModels().some((model) => model.api === api),
+      ),
+    ).toBe(true);
+  });
+
   it("reprojects matching cached hosts and rejects stale or placeholder hosts", () => {
     const baseModel = discovered("model").models[0];
     const models = toNativeModels("litellm", "https://proxy.example", [
@@ -226,8 +237,16 @@ describe("createLiteLLMProvider", () => {
     const stale = controller({ resolveCredentialRoot: () => "https://other.example" });
     expect(stale.filterModels?.(models, credential)).toEqual([]);
 
-    const placeholder = controller({ resolveCredentialRoot: () => "https://litellm.example.com" });
+    const placeholder = controller({ resolveCredentialRoot: () => "https://litellm.example.com:8443" });
     expect(placeholder.filterModels?.(models, credential)).toEqual([]);
+  });
+
+  it("blocks placeholder cached hosts on non-default ports before protocol dispatch", () => {
+    const value = controller();
+    const model = { ...native("placeholder"), baseUrl: "https://litellm.example.com:8443/v1" };
+
+    expect(() => value.stream(model, { messages: [] })).toThrow(/placeholder LiteLLM model host.*network refresh/i);
+    expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
   it("blocks stale hosts before protocol dispatch", () => {
