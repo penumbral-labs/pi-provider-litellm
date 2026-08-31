@@ -76,6 +76,20 @@ describe("pi package compatibility", () => {
   });
 });
 
+describe("deployment group documentation", () => {
+  it("documents conservative tier envelopes and evidence-free wildcard expansions", async () => {
+    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
+
+    expect(readme).toContain("tiered pricing is the conservative worst-case envelope");
+    expect(readme).toContain("sorted union of every deployment's thresholds");
+    expect(readme).toContain("maximum applicable rate across all deployments");
+    expect(readme).toContain("Tier ladders are intentionally omitted");
+    expect(readme).toContain("ids returned during wildcard expansion that match no surviving wildcard group");
+    expect(readme).toContain("A matched wildcard expansion");
+    expect(readme).not.toContain("all matching groups use compatible thresholds");
+  });
+});
+
 describe("dependency security overrides", () => {
   it("keeps vulnerable transitive dependencies above alerted ranges", async () => {
     const lockfile = JSON.parse(await readFile("package-lock.json", "utf8")) as {
