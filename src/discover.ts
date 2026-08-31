@@ -419,6 +419,24 @@ function intersectThinkingLevelMaps(
   return Object.keys(intersection).length > 0 ? intersection : undefined;
 }
 
+function compatibleCostTiers(models: readonly DiscoveredModel[]): DiscoveredModel["cost"]["tiers"] {
+  const tierLists = models.map((model) => model.cost.tiers);
+  const first = tierLists[0];
+  if (!first || tierLists.some((tiers) => !tiers || tiers.length !== first.length)) return undefined;
+  if (
+    tierLists.some((tiers) => tiers?.some((tier, index) => tier.inputTokensAbove !== first[index]?.inputTokensAbove))
+  ) {
+    return undefined;
+  }
+  return first.map((tier, index) => ({
+    inputTokensAbove: tier.inputTokensAbove,
+    input: Math.max(...tierLists.map((tiers) => tiers?.[index]?.input ?? 0)),
+    output: Math.max(...tierLists.map((tiers) => tiers?.[index]?.output ?? 0)),
+    cacheRead: Math.max(...tierLists.map((tiers) => tiers?.[index]?.cacheRead ?? 0)),
+    cacheWrite: Math.max(...tierLists.map((tiers) => tiers?.[index]?.cacheWrite ?? 0)),
+  }));
+}
+
 function mapFromWildcardExpansion(
   entry: ModelsListEntry,
   wildcards: readonly DiscoveredModel[],
@@ -434,6 +452,7 @@ function mapFromWildcardExpansion(
   const contextWindow = Math.min(...matches.map((model) => model.contextWindow));
   const maxTokens = Math.min(...matches.map((model) => model.maxTokens));
   const thinkingLevelMap = intersectThinkingLevelMaps(matches);
+  const costTiers = compatibleCostTiers(matches);
   const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
   return {
     id,
@@ -446,6 +465,7 @@ function mapFromWildcardExpansion(
       output: Math.max(...matches.map((model) => model.cost.output)),
       cacheRead: Math.max(...matches.map((model) => model.cost.cacheRead)),
       cacheWrite: Math.max(...matches.map((model) => model.cost.cacheWrite)),
+      ...(costTiers ? { tiers: costTiers } : {}),
     },
     contextWindow,
     maxTokens,
@@ -496,7 +516,9 @@ export async function discoverModels(
       const wildcards = wildcardRoutes
         .map(({ model }) => model)
         .filter((model): model is DiscoveredModel => model !== undefined);
-      const droppedWildcards = wildcardRoutes.filter(({ model }) => model === undefined).map(({ route }) => route);
+      const droppedRoutes = reducedGroups.filter(({ model }) => model === undefined).map(({ route }) => route);
+      const droppedExactIds = new Set(droppedRoutes.filter((route) => !route.includes("*")));
+      const droppedWildcards = droppedRoutes.filter((route) => route.includes("*"));
       // A wildcard row is not addressable. Remove it before expansion so a failed
       // `/v1/models` request cannot leak the literal wildcard into the selector.
       models = models.filter((model) => !model.id.includes("*"));
@@ -506,7 +528,10 @@ export async function discoverModels(
         const expanded = (listResult.data.data ?? [])
           .filter((entry) => {
             const id = wireString(entry.id);
-            return id === undefined || !droppedWildcards.some((route) => wildcardMatches(route, id));
+            return (
+              id === undefined ||
+              (!droppedExactIds.has(id) && !droppedWildcards.some((route) => wildcardMatches(route, id)))
+            );
           })
           .map((entry) => mapFromWildcardExpansion(entry, wildcards))
           .filter((model): model is DiscoveredModel => model !== undefined);

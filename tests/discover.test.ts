@@ -1292,6 +1292,80 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     );
   });
 
+  it("preserves tiered pricing from a single wildcard match", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team/*",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "wildcard", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.cost.tiers).toEqual([
+      { inputTokensAbove: 272_000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 },
+    ]);
+  });
+
+  it("combines compatible tiered pricing across overlapping wildcard matches conservatively", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "*",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "broad", mode: "chat" },
+            },
+            {
+              model_name: "team/*",
+              litellm_params: { model: "openai/gpt-5.5-pro" },
+              model_info: { id: "narrow", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.cost.tiers).toEqual([
+      { inputTokensAbove: 272_000, input: 60, output: 270, cacheRead: 1, cacheWrite: 0 },
+    ]);
+  });
+
+  it("omits tiered pricing when overlapping wildcard thresholds are incompatible", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "*",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "broad", mode: "chat" },
+            },
+            {
+              model_name: "team/*",
+              litellm_params: { model: "github-copilot/gemini-3.1-pro-preview" },
+              model_info: { id: "narrow", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.cost.tiers).toBeUndefined();
+  });
+
   it("combines overlapping wildcard metadata conservatively regardless of route order", async () => {
     const broad = {
       model_name: "*",
@@ -1357,6 +1431,26 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       ]);
     }
   });
+
+  it.each(["team/*", "*"])(
+    "keeps a dropped concrete group from being re-admitted through %s expansion",
+    async (wildcardRoute) => {
+      mockEndpoints({
+        "/model/info": () =>
+          jsonResponse(200, {
+            data: [
+              { model_name: wildcardRoute, model_info: { id: "wildcard", mode: "chat" } },
+              { model_name: "team/embed", model_info: { id: "embedding", mode: "embedding" } },
+            ],
+          }),
+        "/v1/models": () => jsonResponse(200, { data: [{ id: "team/chat" }, { id: "team/embed" }] }),
+      });
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models.map((model) => model.id)).toEqual(["team/chat"]);
+    },
+  );
 
   it("keeps a deliberately dropped wildcard group from being re-admitted", async () => {
     mockEndpoints({
