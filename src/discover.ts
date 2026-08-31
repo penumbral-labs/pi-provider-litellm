@@ -420,6 +420,8 @@ function intersectThinkingLevelMaps(
 }
 
 function compatibleCostTiers(models: readonly DiscoveredModel[]): DiscoveredModel["cost"]["tiers"] {
+  // This reducer combines only identical thresholds; incompatible tier ladders
+  // are intentionally omitted.
   const tierLists = models.map((model) => model.cost.tiers);
   const first = tierLists[0];
   if (!first || tierLists.some((tiers) => !tiers || tiers.length !== first.length)) return undefined;
@@ -517,6 +519,8 @@ export async function discoverModels(
         .map(({ model }) => model)
         .filter((model): model is DiscoveredModel => model !== undefined);
       const droppedRoutes = reducedGroups.filter(({ model }) => model === undefined).map(({ route }) => route);
+      // Exact exclusions are bounded to the same public id: `/v1/models` lacks
+      // deployment identity, so a differently named id for that deployment is unknowable.
       const droppedExactIds = new Set(droppedRoutes.filter((route) => !route.includes("*")));
       const droppedWildcards = droppedRoutes.filter((route) => route.includes("*"));
       // A wildcard row is not addressable. Remove it before expansion so a failed
