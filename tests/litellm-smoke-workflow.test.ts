@@ -142,6 +142,10 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("AbortSignal.timeout(3000)");
     expect(workflow).toContain("grouped deployment is missing supported_openai_params");
     expect(workflow).toContain("grouped deployment is missing allowed_openai_params");
+    expect(workflow).toContain("ids.size !== rows.length");
+    expect(workflow).toContain('modes.size !== 2 || !modes.has("chat") || !modes.has("responses")');
+    expect(workflow).toContain("grouped deployments must preserve unique model_info.id values");
+    expect(workflow).toContain("grouped deployments must preserve exactly chat and responses modes");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
