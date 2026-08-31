@@ -67,6 +67,8 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
 }
 
 export function responsesCompat(modelId: string): DiscoveredModelFor<"openai-responses">["compat"] {
+  // Pi's Responses transport has no cacheControlFormat setting and uses
+  // Responses-native prompt-cache fields instead of Anthropic cache_control markers.
   return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
 }
 

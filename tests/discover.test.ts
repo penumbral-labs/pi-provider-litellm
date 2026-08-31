@@ -57,6 +57,16 @@ describe("modelProtocol", () => {
       api: "openai-responses",
       compat: undefined,
     });
+    for (const id of ["anthropic/claude-sonnet-4-6", "sonnet-4.6"]) {
+      expect(modelProtocol(id, "chat")).toEqual({
+        api: "openai-completions",
+        compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+      });
+      expect(modelProtocol(id, "responses")).toEqual({
+        api: "openai-responses",
+        compat: undefined,
+      });
+    }
     expect(modelProtocol("moonshotai/kimi-k2", "responses")).toEqual({
       api: "openai-responses",
       compat: { supportsDeveloperRole: false },
@@ -436,7 +446,7 @@ describe("discoverModels response-mode models", () => {
     expect(result.models.some((model) => model.api === "anthropic-messages")).toBe(false);
   });
 
-  it("keeps /model/info response-mode models with a Responses API override", async () => {
+  it("keeps /model/info response-mode models with Responses-specific compatibility", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) {
@@ -450,6 +460,8 @@ describe("discoverModels response-mode models", () => {
                 max_output_tokens: 128000,
               },
             },
+            { model_name: "anthropic/claude-sonnet-4-6", model_info: { mode: "responses" } },
+            { model_name: "sonnet-4.6", model_info: { mode: "responses" } },
           ],
         });
       }
@@ -459,13 +471,19 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("model_info");
-    expect(result.models).toHaveLength(1);
+    expect(result.models).toHaveLength(3);
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.3-codex-openai",
       api: "openai-responses",
       contextWindow: 272000,
       maxTokens: 128000,
     });
+    for (const id of ["anthropic/claude-sonnet-4-6", "sonnet-4.6"]) {
+      expect(result.models.find((model) => model.id === id)).toMatchObject({
+        api: "openai-responses",
+        compat: undefined,
+      });
+    }
   });
 
   it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
