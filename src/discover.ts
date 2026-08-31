@@ -617,7 +617,9 @@ function healthDeployment(
     return {
       entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
       allowRouteCatalogFallback: true,
-      denyLevels: false,
+      // Route text may enrich display metadata, but without deployment detail
+      // there is no backend evidence authorizing a reasoning control carrier.
+      denyLevels: true,
       endpointOnly: true,
     };
   }

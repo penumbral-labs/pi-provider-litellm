@@ -1314,10 +1314,6 @@ describe("discoverModels via /model/info", () => {
         { model_name: "conflicting-route", model_info: { id: "same", mode: "chat" } },
         { model_name: "conflicting-route", model_info: { id: "same", mode: "chat", max_input_tokens: 8_000 } },
       ],
-      [
-        { model_name: "embedding-sibling-route", model_info: { id: "chat", mode: "chat" } },
-        { model_name: "embedding-sibling-route", model_info: { id: "embed", mode: "embedding" } },
-      ],
     ];
 
     for (const data of groups) {
@@ -1493,31 +1489,25 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics[0]).toContain("partial-evidence");
   });
 
-  it("keeps catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
-    // An embedding sibling votes on transport but is not a deployment, so the group
-    // is still a singleton and its route name remains a usable catalog hint. If the
-    // count were taken before the mode filter, this route would lose its metadata.
+  it.each([
+    ["chat first", "chat", "embedding"],
+    ["embedding first", "embedding", "chat"],
+    ["Responses first", "responses", "embedding"],
+    ["embedding before Responses", "embedding", "responses"],
+  ])("withholds a mixed chat-style and incompatible route with $0", async (_case, firstMode, secondMode) => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
-            { model_name: "openai/gpt-5.5", model_info: { id: "chat", mode: "chat" } },
-            { model_name: "openai/gpt-5.5", model_info: { id: "embed", mode: "embedding" } },
+            { model_name: "mixed-route", model_info: { id: "first", mode: firstMode } },
+            { model_name: "mixed-route", model_info: { id: "second", mode: secondMode } },
           ],
         }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models).toHaveLength(1);
-    expect(result.models[0]).toMatchObject({
-      id: "openai/gpt-5.5",
-      name: "openai/gpt-5.5",
-      reasoning: true,
-      contextWindow: 272_000,
-      api: "openai-completions",
-    });
-    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+    expect(result.models).toEqual([]);
   });
 
   it("stays silent when provider identity is unanimous or wholly unknown", async () => {
@@ -1724,14 +1714,15 @@ describe("discoverModels response-mode models", () => {
     expect(result.source).toBe("health");
     expect(result.models[0]).toMatchObject({ id: "openai/gpt-5.5", reasoning: true });
     expect(result.models[0]?.thinkingLevelMap).toEqual({
-      off: "none",
+      off: null,
       minimal: null,
-      low: "low",
-      medium: "medium",
-      high: "high",
-      xhigh: "xhigh",
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
       max: null,
     });
+    expect(result.models[0]?.compat).not.toMatchObject({ supportsReasoningEffort: true });
   });
 });
 

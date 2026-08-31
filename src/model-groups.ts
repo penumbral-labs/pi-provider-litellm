@@ -541,12 +541,12 @@ export function reduceModelGroup(
   // the reducer prevents any caller from leaking malformed wire data into ids.
   const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
   if (candidates.length === 0) return undefined;
-  // Transport votes over every candidate row, so an unsupported sibling still
-  // forces Chat; capability, limit, price, and identity evidence reduces only
-  // over routable rows so a non-chat sibling cannot corrupt them.
+  // Every deployment behind a public route must accept a chat-style request.
+  // Dropping an explicitly incompatible sibling would publish a route that can
+  // still be selected for an embedding or other non-chat deployment.
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
-  const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
-  if (deployments.length === 0) return undefined;
+  if (candidateModes.includes("unsupported")) return undefined;
+  const deployments = candidates;
   const singleton = deployments.length === 1;
   const catalogs = deployments.map((entry) => resolveCatalog(entry, singleton));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));

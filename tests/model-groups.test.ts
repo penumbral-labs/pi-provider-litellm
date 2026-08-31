@@ -335,46 +335,34 @@ describe("reduceModelGroup", () => {
     ).toMatchObject({ api: "openai-responses", acceptsResponsesReasoningControl: true });
   });
 
-  it("lets unsupported transport evidence force Chat without affecting metadata", () => {
-    const responses = row({ model_info: { id: "responses", mode: "responses" } });
-    const unsupported = row({
-      model_info: { id: "embed", mode: "embedding", max_input_tokens: 1, max_output_tokens: 1 },
-      litellm_params: { model: "internal/embedding" },
-    });
+  it.each([
+    ["chat first", "chat", "embedding"],
+    ["embedding first", "embedding", "chat"],
+    ["Responses first", "responses", "embedding"],
+    ["embedding before Responses", "embedding", "responses"],
+  ])("rejects a mixed chat-style and unsupported group with $0", (_case, firstMode, secondMode) => {
+    const deployment = (id: string, mode: string) =>
+      row({
+        model_info: { id, mode },
+        litellm_params: { model: `internal/${id}` },
+      });
 
-    expect(reduceModelGroup([responses, unsupported], resolveCatalog)).toMatchObject({
-      api: "openai-completions",
-      contextWindow: 200_000,
-      maxTokens: 32_000,
-    });
+    expect(
+      reduceModelGroup([deployment("first", firstMode), deployment("second", secondMode)], resolveCatalog),
+    ).toBeUndefined();
   });
 
-  it("falls back to Chat without reducing metadata from unsupported rows", () => {
-    const result = reduceModelGroup(
-      [
-        row(),
-        row({
-          model_info: {
-            id: "embed",
-            mode: "embedding",
-            max_input_tokens: 8_000,
-            max_output_tokens: 1,
-            input_cost_per_token: undefined,
-          },
-          litellm_params: { model: "internal/embedding" },
-        }),
-      ],
-      resolveCatalog,
+  it.each(["chat", "response", "responses"])("retains a pure %s group", (mode) => {
+    const deployments = ["first", "second"].map((id) =>
+      row({
+        model_info: { id, mode },
+        litellm_params: { model: `internal/${id}` },
+      }),
     );
-    expect(result).toMatchObject({
-      api: "openai-completions",
 
-      // The embedding row votes on transport but does not reduce metadata.
-
-      contextWindow: 200_000,
-      maxTokens: 32_000,
-      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-    });
+    expect(reduceModelGroup(deployments, resolveCatalog)?.api).toBe(
+      mode === "chat" ? "openai-completions" : "openai-responses",
+    );
   });
 
   it("ignores limits that are not finite positive token counts", () => {
@@ -442,8 +430,8 @@ describe("reduceModelGroup", () => {
       contextWindow: 8_000,
       api: "openai-completions",
     });
-    // Genuinely non-chat: excluded from metadata, and only votes on transport.
-    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toMatchObject({ contextWindow: 200_000 });
+    // Genuinely non-chat: rejects the entire mixed route.
+    expect(reduceModelGroup([roomy, embedding], resolveCatalog)).toBeUndefined();
 
     // A lone unreadable row is surfaced conservatively rather than silently hidden.
     expect(reduceModelGroup([unreadable], resolveCatalog)).toMatchObject({
