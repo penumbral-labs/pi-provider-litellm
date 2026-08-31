@@ -2008,33 +2008,59 @@ describe("discoverModels fallback to /health", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
-  it("reports completed health detail requests rather than endpoint indexes", async () => {
+  it("bounds health detail concurrency while preserving endpoint order and completion progress", async () => {
     const endpoints = Array.from({ length: 11 }, (_, index) => ({
       model: `model-${index + 1}`,
       model_id: `uuid-${index + 1}`,
     }));
-    const pending: Array<(response: Response) => void> = [];
+    const pending = new Map<string, () => void>();
     const progress = vi.fn();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    let active = 0;
+    let maxActive = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return Promise.resolve(new Response(null, { status: 404 }));
       if (url.endsWith("/v1/models")) return Promise.resolve(new Response(null, { status: 404 }));
       if (url.endsWith("/health")) return Promise.resolve(jsonResponse(200, { healthy_endpoints: endpoints }));
-      if (url.endsWith("uuid-11")) {
-        return Promise.resolve(jsonResponse(200, { data: [{ model_name: "model-11", model_info: { mode: "chat" } }] }));
-      }
-      return new Promise<Response>((resolve) => pending.push(resolve));
+      const deploymentId = new URL(url).searchParams.get("litellm_model_id");
+      if (!deploymentId) throw new Error(`unexpected URL: ${url}`);
+      const modelNumber = deploymentId.slice("uuid-".length);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      return new Promise<Response>((resolve) => {
+        pending.set(deploymentId, () => {
+          active--;
+          resolve(jsonResponse(200, { data: [{ model_name: `model-${modelNumber}`, model_info: { mode: "chat" } }] }));
+        });
+      });
     });
+    const release = (deploymentId: string): void => {
+      const resolve = pending.get(deploymentId);
+      if (!resolve) throw new Error(`${deploymentId} is not pending`);
+      pending.delete(deploymentId);
+      resolve();
+    };
 
     const discovery = discoverModels("https://litellm.example.com", "sk-test", { onProgress: progress });
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(14));
-    const reportedBeforeCompletion = progress.mock.calls.some(([message]) => message === "Fetched 11/11 models...");
-    for (const [index, resolve] of pending.entries()) {
-      resolve(jsonResponse(200, { data: [{ model_name: `model-${index + 1}`, model_info: { mode: "chat" } }] }));
-    }
-    await discovery;
+    await vi.waitFor(() => expect([...pending.keys()]).toEqual(endpoints.slice(0, 8).map(({ model_id }) => model_id)));
+    expect(maxActive).toBe(8);
 
-    expect(reportedBeforeCompletion).toBe(false);
+    release("uuid-8");
+    await vi.waitFor(() => expect(pending.has("uuid-9")).toBe(true));
+    release("uuid-7");
+    await vi.waitFor(() => expect(pending.has("uuid-10")).toBe(true));
+    release("uuid-6");
+    await vi.waitFor(() => expect(pending.has("uuid-11")).toBe(true));
+    expect(progress).not.toHaveBeenCalledWith("Fetched 10/11 models...");
+    expect(maxActive).toBe(8);
+
+    for (const deploymentId of ["uuid-11", "uuid-10", "uuid-9", "uuid-5", "uuid-4", "uuid-3", "uuid-2", "uuid-1"]) {
+      release(deploymentId);
+    }
+    const result = await discovery;
+
+    expect(result.models.map((model) => model.id)).toEqual(endpoints.map(({ model }) => model));
+    expect(progress).toHaveBeenCalledWith("Fetched 10/11 models...");
     expect(progress).toHaveBeenCalledWith("Fetched 11/11 models...");
   });
 

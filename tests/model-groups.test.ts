@@ -133,7 +133,9 @@ describe("toResponsesLevels", () => {
   ])("never widens Responses beyond Chat for $name", ({ levels, expected }) => {
     expect(toResponsesLevels(levels)).toEqual(expected);
   });
+});
 
+describe("closeSerializerPolicy", () => {
   it("keeps Chat and Responses closed when vendor compatibility denies reasoning effort", () => {
     const input = {
       reasoning: true,

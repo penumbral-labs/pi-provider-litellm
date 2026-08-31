@@ -28,6 +28,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const HEALTH_DETAIL_CONCURRENCY = 8;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 export function normalizeBaseUrl(input: string): string {
   const url = new URL(input);
@@ -677,8 +678,12 @@ async function discoverFromHealth(
   );
   progress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
   let completed = 0;
-  const deployments = await Promise.all(
-    endpoints.map(async (endpoint) => {
+  let next = 0;
+  const deployments: (HealthDeployment | undefined)[] = new Array(endpoints.length);
+  const worker = async (): Promise<void> => {
+    while (next < endpoints.length) {
+      const index = next++;
+      const endpoint = endpoints[index];
       const route = wireString(endpoint.model)?.trim() || undefined;
       const deploymentId = wireString(endpoint.model_id)?.trim() || undefined;
       let detail: ModelInfoEntry | undefined;
@@ -694,9 +699,10 @@ async function discoverFromHealth(
       if (completed % 10 === 0 || completed === endpoints.length) {
         progress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
-      return healthDeployment(detail, route, deploymentId);
-    }),
-  );
+      deployments[index] = healthDeployment(detail, route, deploymentId);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HEALTH_DETAIL_CONCURRENCY, endpoints.length) }, () => worker()));
   const groups = new Map<string, HealthDeployment[]>();
   for (const deployment of deployments) {
     const route = wireString(deployment?.entry.model_name);
