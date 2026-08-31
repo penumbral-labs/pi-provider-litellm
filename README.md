@@ -206,7 +206,7 @@ Instead, the whole supplied document is walked — every key and every value —
 
 Every raw entry the proxy returns is accounted for exactly once, and the counts reconcile: `raw = prepared + dropped + beyond-the-cap`, where *prepared* is what will be registered. If a registration pass is refused partway, the shortfall between prepared and registered is reported separately by that pass's own diagnostic. A tool is **dropped** for one of four reasons — `invalid-tool` (no usable name or server identity), `duplicate-identity`, `invalid-schema`, or `name-collision` — or discarded for being beyond the 512-tool limit (`tool-cap`). A tool is **degraded** rather than dropped under `schema-envelope`. Each class is reported to stderr on its own line with a count and a bounded sample of names, for example:
 
-```
+```text
 LiteLLM MCP: kept 2 MCP tools but replaced their schema with a safe args envelope, because of a schema that could not be proven free of proxy-supplied regexes or references: mcp_srv_lookup_1c97861c1f, mcp_srv_matcher_3ee4c31a5a.
 LiteLLM MCP: dropped 1 MCP tool with a missing name or server identity: entry_3.
 ```
