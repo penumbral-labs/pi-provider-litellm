@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogResolution, type CatalogResolver, reduceModelGroup } from "../src/model-groups.js";
+import {
+  type CatalogResolution,
+  type CatalogResolver,
+  conservativeCostTiers,
+  reduceModelGroup,
+} from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
 const catalog = new Map<string, CatalogResolution>([
@@ -71,6 +76,46 @@ function permutations<T>(values: readonly T[]): T[][] {
     permutations([...values.slice(0, index), ...values.slice(index + 1)]).map((rest) => [value, ...rest]),
   );
 }
+
+describe("conservativeCostTiers", () => {
+  it("takes the per-field maximum from duplicate thresholds in one ladder", () => {
+    const cost = {
+      input: 1,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 4,
+      tiers: [
+        { inputTokensAbove: 100, input: 10, output: 2, cacheRead: 30, cacheWrite: 4 },
+        { inputTokensAbove: 100, input: 1, output: 20, cacheRead: 3, cacheWrite: 40 },
+      ],
+    };
+
+    expect(conservativeCostTiers([cost])).toEqual([
+      { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 30, cacheWrite: 40 },
+    ]);
+  });
+
+  it.each([
+    ["negative", -1],
+    ["not a number", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+  ])("ignores a %s tier threshold", (_case, invalidThreshold) => {
+    const cost = {
+      input: 1,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 4,
+      tiers: [
+        { inputTokensAbove: invalidThreshold, input: 100, output: 200, cacheRead: 300, cacheWrite: 400 },
+        { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 30, cacheWrite: 40 },
+      ],
+    };
+
+    expect(conservativeCostTiers([cost])).toEqual([
+      { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 30, cacheWrite: 40 },
+    ]);
+  });
+});
 
 describe("reduceModelGroup", () => {
   it("is permutation invariant for heterogeneous deployment evidence", () => {
