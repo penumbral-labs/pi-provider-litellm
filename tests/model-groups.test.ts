@@ -1068,6 +1068,29 @@ describe("reduceModelGroup", () => {
     expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
   });
 
+  it.each([
+    { name: "Claude", model: "anthropic/claude-sonnet-4-6" },
+    { name: "OpenAI", model: "openai/gpt-4o" },
+  ])("does not normalize think tags for a mixed Kimi/$name route", ({ model }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "mixed-family-route",
+          litellm_params: { model: "moonshot/kimi-k2.6" },
+          model_info: { id: "kimi", supports_reasoning: true },
+        }),
+        row({
+          model_name: "mixed-family-route",
+          litellm_params: { model },
+          model_info: { id: "other", supports_reasoning: true },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result).toMatchObject({ normalizeThinkTags: false, suppressReasoningVisibility: false });
+  });
+
   it("lets explicit unanimous reasoning denial override the K2.7 Code contract", () => {
     const result = reduceModelGroup(
       [

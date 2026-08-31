@@ -1001,7 +1001,7 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]?.litellmPolicy).toMatchObject({
       normalizeStrictToolMessages: false,
-      normalizeThinkTags: true,
+      normalizeThinkTags: false,
     });
     expect(writes.filter((line) => line.includes("strict tool-message repair is withheld"))).toHaveLength(1);
     expect(writes.join("\n")).toContain("internal/mixed-tool-route");

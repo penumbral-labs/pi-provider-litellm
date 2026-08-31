@@ -605,7 +605,7 @@ export function reduceModelGroup(
   const acceptedOpenAIParams = intersectParams(deployments);
   const acceptsResponsesReasoningControl = acceptedOpenAIParams.includes("reasoning_effort");
   const kimiEvidence = deployments.map((entry) => kimiDeploymentEvidence(entry));
-  const noForcedThinking = kimiEvidence.every((evidence) => !evidence.forcedThinking);
+  const unanimousNormalKimi = kimiEvidence.every((evidence) => evidence.identified && !evidence.forcedThinking);
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
@@ -625,8 +625,8 @@ export function reduceModelGroup(
     ...(semanticModel ? { semanticModel } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     deploymentFamilies: catalogs.map((catalog) => catalog?.semanticFamily),
-    normalizeThinkTags: kimiEvidence.some((evidence) => evidence.identified) && noForcedThinking,
-    suppressReasoningVisibility: kimiEvidence.every((evidence) => evidence.identified) && noForcedThinking,
+    normalizeThinkTags: unanimousNormalKimi,
+    suppressReasoningVisibility: unanimousNormalKimi,
     acceptedOpenAIParams,
     reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
   };
