@@ -2241,6 +2241,34 @@ describe("upstream assumptions the guard depends on", () => {
     expect(envelopeBuilt).toContain("^args$");
   });
 
+  it("coerces supported primitive values and honors extra-property constraints", async () => {
+    const { validateToolArguments } = await import("../node_modules/@earendil-works/pi-ai/dist/utils/validation.js");
+    const validate = (parameters: unknown, args: unknown) =>
+      validateToolArguments({ name: "probe", parameters } as never, { name: "probe", arguments: args } as never);
+
+    const typed = await registeredParametersFor({
+      type: "object",
+      properties: { n: { type: "number" } },
+      required: ["n"],
+    });
+    expect(validate(typed, { n: "42" })).toEqual({ n: 42 });
+    expect(() => validate(typed, { n: "not-a-number" })).toThrow();
+
+    for (const constraint of [{ additionalProperties: false }, { unevaluatedProperties: false }]) {
+      const constrained = await registeredParametersFor({
+        type: "object",
+        properties: { known: { type: "string" } },
+        ...constraint,
+      });
+      expect(() => validate(constrained, { known: "yes", extra: true })).toThrow();
+    }
+
+    const typedExtras = await registeredParametersFor({ type: "object", additionalProperties: { type: "number" } });
+    expect(validate(typedExtras, { extra: "7" })).toEqual({ extra: 7 });
+    const unconstrained = await registeredParametersFor({ type: "object" });
+    expect(validate(unconstrained, { extra: true })).toEqual({ extra: true });
+  });
+
   it("evaluates `format` on a passthrough schema, so its regexes are library-supplied and not inert", async () => {
     // Recorded deliberately: `format` is a proxy-chosen selector of typebox's own regexes, executed
     // against model-supplied strings. The shipped formats are well-anchored, so this is a residual

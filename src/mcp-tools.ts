@@ -967,8 +967,8 @@ export function prepareTools(discovery: McpDiscovery): {
     report: {
       discovered: discovery.raw,
       prepared: prepared.length,
-      // Counting only hazard degradations would tell an operator that schemaless tools have a
-      // Pi-side argument contract when they do not.
+      // Counting only hazard degradations would tell an operator that schemaless tools retain a
+      // proxy-specific argument contract; they have only the extension-owned args-envelope shape.
       enveloped: prepared.filter((tool) => tool.syntheticArgsEnvelope).length,
       overflow: overflowTools.length,
       overflowTools,
