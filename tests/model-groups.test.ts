@@ -436,6 +436,23 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: false,
       cost: { input: 4, output: 0, cacheRead: 0.3, cacheWrite: 3.75 },
     });
+
+    const negative = row({
+      model_info: {
+        id: "negative",
+        mode: "chat",
+        input_cost_per_token: -0.000004,
+        output_cost_per_token: -0.00002,
+        cache_read_input_token_cost: -0.0000004,
+        cache_creation_input_token_cost: -0.000004,
+      },
+      litellm_params: { model: "internal/unknown" },
+    });
+    expect(reduceModelGroup([negative], resolveCatalog)).toMatchObject({
+      hasCompleteCost: false,
+      hasCompleteMetadata: false,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
   });
 
   it("retains proven display prices and zeroes only unresolved fields without catalog authority", () => {

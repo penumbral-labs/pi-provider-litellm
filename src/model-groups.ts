@@ -160,7 +160,7 @@ function explicitCost(entry: ModelInfoEntry, field: CostField): number | undefin
         : field === "cacheRead"
           ? info.cache_read_input_token_cost
           : info.cache_creation_input_token_cost;
-  return perToken === undefined || !Number.isFinite(perToken) ? undefined : perToken * 1_000_000;
+  return perToken === undefined || !Number.isFinite(perToken) || perToken < 0 ? undefined : perToken * 1_000_000;
 }
 
 function resolvedCost(

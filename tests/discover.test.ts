@@ -849,20 +849,15 @@ describe("discoverModels via /model/info", () => {
 
   it("survives a deeply nested deployment row", async () => {
     // Canonicalization is depth-bounded, so a pathological payload cannot exhaust
-    // the stack and take every model down with it.
-    let nested: unknown = "leaf";
-    for (let depth = 0; depth < 20_000; depth++) nested = { nested };
+    // the stack and take every model down with it. Build the JSON text iteratively
+    // so the fixture itself does not depend on JSON.stringify's recursion limit.
+    const depth = 20_000;
+    const nestedJson = `${'{"nested":'.repeat(depth)}"leaf"${"}".repeat(depth)}`;
+    const payload =
+      '{"data":[{"model_name":"deep-route","litellm_params":{"model":"openai/gpt-4o"},' +
+      `"model_info":{"id":"a","mode":"chat","extra":${nestedJson}}}]}`;
     mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            {
-              model_name: "deep-route",
-              litellm_params: { model: "openai/gpt-4o" },
-              model_info: { id: "a", mode: "chat", extra: nested },
-            },
-          ],
-        }),
+      "/model/info": () => new Response(payload, { status: 200, headers: { "content-type": "application/json" } }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
