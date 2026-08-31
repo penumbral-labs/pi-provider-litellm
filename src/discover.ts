@@ -403,6 +403,22 @@ function wildcardMatches(route: string, modelId: string): boolean {
   return suffix === "" || modelId.endsWith(suffix ?? "");
 }
 
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+function intersectThinkingLevelMaps(
+  models: readonly DiscoveredModel[],
+): DiscoveredModel["thinkingLevelMap"] | undefined {
+  if (models.every((model) => model.thinkingLevelMap === undefined)) return undefined;
+  const intersection: NonNullable<DiscoveredModel["thinkingLevelMap"]> = {};
+  for (const level of THINKING_LEVELS) {
+    const values = models.map((model) => model.thinkingLevelMap?.[level]);
+    if (values.every((value) => value === undefined)) continue;
+    const first = values[0];
+    intersection[level] = first !== undefined && values.every((value) => value === first) ? first : null;
+  }
+  return Object.keys(intersection).length > 0 ? intersection : undefined;
+}
+
 function mapFromWildcardExpansion(
   entry: ModelsListEntry,
   wildcards: readonly DiscoveredModel[],
@@ -410,15 +426,33 @@ function mapFromWildcardExpansion(
   const id = wireString(entry.id);
   if (!id || id.includes("*")) return undefined;
   const matches = wildcards.filter((model) => wildcardMatches(model.id, id));
-  const wildcard = matches[0];
-  if (!wildcard) return mapFromModelsList(entry);
-  const api = matches.every((model) => model.api === wildcard.api) ? wildcard.api : "openai-completions";
-  const incomplete = wildcard.name.endsWith(" (incomplete metadata)");
+  if (matches.length === 0) return mapFromModelsList(entry);
+
+  const api = matches.every((model) => model.api === "openai-responses") ? "openai-responses" : "openai-completions";
+  const reasoning = matches.every((model) => model.reasoning);
+  const vision = matches.every((model) => model.input.includes("image"));
+  const contextWindow = Math.min(...matches.map((model) => model.contextWindow));
+  const maxTokens = Math.min(...matches.map((model) => model.maxTokens));
+  const thinkingLevelMap = intersectThinkingLevelMaps(matches);
+  const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
   return {
-    ...wildcard,
     id,
     name: incomplete ? `${id} (incomplete metadata)` : id,
+    reasoning,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+    input: vision ? ["text", "image"] : ["text"],
+    cost: {
+      input: Math.max(...matches.map((model) => model.cost.input)),
+      output: Math.max(...matches.map((model) => model.cost.output)),
+      cacheRead: Math.max(...matches.map((model) => model.cost.cacheRead)),
+      cacheWrite: Math.max(...matches.map((model) => model.cost.cacheWrite)),
+    },
+    contextWindow,
+    maxTokens,
     api,
+    // Compatibility describes the concrete public id, while every authority-
+    // bearing field above remains bounded by all matching wildcard groups.
+    compat: buildCompat(id),
   };
 }
 
@@ -442,9 +476,13 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const ambiguousRoutes: string[] = [];
-    let models = [...groups.values()]
-      .map((group) => mapFromModelInfoGroup(group, ambiguousRoutes))
-      .filter((m): m is DiscoveredModel => m !== undefined);
+    const reducedGroups = [...groups.entries()].map(([route, group]) => ({
+      route,
+      model: mapFromModelInfoGroup(group, ambiguousRoutes),
+    }));
+    let models = reducedGroups
+      .map(({ model }) => model)
+      .filter((model): model is DiscoveredModel => model !== undefined);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
@@ -453,15 +491,23 @@ export async function discoverModels(
     // /v1/models and merge the expanded (non-wildcard) entries in, dropping the
     // raw wildcard row so it doesn't surface as a phantom model choice.
     // Ref: docs.litellm.ai/docs/proxy/model_discovery
-    if (models.some((m) => m.id.includes("*"))) {
-      const wildcards = models.filter((model) => model.id.includes("*"));
+    const wildcardRoutes = reducedGroups.filter(({ route }) => route.includes("*"));
+    if (wildcardRoutes.length > 0) {
+      const wildcards = wildcardRoutes
+        .map(({ model }) => model)
+        .filter((model): model is DiscoveredModel => model !== undefined);
+      const droppedWildcards = wildcardRoutes.filter(({ model }) => model === undefined).map(({ route }) => route);
       // A wildcard row is not addressable. Remove it before expansion so a failed
       // `/v1/models` request cannot leak the literal wildcard into the selector.
       models = models.filter((model) => !model.id.includes("*"));
       progress?.("/model/info has wildcard entries, expanding via /v1/models...");
       const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
-      if (listResult.ok) {
+      if (listResult.ok && wildcards.length > 0) {
         const expanded = (listResult.data.data ?? [])
+          .filter((entry) => {
+            const id = wireString(entry.id);
+            return id === undefined || !droppedWildcards.some((route) => wildcardMatches(route, id));
+          })
           .map((entry) => mapFromWildcardExpansion(entry, wildcards))
           .filter((model): model is DiscoveredModel => model !== undefined);
         const seen = new Set<string>(models.map((m) => m.id));

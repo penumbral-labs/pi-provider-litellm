@@ -1109,7 +1109,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(true);
   });
 
-  it("preserves incomplete conservative wildcard metadata on expanded catalog-matching ids", async () => {
+  it("recomputes concrete-id compatibility while preserving conservative wildcard metadata", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     mockEndpoints({
       "/model/info": () =>
@@ -1148,24 +1148,83 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
             },
           ],
         }),
-      "/v1/models": () => jsonResponse(200, { data: [{ id: "openai/gpt-4o", owned_by: "openai" }] }),
+      "/v1/models": () =>
+        jsonResponse(200, {
+          data: [
+            { id: "openai/claude-sonnet-4-6", owned_by: "openai" },
+            { id: "openai/kimi-k2.6", owned_by: "openai" },
+          ],
+        }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models).toEqual([
       expect.objectContaining({
-        id: "openai/gpt-4o",
-        name: "openai/gpt-4o (incomplete metadata)",
+        id: "openai/claude-sonnet-4-6",
+        name: "openai/claude-sonnet-4-6 (incomplete metadata)",
         api: "openai-responses",
         reasoning: false,
         input: ["text"],
         contextWindow: 16_000,
         maxTokens: 2_000,
         cost: expect.objectContaining({ input: 4, output: 20, cacheWrite: 5 }),
+        compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+      }),
+      expect.objectContaining({
+        id: "openai/kimi-k2.6",
+        name: "openai/kimi-k2.6 (incomplete metadata)",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 16_000,
+        maxTokens: 2_000,
+        compat: { supportsStore: false },
       }),
     ]);
     expect(stderr).toHaveBeenCalled();
+  });
+
+  it("recomputes Kimi compatibility from a catch-all expansion id", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "*",
+              litellm_params: { model: "private/unknown" },
+              model_info: {
+                mode: "responses",
+                supports_reasoning: false,
+                max_input_tokens: 8_000,
+                max_output_tokens: 1_000,
+                input_cost_per_token: 0.000001,
+              },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "kimi-k2.6" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "kimi-k2.6",
+        name: "kimi-k2.6 (incomplete metadata)",
+        api: "openai-responses",
+        reasoning: false,
+        contextWindow: 8_000,
+        maxTokens: 1_000,
+        cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: false,
+          supportsStrictMode: false,
+          maxTokensField: "max_tokens",
+        },
+      }),
+    ]);
   });
 
   it("preserves unresolved conservative wildcard metadata on expanded catalog-matching ids", async () => {
@@ -1233,21 +1292,87 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     );
   });
 
-  it("keeps Chat mode when overlapping wildcard routes disagree", async () => {
+  it("combines overlapping wildcard metadata conservatively regardless of route order", async () => {
+    const broad = {
+      model_name: "*",
+      litellm_params: { model: "internal/broad" },
+      model_info: {
+        id: "broad",
+        mode: "responses",
+        supports_reasoning: true,
+        supports_vision: true,
+        supports_low_reasoning_effort: true,
+        supports_high_reasoning_effort: true,
+        max_input_tokens: 80_000,
+        max_output_tokens: 8_000,
+        input_cost_per_token: 0.000002,
+        output_cost_per_token: 0.00001,
+        cache_read_input_token_cost: 0.0000002,
+        cache_creation_input_token_cost: 0.0000025,
+      },
+    };
+    const narrow = {
+      model_name: "team/*",
+      litellm_params: { model: "internal/narrow" },
+      model_info: {
+        id: "narrow",
+        mode: "chat",
+        supports_reasoning: false,
+        supports_vision: false,
+        supports_low_reasoning_effort: false,
+        supports_high_reasoning_effort: true,
+        max_input_tokens: 40_000,
+        max_output_tokens: 4_000,
+        input_cost_per_token: 0.000003,
+        output_cost_per_token: 0.000015,
+        cache_read_input_token_cost: 0.0000003,
+        cache_creation_input_token_cost: 0.00000375,
+      },
+    };
+
+    for (const data of [
+      [broad, narrow],
+      [narrow, broad],
+    ]) {
+      mockEndpoints({
+        "/model/info": () => jsonResponse(200, { data }),
+        "/v1/models": () => jsonResponse(200, { data: [{ id: "team/claude-sonnet-4-6" }] }),
+      });
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models).toEqual([
+        {
+          id: "team/claude-sonnet-4-6",
+          name: "team/claude-sonnet-4-6",
+          api: "openai-completions",
+          reasoning: false,
+          thinkingLevelMap: { low: null, high: "high" },
+          input: ["text"],
+          contextWindow: 40_000,
+          maxTokens: 4_000,
+          cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+          compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+        },
+      ]);
+    }
+  });
+
+  it("keeps a deliberately dropped wildcard group from being re-admitted", async () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
-            { model_name: "team/*", model_info: { mode: "responses" } },
-            { model_name: "team/model-*", model_info: { mode: "chat" } },
+            { model_name: "team/*", model_info: { id: "wildcard", mode: "chat" } },
+            { model_name: "blocked/*", model_info: { id: "blocked", mode: "embedding" } },
           ],
         }),
-      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model-a", owned_by: "openai" }] }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/chat" }, { id: "blocked/chat" }] }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models).toEqual([expect.objectContaining({ id: "team/model-a", api: "openai-completions" })]);
+    expect(result.models.map((model) => model.id)).toEqual(["team/chat"]);
   });
 
   it("never exposes a literal wildcard when /v1/models expansion fails", async () => {
