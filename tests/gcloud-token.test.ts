@@ -63,7 +63,19 @@ describe("getGcloudToken", () => {
     await expect(hasGcloudAdcCredentials()).resolves.toBe(false);
     await expect(getGcloudToken()).resolves.toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown credential type"));
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("authorized_user ADC has invalid or incomplete required fields"),
+    );
+    expect(warnSpy.mock.calls.flat().join(" ")).not.toContain("Unknown credential type");
+  });
+
+  it("preserves the unknown-type diagnostic for unsupported credential types", async () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({ type: "external_account" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(getGcloudToken()).resolves.toBeNull();
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown credential type: external_account"));
   });
 
   it("exchanges authorized_user ADC credentials for an access token", async () => {

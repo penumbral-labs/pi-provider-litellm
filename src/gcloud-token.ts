@@ -84,6 +84,11 @@ async function resolveAuthorizedUserAdc(): Promise<AuthorizedUserCredentials | n
 
   if (isAuthorizedUserCredentials(credentials)) return credentials;
 
+  if (credentials.type === "authorized_user") {
+    console.warn("LiteLLM gcloud auth: authorized_user ADC has invalid or incomplete required fields.");
+    return null;
+  }
+
   if (credentials.type === "service_account") {
     console.warn("LiteLLM gcloud auth: Service account credentials are not supported; use authorized_user ADC.");
     return null;
