@@ -201,15 +201,17 @@ describe("smoke-deployment-group script", () => {
   });
 
   it("exits unsuccessfully with a concise error when required environment is missing", async () => {
-    await expect(
-      execFileAsync(tsxPath, [scriptPath], {
-        cwd: repoRoot,
-        env: { ...process.env, LITELLM_BASE_URL: "", LITELLM_API_KEY: "" },
-      }),
-    ).rejects.toMatchObject({
+    const secret = "sk-missing-environment-secret";
+    const error = await execFileAsync(tsxPath, [scriptPath], {
+      cwd: repoRoot,
+      env: { ...process.env, LITELLM_BASE_URL: "", LITELLM_API_KEY: secret },
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({
       code: 1,
       stdout: "",
-      stderr: "LITELLM_BASE_URL and LITELLM_API_KEY must be set\n",
+      stderr: expect.stringContaining("LITELLM_BASE_URL and LITELLM_API_KEY must be set"),
     });
+    expect((error as { stderr: string }).stderr).not.toContain(secret);
   });
 });
