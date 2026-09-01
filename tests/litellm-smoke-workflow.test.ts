@@ -238,9 +238,9 @@ describe("LiteLLM smoke workflow", () => {
 
     expect(workflow).toMatch(/permissions:\n {2}contents: read/);
     expect(workflow).toMatch(/VIDAIMOCK_VERSION: v\d+\.\d+\.\d+$/m);
-    expect(workflow).toMatch(/VIDAIMOCK_LINUX_X64_SHA256: [a-f0-9]{64}$/m);
+    expect(workflow).toMatch(/VIDAIMOCK_SHA256: [a-f0-9]{64}$/m);
     expect(workflow).toMatch(
-      /echo "\$\{VIDAIMOCK_LINUX_X64_SHA256\} {2}\$\{asset\}" \| \(cd \.tmp && sha256sum -c -\)/,
+      /\(cd \.tmp && printf '%s {2}%s\\n' "\$VIDAIMOCK_SHA256" "\$asset" \| sha256sum -c -\)/,
     );
     expect(workflow).not.toMatch(/\$\{asset%\.tar\.gz\}\.sha256/);
     expect(workflow).toMatch(/postgres:16-alpine@sha256:[a-f0-9]{64}/);
