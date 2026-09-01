@@ -76,6 +76,25 @@ describe("pi package compatibility", () => {
   });
 });
 
+describe("deployment group documentation", () => {
+  it("documents conservative tier envelopes and evidence-free wildcard expansions", async () => {
+    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
+
+    expect(readme).toContain("Catalog thinking controls are intersected per level");
+    expect(readme).toContain("disagreement or absence becomes an explicit denial");
+    expect(readme).toContain("tiered pricing is the conservative worst-case envelope");
+    expect(readme).toContain("sorted union of every deployment's thresholds");
+    expect(readme).toContain("maximum applicable rate across all deployments");
+    expect(readme).toContain("Wildcard expansion retains every known tier");
+    expect(readme).toContain("suppressing a complete sibling's higher tier could understate the known worst-case rate");
+    expect(readme).toContain("IDs that match no surviving wildcard route are discarded");
+    expect(readme).toContain("A matched wildcard expansion");
+    expect(readme).toContain("catalog tiers remain for unaffected fields");
+    expect(readme).toContain("public `model_name` route is never backend evidence");
+    expect(readme).not.toContain("all matching groups use compatible thresholds");
+  });
+});
+
 describe("dependency security overrides", () => {
   it("keeps vulnerable transitive dependencies above alerted ranges", async () => {
     const lockfile = JSON.parse(await readFile("package-lock.json", "utf8")) as {
