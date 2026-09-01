@@ -357,9 +357,11 @@ describe("discoverModels via /model/info", () => {
   });
 
   it("falls back to Chat and group guarantees for mixed deployments regardless of row order", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `shared-route-${process.pid}-${Date.now()}-${Math.random()}`;
     const deployments = [
       {
-        model_name: "shared-route",
+        model_name: route,
         litellm_params: { model: "openai/gpt-4o" },
         model_info: {
           id: "deployment-a",
@@ -375,7 +377,7 @@ describe("discoverModels via /model/info", () => {
         },
       },
       {
-        model_name: "shared-route",
+        model_name: route,
         litellm_params: { model: "internal/unknown" },
         model_info: {
           id: "deployment-b",
@@ -392,8 +394,8 @@ describe("discoverModels via /model/info", () => {
       const result = await discoverModels("https://litellm.example.com", "sk-test", {});
       expect(result.models).toEqual([
         expect.objectContaining({
-          id: "shared-route",
-          name: "shared-route (incomplete metadata)",
+          id: route,
+          name: `${route} (incomplete metadata)`,
           reasoning: false,
           input: ["text"],
           contextWindow: 64000,
@@ -404,6 +406,7 @@ describe("discoverModels via /model/info", () => {
       expect(result.models[0]).toHaveProperty("api", "openai-completions");
       expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
     }
+    expect(stderr).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -450,16 +453,18 @@ describe("discoverModels via /model/info", () => {
   });
 
   it("does not use a qualified public route as evidence for a multi-deployment group", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `openai/gpt-5.5-${process.pid}-${Date.now()}-${Math.random()}`;
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
           {
-            model_name: "openai/gpt-5.5",
+            model_name: route,
             litellm_params: { model: "openai/gpt-5.5" },
             model_info: { id: "known", mode: "chat" },
           },
           {
-            model_name: "openai/gpt-5.5",
+            model_name: route,
             litellm_params: { model: "internal/mystery" },
             model_info: { id: "unknown", mode: "chat" },
           },
@@ -470,7 +475,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      name: "openai/gpt-5.5 (incomplete metadata)",
+      name: `${route} (incomplete metadata)`,
       reasoning: false,
       input: ["text"],
       contextWindow: 128_000,
@@ -478,6 +483,8 @@ describe("discoverModels via /model/info", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
   });
 
   it.each([
@@ -713,6 +720,62 @@ describe("discoverModels via /model/info", () => {
         model_info: { mode: "chat", litellm_provider: "bedrock" },
       }),
     ).toMatchObject({ provider: "amazon-bedrock" });
+  });
+
+  it("withholds a cross-host Claude route spanning Vertex and Bedrock", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `cross-host-claude-${process.pid}-${Date.now()}-${Math.random()}`;
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: route,
+              litellm_params: { model: "vertex_ai/claude-sonnet-4@20250514" },
+              model_info: {
+                id: "vertex",
+                mode: "chat",
+                litellm_provider: "vertex_ai",
+                supports_reasoning: true,
+                supports_vision: true,
+                max_input_tokens: 96_000,
+                max_output_tokens: 8_000,
+              },
+            },
+            {
+              model_name: route,
+              litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0" },
+              model_info: {
+                id: "bedrock",
+                mode: "chat",
+                litellm_provider: "bedrock",
+                supports_reasoning: false,
+                supports_vision: false,
+                max_input_tokens: 64_000,
+                max_output_tokens: 4_000,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: route,
+        name: `${route} (incomplete metadata)`,
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 64_000,
+        maxTokens: 4_000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ]);
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("missing or conflicting deployment provider evidence");
+    expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
   });
 
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
@@ -1195,12 +1258,16 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
 
   it("recomputes concrete-id compatibility while preserving conservative wildcard metadata", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const nonce = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const wildcard = `openai/${nonce}/*`;
+    const claudeId = `openai/${nonce}/claude-sonnet-4-6`;
+    const kimiId = `openai/${nonce}/kimi-k2.6`;
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
             {
-              model_name: "openai/*",
+              model_name: wildcard,
               litellm_params: { model: "openai/gpt-4o" },
               model_info: {
                 id: "openai-route",
@@ -1215,7 +1282,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
               },
             },
             {
-              model_name: "openai/*",
+              model_name: wildcard,
               litellm_params: { model: "anthropic/claude-sonnet-4-6" },
               model_info: {
                 id: "anthropic-route",
@@ -1235,8 +1302,8 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () =>
         jsonResponse(200, {
           data: [
-            { id: "openai/claude-sonnet-4-6", owned_by: "openai" },
-            { id: "openai/kimi-k2.6", owned_by: "openai" },
+            { id: claudeId, owned_by: "openai" },
+            { id: kimiId, owned_by: "openai" },
           ],
         }),
     });
@@ -1245,8 +1312,8 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
 
     expect(result.models).toEqual([
       expect.objectContaining({
-        id: "openai/claude-sonnet-4-6",
-        name: "openai/claude-sonnet-4-6 (incomplete metadata)",
+        id: claudeId,
+        name: `${claudeId} (incomplete metadata)`,
         api: "openai-responses",
         reasoning: false,
         input: ["text"],
@@ -1256,8 +1323,8 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         compat: { supportsStore: false, cacheControlFormat: "anthropic" },
       }),
       expect.objectContaining({
-        id: "openai/kimi-k2.6",
-        name: "openai/kimi-k2.6 (incomplete metadata)",
+        id: kimiId,
+        name: `${kimiId} (incomplete metadata)`,
         reasoning: false,
         input: ["text"],
         contextWindow: 16_000,
