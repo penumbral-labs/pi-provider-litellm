@@ -16,6 +16,15 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
 const scriptPath = resolve(repoRoot, "scripts/smoke-deployment-group.ts");
 const tsxPath = resolve(repoRoot, "node_modules/.bin/tsx");
+const scriptErrorLinePrefixes = [
+  "Error",
+  "/model/info response is missing data rows",
+  "/model/info returned ",
+  "expected two grouped deployments",
+  "grouped deployment is missing ",
+  "grouped deployments must preserve ",
+  "LITELLM_BASE_URL and LITELLM_API_KEY must be set",
+];
 
 function deployment(id: string, mode: string, modelName = GROUPED_MODEL_NAME) {
   return {
@@ -194,7 +203,12 @@ describe("smoke-deployment-group script", () => {
       expect(stdout).not.toContain("private-chat-backend");
       expect(stderr).not.toContain(secret);
       expect(stderr).not.toContain("private-chat-backend");
-      expect(stderr).not.toContain("LITELLM_BASE_URL and LITELLM_API_KEY must be set");
+      expect(
+        stderr
+          .split(/\r?\n/)
+          .map((line) => line.trimStart())
+          .filter((line) => scriptErrorLinePrefixes.some((prefix) => line.startsWith(prefix))),
+      ).toEqual([]);
     } finally {
       await new Promise<void>((resolveClose, rejectClose) =>
         server.close((error) => (error ? rejectClose(error) : resolveClose())),
