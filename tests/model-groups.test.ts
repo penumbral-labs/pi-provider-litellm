@@ -97,6 +97,20 @@ describe("conservativeCostTiers", () => {
     ]);
   });
 
+  it("floors every matched tier field at its deployment base rate", () => {
+    const cost = {
+      input: 10,
+      output: 20,
+      cacheRead: 3,
+      cacheWrite: 4,
+      tiers: [{ inputTokensAbove: 100, input: 1, output: 2, cacheRead: 0.3, cacheWrite: 0.4 }],
+    };
+
+    expect(conservativeCostTiers([cost])).toEqual([
+      { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 3, cacheWrite: 4 },
+    ]);
+  });
+
   it.each([
     ["negative", -1],
     ["not a number", Number.NaN],
@@ -552,6 +566,33 @@ describe("reduceModelGroup", () => {
     expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
   });
 
+  it("suppresses reasoning controls when the router explicitly disables reasoning", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: {
+            id: "non-reasoner",
+            mode: "chat",
+            supports_reasoning: false,
+            supports_low_reasoning_effort: true,
+          },
+        }),
+      ],
+      () => ({
+        provider: "openai",
+        reasoning: true,
+        thinkingLevelMap: { low: "low", high: "high" },
+        vision: true,
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      }),
+    );
+
+    expect(result).toMatchObject({ reasoning: false });
+    expect(result).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("preserves explicit router reasoning efforts for a singleton", () => {
     const result = reduceModelGroup(
       [
@@ -633,7 +674,18 @@ describe("reduceModelGroup", () => {
         maxTokens: 64_000,
         cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: value },
       });
-    const rows = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
+    const withoutRouterCosts = (id: string) =>
+      row({
+        model_info: {
+          id,
+          mode: "chat",
+          input_cost_per_token: undefined,
+          output_cost_per_token: undefined,
+          cache_read_input_token_cost: undefined,
+          cache_creation_input_token_cost: undefined,
+        },
+      });
+    const rows = [withoutRouterCosts("a"), withoutRouterCosts("b")];
 
     expect(reduceModelGroup(rows, withTiers(tiers))?.cost.tiers).toEqual(tiers);
     // Property order is not evidence of disagreement.
@@ -771,6 +823,44 @@ describe("reduceModelGroup", () => {
         }
       }
     }
+  });
+
+  it("does not attach catalog tiers when explicit router prices override catalog bases", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: {
+            id: "explicit-prices",
+            mode: "chat",
+            input_cost_per_token: 0.000004,
+            output_cost_per_token: 0.00002,
+            cache_read_input_token_cost: 0.0000004,
+            cache_creation_input_token_cost: 0.000005,
+          },
+        }),
+      ],
+      () => ({
+        provider: "anthropic",
+        reasoning: true,
+        vision: true,
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        cost: {
+          input: 3,
+          output: 15,
+          cacheRead: 0.3,
+          cacheWrite: 3.75,
+          tiers: [{ inputTokensAbove: 200_000, input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5 }],
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      hasCompleteCost: true,
+      cost: { input: 4, output: 20, cacheWrite: 5 },
+    });
+    expect(result?.cost.cacheRead).toBeCloseTo(0.4);
+    expect(result?.cost.tiers).toBeUndefined();
   });
 
   it("does not attach catalog tiers when base price evidence is incomplete", () => {

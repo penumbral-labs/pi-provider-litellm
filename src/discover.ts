@@ -196,15 +196,18 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
-  const resolvedCandidates = candidates
-    .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
-    .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
+  const candidateResolutions = candidates.map((candidate) => {
+    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    const separator = candidate.indexOf("/");
+    const unresolvedPrefix = separator > 0 ? adapterCatalogProvider(candidate.slice(0, separator)) : undefined;
+    return { resolved, provider: resolved?.provider ?? unresolvedPrefix };
+  });
   const providers = new Set([
     ...(adapterProvider ? [adapterProvider] : []),
-    ...resolvedCandidates.map((resolved) => resolved.provider),
+    ...candidateResolutions.flatMap(({ provider }) => (provider ? [provider] : [])),
   ]);
   if (providers.size !== 1) return undefined;
-  const resolved = resolvedCandidates[0];
+  const resolved = candidateResolutions.find((candidate) => candidate.resolved)?.resolved;
   return resolved ? catalogResolution(resolved.provider, resolved.model) : undefined;
 }
 
@@ -434,7 +437,7 @@ function mapFromWildcardExpansion(
   const vision = matches.every((model) => model.input.includes("image"));
   const contextWindow = Math.min(...matches.map((model) => model.contextWindow));
   const maxTokens = Math.min(...matches.map((model) => model.maxTokens));
-  const thinkingLevelMap = intersectThinkingLevelMaps(matches);
+  const thinkingLevelMap = reasoning ? intersectThinkingLevelMaps(matches) : undefined;
   const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
   // Preserve every known tier even when a sibling has incomplete metadata. Omitting
   // a complete sibling's higher tier would understate the known worst-case rate;

@@ -198,10 +198,10 @@ function ratesAboveThreshold(cost: ModelCost, threshold: number): ModelCost {
   }
   if (matches.length === 0) return cost;
   return {
-    input: Math.max(...matches.map((tier) => tier.input)),
-    output: Math.max(...matches.map((tier) => tier.output)),
-    cacheRead: Math.max(...matches.map((tier) => tier.cacheRead)),
-    cacheWrite: Math.max(...matches.map((tier) => tier.cacheWrite)),
+    input: Math.max(cost.input, ...matches.map((tier) => tier.input)),
+    output: Math.max(cost.output, ...matches.map((tier) => tier.output)),
+    cacheRead: Math.max(cost.cacheRead, ...matches.map((tier) => tier.cacheRead)),
+    cacheWrite: Math.max(cost.cacheWrite, ...matches.map((tier) => tier.cacheWrite)),
   };
 }
 
@@ -291,13 +291,18 @@ export function reduceModelGroup(
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
   if (hasCompleteCost && catalogProvider) {
-    const deploymentCosts = deployments.map((_entry, index) => ({
-      input: costValues[0][index] as number,
-      output: costValues[1][index] as number,
-      cacheRead: costValues[2][index] as number,
-      cacheWrite: costValues[3][index] as number,
-      ...(catalogAuthority[index]?.cost?.tiers ? { tiers: catalogAuthority[index].cost.tiers } : {}),
-    }));
+    const deploymentCosts = deployments.map((entry, index) => {
+      const hasExplicitBaseCost = COST_FIELDS.some((field) => explicitCost(entry, field) !== undefined);
+      return {
+        input: costValues[0][index] as number,
+        output: costValues[1][index] as number,
+        cacheRead: costValues[2][index] as number,
+        cacheWrite: costValues[3][index] as number,
+        ...(!hasExplicitBaseCost && catalogAuthority[index]?.cost?.tiers
+          ? { tiers: catalogAuthority[index].cost.tiers }
+          : {}),
+      };
+    });
     const tiers = conservativeCostTiers(deploymentCosts);
     if (tiers) cost.tiers = tiers;
   }
@@ -307,7 +312,9 @@ export function reduceModelGroup(
   const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
   const thinkingLevelMap =
-    parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
+    reasoning && (parsedCatalogThinkingLevelMap || routerMap)
+      ? { ...parsedCatalogThinkingLevelMap, ...routerMap }
+      : undefined;
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;

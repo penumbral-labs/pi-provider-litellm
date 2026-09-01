@@ -573,6 +573,24 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "anthropic" });
   });
 
+  it("includes unresolved known provider prefixes in conflict checks", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "conflicting-unresolved-prefix",
+        litellm_params: { model: "openai/not-in-catalog" },
+        model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "consistent-unresolved-prefix",
+        litellm_params: { model: "anthropic/not-in-catalog" },
+        model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
+      }),
+    ).toMatchObject({ provider: "anthropic" });
+  });
+
   it.each([
     ["anthropic", "openai/gpt-4o", "bedrock/anthropic.claude-sonnet-4-6"],
     ["anthropic", "bedrock/anthropic.claude-sonnet-4-6", "openai/gpt-4o"],
@@ -1463,7 +1481,6 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           name: "team/claude-sonnet-4-6",
           api: "openai-completions",
           reasoning: false,
-          thinkingLevelMap: { low: null, high: "high" },
           input: ["text"],
           contextWindow: 40_000,
           maxTokens: 4_000,
