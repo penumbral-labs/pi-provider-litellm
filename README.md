@@ -175,7 +175,7 @@ export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_GCLOUD_TOKEN_AUTH=1
 ```
 
-Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. Tokens are refreshed in-process when Pi resolves request auth and cached in memory for 50 minutes.
+Only `authorized_user` ADC files are supported. Service account JSON files are rejected with a warning. An `authorized_user` file with a missing, empty, or whitespace-only `client_id`, `client_secret`, or `refresh_token` is rejected before any token exchange. Tokens are refreshed in-process when Pi resolves request auth and cached in memory for 50 minutes.
 
 ## LiteLLM MCP tools
 
