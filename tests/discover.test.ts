@@ -279,7 +279,7 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: null, max: "max" });
   });
 
-  it("uses catalog costs when /model/info omits costs for Anthropic aliases", async () => {
+  it("does not use an unqualified public route alias as backend catalog evidence", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
       if (url.endsWith("/model/info")) {
@@ -293,7 +293,16 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.source).toBe("model_info");
-    expect(result.models[0]?.cost).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
+    expect(result.models[0]).toMatchObject({
+      id: "opus-4.8",
+      name: "opus-4.8 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
   it("preserves catalog pricing tiers for /model/info models", async () => {
@@ -1841,7 +1850,7 @@ describe("catalog provider candidates", () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
-          data: [{ model_name: id, litellm_params: { model: id }, model_info: { mode: "chat" } }],
+          data: [{ model_name: `route-${id}`, litellm_params: { model: id }, model_info: { mode: "chat" } }],
         }),
     });
 

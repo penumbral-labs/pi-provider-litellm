@@ -283,17 +283,12 @@ function mapFromModelInfoGroup(
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
   let hasIntraRowAuthorityConflict = false;
-  const reduced = reduceModelGroup(entries, (entry, singleton) => {
+  const reduced = reduceModelGroup(entries, (entry) => {
     const evidence = resolveModelInfoCatalogEvidence(entry);
     if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
-    if (evidence.catalog || !singleton) return evidence.catalog;
-    // Preserve the historical singleton route lookup only for the public model
-    // families that Pi already recognizes. A provider-qualified route remains a
-    // routing alias and cannot establish backend identity by itself.
-    const id = entry.model_name;
-    if (!id || id.includes("/")) return undefined;
-    const catalog = resolveCatalogModel(id);
-    return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
+    // `model_name` is always a public routing alias, whether qualified or not;
+    // only independent backend fields may authorize catalog metadata.
+    return evidence.catalog;
   });
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous || hasIntraRowAuthorityConflict) ambiguousRoutes?.push(reduced.id);

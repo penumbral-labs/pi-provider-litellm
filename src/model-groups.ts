@@ -294,19 +294,28 @@ export function reduceModelGroup(
   };
   if (hasCompleteCost && catalogProvider) {
     const deploymentCosts = deployments.map((entry, index) => {
-      // Tier schedules are request-wide rather than field-specific. Any explicit
-      // router base price therefore replaces the catalog's whole pricing scheme
-      // for this deployment, even when only one base field was supplied.
-      const hasExplicitBaseCost = COST_FIELDS.some((field) => explicitCost(entry, field) !== undefined);
-      return {
+      const baseCost = {
         input: costValues[0][index] as number,
         output: costValues[1][index] as number,
         cacheRead: costValues[2][index] as number,
         cacheWrite: costValues[3][index] as number,
-        ...(!hasExplicitBaseCost && catalogAuthority[index]?.cost?.tiers
-          ? { tiers: catalogAuthority[index].cost.tiers }
-          : {}),
       };
+      const explicitFields = new Set(COST_FIELDS.filter((field) => explicitCost(entry, field) !== undefined));
+      const catalogTiers = catalogAuthority[index]?.cost?.tiers;
+      // An explicit field replaces catalog pricing for that field at every
+      // threshold. Unaffected fields retain their catalog ladder; otherwise a
+      // partial router override could hide a known higher catalog rate.
+      const tiers =
+        catalogTiers && explicitFields.size < COST_FIELDS.length
+          ? catalogTiers.map((tier) => ({
+              inputTokensAbove: tier.inputTokensAbove,
+              input: explicitFields.has("input") ? baseCost.input : tier.input,
+              output: explicitFields.has("output") ? baseCost.output : tier.output,
+              cacheRead: explicitFields.has("cacheRead") ? baseCost.cacheRead : tier.cacheRead,
+              cacheWrite: explicitFields.has("cacheWrite") ? baseCost.cacheWrite : tier.cacheWrite,
+            }))
+          : undefined;
+      return { ...baseCost, ...(tiers ? { tiers } : {}) };
     });
     const tiers = conservativeCostTiers(deploymentCosts);
     if (tiers) cost.tiers = tiers;

@@ -85,8 +85,10 @@ describe("deployment group documentation", () => {
     expect(readme).toContain("maximum applicable rate across all deployments");
     expect(readme).toContain("Wildcard expansion retains every known tier");
     expect(readme).toContain("suppressing a complete sibling's higher tier could understate the known worst-case rate");
-    expect(readme).toContain("ids returned during wildcard expansion that match no surviving wildcard group");
+    expect(readme).toContain("IDs that match no surviving wildcard route are discarded");
     expect(readme).toContain("A matched wildcard expansion");
+    expect(readme).toContain("catalog tiers remain for unaffected fields");
+    expect(readme).toContain("public `model_name` route is never backend evidence");
     expect(readme).not.toContain("all matching groups use compatible thresholds");
   });
 });
