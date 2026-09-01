@@ -156,7 +156,11 @@ describe("dispatch routing through Pi's provider composer", () => {
   });
 
   it("uses Responses-native prompt caching for Anthropic-backed aliases", async () => {
-    const entry = model("anthropic/claude-sonnet-4-6", "openai-responses", `${CREDENTIAL_ROOT}/v1`);
+    const entry = {
+      ...model("anthropic/claude-sonnet-4-6", "openai-responses", `${CREDENTIAL_ROOT}/v1`),
+      // Deliberately escape the Responses compat type to prove this completions-only flag is ignored.
+      compat: { cacheControlFormat: "anthropic" } as never,
+    };
     const { payloads, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-responses"] });
 
     await models.complete(

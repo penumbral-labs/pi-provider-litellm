@@ -37,7 +37,7 @@
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
 - Kimi/Moonshot-style models are handled in `buildCompat()`; keep regression tests with model discovery changes.
-- Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM.
+- Anthropic-backed aliases using `openai-completions` need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM; `openai-responses` uses its native prompt cache fields instead.
 
 ## Smoke And CI
 
