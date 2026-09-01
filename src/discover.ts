@@ -101,7 +101,12 @@ function catalogProviderCandidates(
   // A recognized adapter is authoritative provider evidence. If its catalog
   // misses, do not try a conflicting provider qualifier from model or base_model.
   if (adapterProvider) return [adapterProvider];
-  const candidates = [toKnownProvider(ownedBy), toKnownProvider(id.split("/")[0])].filter(
+  const ownedByProvider = toKnownProvider(ownedBy);
+  const prefixProvider = toKnownProvider(id.split("/")[0]);
+  // Two explicit provider identities are contradictory even when the first
+  // provider's catalog has no matching model. Do not borrow from the second.
+  if (ownedByProvider && prefixProvider && ownedByProvider !== prefixProvider) return [];
+  const candidates = [ownedByProvider, prefixProvider].filter(
     (provider): provider is BuiltinProvider => provider !== undefined,
   );
   if (lookupIds.some((lookupId) => lookupId.startsWith("claude-"))) candidates.push("anthropic");
@@ -265,11 +270,16 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const routingFamily = routingModel ? semanticFamily(routingModel) : undefined;
   const baseFamily = baseModel ? semanticFamily(baseModel) : undefined;
   const routingCatalog = routingModel ? resolveCatalogModel(routingModel, undefined, adapterProvider) : undefined;
+  const baseCatalog = baseModel ? resolveCatalogModel(baseModel, undefined, adapterProvider) : undefined;
   const conflictingFamilies =
     routingModel !== undefined &&
     baseFamily !== undefined &&
     ((routingFamily !== undefined && routingFamily !== baseFamily) ||
       (routingCatalog !== undefined && semanticFamily(routingCatalog.model.id) !== baseFamily));
+  const conflictingCatalogModels =
+    routingCatalog !== undefined &&
+    baseCatalog !== undefined &&
+    (routingCatalog.provider !== baseCatalog.provider || routingCatalog.model.id !== baseCatalog.model.id);
   if (conflictingFamilies) return undefined;
   const semantic =
     routingFamily ?? (routingCatalog ? semanticFamily(routingCatalog.model.id) : undefined) ?? baseFamily;
@@ -294,6 +304,9 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   // generation policies cannot authorize native Messages for that deployment.
   const compatIdentities = new Set(candidateCompats.map((value) => JSON.stringify(value)));
   const compat = compatIdentities.size === 1 ? candidateCompats[0] : undefined;
+  if (conflictingCatalogModels) {
+    return semantic ? { semanticFamily: semantic, backendIdentity, ...(model ? { semanticModel: model } : {}) } : undefined;
+  }
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);

@@ -677,7 +677,7 @@ describe("discoverModels via /model/info", () => {
     ).toBeUndefined();
   });
 
-  it("withholds native Messages policy when one deployment names conflicting Claude generations", () => {
+  it("withholds native Messages policy and catalog metadata for conflicting Claude generations", () => {
     const resolved = resolveModelInfoCatalog({
       model_name: "contradictory-claude-generations",
       litellm_params: { model: "anthropic/claude-opus-4-7" },
@@ -688,7 +688,9 @@ describe("discoverModels via /model/info", () => {
       },
     });
 
-    expect(resolved).toMatchObject({ semanticFamily: "claude" });
+    expect(resolved).toEqual({ semanticFamily: "claude", backendIdentity: { semanticFamily: "claude" } });
+    expect(resolved).not.toHaveProperty("provider");
+    expect(resolved).not.toHaveProperty("cost");
     expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
@@ -1482,6 +1484,28 @@ describe("discoverModels fallback to /v1/models", () => {
       expect(anthropic.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
     });
   }
+
+  it("withholds fallback catalog metadata when owned_by conflicts with a qualified model id", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "openai/gpt-5.5", owned_by: "google" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.5",
+      name: "openai/gpt-5.5 (no metadata)",
+      reasoning: false,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16384,
+    });
+  });
 
   it("uses Pi catalog metadata for the /v1/models fallback", async () => {
     const urls: string[] = [];
