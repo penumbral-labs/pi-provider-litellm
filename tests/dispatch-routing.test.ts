@@ -175,8 +175,8 @@ describe("dispatch routing through Pi's provider composer", () => {
       messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hello" }], timestamp: 1 }],
     };
 
-    await models.complete(completions, context, { sessionId: "cache-session" });
-    await models.complete(responses, context, { sessionId: "cache-session" });
+    await models.complete(completions, context, { sessionId: "cache-session", cacheRetention: "short" });
+    await models.complete(responses, context, { sessionId: "cache-session", cacheRetention: "short" });
 
     expect(payloads).toHaveLength(2);
     expect(payloads[0]).toMatchObject({
