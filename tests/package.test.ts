@@ -73,7 +73,7 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("Pi uses its global implementation, bypassing this extension's host guard");
     expect(readme).toContain("Path prefixes are part of the root and remain case-sensitive");
     expect(readme).toContain("Different concrete backends conflict even when they belong to the same provider");
-    expect(readme).toContain("conflicts with a provider-qualified model ID withholds catalog enrichment");
+    expect(readme).toContain("conflicts with a provider-qualified model ID instead receives ` (incomplete metadata)`");
     expect(readme).not.toContain("/litellm-refresh");
     expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
     expect(readme).not.toContain("older than 24 hours");

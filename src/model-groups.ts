@@ -13,6 +13,9 @@ export type MessagesBackendCompat = Pick<
 
 export interface CatalogResolution {
   provider?: string;
+  // Concrete catalog identity; provider unanimity alone cannot authorize one
+  // model's limits or pricing for a different model from the same provider.
+  catalogModelId?: string;
   semanticFamily?: SemanticFamily;
   messagesCompat?: MessagesBackendCompat;
   reasoning?: boolean;
@@ -205,11 +208,18 @@ export function reduceModelGroup(
   if (deployments.length === 0) return undefined;
   const catalogs = deployments.map((entry) => resolveCatalog(entry));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
+  const catalogModelIds = catalogs.map((catalog) => catalog?.catalogModelId);
+  const hasCatalogModelIdentity = catalogModelIds.some((id) => id !== undefined);
+  const catalogModelId = unanimous(catalogModelIds);
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
-  const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
+  // Provider-only resolver fixtures preserve the pre-existing reducer contract;
+  // production catalog resolutions always carry a concrete model identity.
+  const hasCatalogAuthority = catalogProvider !== undefined && (!hasCatalogModelIdentity || catalogModelId !== undefined);
+  const catalogAuthority = hasCatalogAuthority ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
-    catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
+    !hasCatalogAuthority &&
+    catalogs.some((catalog) => catalog?.provider !== undefined || catalog?.catalogModelId !== undefined);
   const reasoningValues = deployments.map(
     (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning,
   );
@@ -305,6 +315,7 @@ export function catalogResolution(
 ): CatalogResolution {
   return {
     provider,
+    catalogModelId: model.id,
     semanticFamily,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,

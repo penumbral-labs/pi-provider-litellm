@@ -7,6 +7,7 @@ const catalog = new Map<string, CatalogResolution>([
     "openai/gpt-4o",
     {
       provider: "openai",
+      catalogModelId: "gpt-4o",
       reasoning: false,
       vision: true,
       contextWindow: 128_000,
@@ -18,6 +19,7 @@ const catalog = new Map<string, CatalogResolution>([
     "anthropic/claude-sonnet-4-6",
     {
       provider: "anthropic",
+      catalogModelId: "claude-sonnet-4-6",
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -29,6 +31,7 @@ const catalog = new Map<string, CatalogResolution>([
     "bedrock/anthropic.claude-sonnet-4-6",
     {
       provider: "amazon-bedrock",
+      catalogModelId: "anthropic.claude-sonnet-4-6",
       reasoning: true,
       vision: true,
       contextWindow: 200_000,
@@ -421,6 +424,33 @@ describe("reduceModelGroup", () => {
       hasCompleteMetadata: false,
       cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
+  });
+
+  it("withholds catalog authority for different concrete models from one provider", () => {
+    const result = reduceModelGroup(
+      [
+        row({ model_info: { id: "a", mode: "chat" }, litellm_params: { model: "route-a" } }),
+        row({ model_info: { id: "b", mode: "chat" }, litellm_params: { model: "route-b" } }),
+      ],
+      (entry) => ({
+        provider: "anthropic",
+        catalogModelId: entry.litellm_params?.model === "route-a" ? "claude-sonnet-4-6" : "claude-opus-4-5",
+        semanticFamily: "claude",
+        reasoning: true,
+        vision: true,
+        contextWindow: entry.litellm_params?.model === "route-a" ? 200_000 : 180_000,
+        maxTokens: 64_000,
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      semanticFamily: "claude",
+      catalogAuthorityAmbiguous: true,
+      contextWindow: 128_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result).not.toHaveProperty("catalogProvider");
   });
 
   it("uses catalog thinking maps for unambiguous identities", () => {

@@ -437,10 +437,14 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
   const id = wireString(entry.id);
   if (!id) return undefined;
   const ownedBy = wireString(entry.owned_by);
-  const catalogModel = findCatalogModel(id, ownedBy);
+  const ownedByProvider = toKnownProvider(ownedBy);
+  const prefixProvider = toKnownProvider(id.split("/")[0]);
+  const conflictingProviderEvidence =
+    ownedByProvider !== undefined && prefixProvider !== undefined && ownedByProvider !== prefixProvider;
+  const catalogModel = conflictingProviderEvidence ? undefined : findCatalogModel(id, ownedBy);
   return {
     id,
-    name: catalogModel?.name ?? `${id} (no metadata)`,
+    name: catalogModel?.name ?? `${id}${conflictingProviderEvidence ? " (incomplete metadata)" : " (no metadata)"}`,
     reasoning: catalogModel?.reasoning ?? false,
     thinkingLevelMap: catalogModel?.thinkingLevelMap,
     input: catalogModel?.input ?? ["text"],
