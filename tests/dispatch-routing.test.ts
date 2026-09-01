@@ -155,29 +155,40 @@ describe("dispatch routing through Pi's provider composer", () => {
     ]);
   });
 
-  it("uses Responses-native prompt caching for Anthropic-backed aliases", async () => {
-    const entry = {
-      ...model("anthropic/claude-sonnet-4-6", "openai-responses", `${CREDENTIAL_ROOT}/v1`),
-      // Deliberately escape the Responses compat type to prove this completions-only flag is ignored.
-      compat: { cacheControlFormat: "anthropic" } as never,
+  it("applies cacheControlFormat only to Chat Completions payloads", async () => {
+    // Deliberately escape the Responses compat type to exercise the same completions-only flag on both transports.
+    const compat = { cacheControlFormat: "anthropic" } as never;
+    const completions = {
+      ...model("anthropic/claude-sonnet-4-6-completions", "openai-completions", `${CREDENTIAL_ROOT}/v1`),
+      compat,
     };
-    const { payloads, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-responses"] });
+    const responses = {
+      ...model("anthropic/claude-sonnet-4-6-responses", "openai-responses", `${CREDENTIAL_ROOT}/v1`),
+      compat,
+    };
+    const { payloads, models } = harness({
+      configuredModels: [completions, responses],
+      discoveredApis: ["openai-completions", "openai-responses"],
+    });
+    const context = {
+      systemPrompt: "system",
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hello" }], timestamp: 1 }],
+    };
 
-    await models.complete(
-      entry,
-      {
-        systemPrompt: "system",
-        messages: [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 }],
-      },
-      { sessionId: "cache-session" },
-    );
+    await models.complete(completions, context, { sessionId: "cache-session" });
+    await models.complete(responses, context, { sessionId: "cache-session" });
 
-    expect(payloads).toHaveLength(1);
+    expect(payloads).toHaveLength(2);
     expect(payloads[0]).toMatchObject({
-      model: "anthropic/claude-sonnet-4-6",
+      model: "anthropic/claude-sonnet-4-6-completions",
+      messages: expect.any(Array),
+    });
+    expect(JSON.stringify(payloads[0])).toContain("cache_control");
+    expect(payloads[1]).toMatchObject({
+      model: "anthropic/claude-sonnet-4-6-responses",
       prompt_cache_key: "cache-session",
       input: expect.any(Array),
     });
-    expect(JSON.stringify(payloads[0])).not.toContain("cache_control");
+    expect(JSON.stringify(payloads[1])).not.toContain("cache_control");
   });
 });
