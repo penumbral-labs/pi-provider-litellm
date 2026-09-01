@@ -14,9 +14,6 @@ export interface CatalogResolution {
   cost?: DiscoveredModel["cost"];
 }
 
-// `singleton` is true only when the group reduces to exactly one routable
-// deployment, which is the only case where a public route name may be used as a
-// catalog hint. Resolvers must not treat route text as evidence otherwise.
 export type CatalogResolver = (entry: ModelInfoEntry, singleton: boolean) => CatalogResolution | undefined;
 
 export interface ReducedModelGroup {
@@ -92,12 +89,6 @@ function sortValue(value: unknown, depth = 0): unknown {
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, child]) => [key, sortValue(child, depth + 1)]),
   );
-}
-
-// Key-order-independent identity, so logically equal catalog metadata compares
-// equal instead of silently failing unanimity because of property order.
-function stableJson(value: unknown): string | undefined {
-  return value === undefined ? undefined : JSON.stringify(sortValue(value));
 }
 
 function stableEntry(entry: ModelInfoEntry): string {
@@ -180,6 +171,22 @@ function min(values: readonly number[]): number {
 function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   const first = values[0];
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
+}
+
+function intersectThinkingLevelMaps(
+  catalogs: readonly (CatalogResolution | undefined)[],
+): DiscoveredModel["thinkingLevelMap"] | undefined {
+  const maps = catalogs.map((catalog) => catalog?.thinkingLevelMap);
+  if (maps.every((map) => map === undefined)) return undefined;
+
+  const intersection: NonNullable<DiscoveredModel["thinkingLevelMap"]> = {};
+  for (const [level] of REASONING_EFFORT_FLAGS) {
+    const values = maps.map((map) => map?.[level]);
+    if (values.every((value) => value === undefined)) continue;
+    const first = values[0];
+    intersection[level] = first !== undefined && values.every((value) => value === first) ? first : null;
+  }
+  return Object.keys(intersection).length > 0 ? intersection : undefined;
 }
 
 function ratesAboveThreshold(cost: ModelCost, threshold: number): ModelCost {
@@ -320,15 +327,10 @@ export function reduceModelGroup(
     const tiers = conservativeCostTiers(deploymentCosts);
     if (tiers) cost.tiers = tiers;
   }
-  const catalogThinkingLevelMap = catalogProvider
-    ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
-    : undefined;
-  const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
+  const catalogThinkingLevelMap = catalogProvider ? intersectThinkingLevelMaps(catalogAuthority) : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
   const thinkingLevelMap =
-    reasoning && (parsedCatalogThinkingLevelMap || routerMap)
-      ? { ...parsedCatalogThinkingLevelMap, ...routerMap }
-      : undefined;
+    reasoning && (catalogThinkingLevelMap || routerMap) ? { ...catalogThinkingLevelMap, ...routerMap } : undefined;
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;

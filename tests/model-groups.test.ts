@@ -566,6 +566,55 @@ describe("reduceModelGroup", () => {
     expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
   });
 
+  it("intersects differing catalog thinking maps per level regardless of deployment order", () => {
+    const entries = [row({ model_info: { id: "a", mode: "chat" } }), row({ model_info: { id: "b", mode: "chat" } })];
+    const maps = {
+      a: { off: "none", low: "low", high: "high", max: null },
+      b: { off: "none", low: null, high: "high", xhigh: "xhigh" },
+    } as const;
+
+    for (const order of permutations(entries)) {
+      const result = reduceModelGroup(order, (entry) => ({
+        provider: "openai",
+        reasoning: true,
+        thinkingLevelMap: maps[entry.model_info?.id as keyof typeof maps],
+        vision: false,
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      }));
+
+      expect(result?.thinkingLevelMap).toEqual({
+        off: "none",
+        low: null,
+        high: "high",
+        xhigh: null,
+        max: null,
+      });
+    }
+  });
+
+  it("denies each catalog level when any deployment omits its thinking map", () => {
+    const entries = [
+      row({ model_info: { id: "mapped", mode: "chat" } }),
+      row({ model_info: { id: "absent", mode: "chat" } }),
+    ];
+
+    for (const order of permutations(entries)) {
+      const result = reduceModelGroup(order, (entry) => ({
+        provider: "openai",
+        reasoning: true,
+        ...(entry.model_info?.id === "mapped" ? { thinkingLevelMap: { low: "low", high: "high" } as const } : {}),
+        vision: false,
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      }));
+
+      expect(result?.thinkingLevelMap).toEqual({ low: null, high: null });
+    }
+  });
+
   it("suppresses reasoning controls when the router explicitly disables reasoning", () => {
     const result = reduceModelGroup(
       [
