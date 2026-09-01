@@ -210,15 +210,14 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
-  it("advertises registered API protocols without adding models to the catalog", () => {
-    const value = controller({ models: [native("listed")] });
+  it("returns an ordinary model catalog with native Array semantics", () => {
+    const listed = native("listed");
+    const value = controller({ models: [listed] });
+    const models = value.getModels();
 
-    expect(value.getModels().map((model) => model.id)).toEqual(["listed"]);
-    expect(
-      ["anthropic-messages", "google-generative-ai", "openai-completions", "openai-responses"].every((api) =>
-        value.getModels().some((model) => model.api === api),
-      ),
-    ).toBe(true);
+    expect(models).toEqual([listed]);
+    expect(Object.hasOwn(models, "some")).toBe(false);
+    expect(models.some((model) => model.api === "openai-responses")).toBe(false);
   });
 
   it("reprojects matching cached hosts and rejects stale or placeholder hosts", () => {

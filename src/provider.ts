@@ -8,7 +8,6 @@ import {
   type ProviderAuth,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { getApiProviders } from "@earendil-works/pi-ai/compat";
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
 import { createLiteLLMProtocolApis, isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
@@ -82,22 +81,6 @@ function modelHostError(model: Model<LiteLLMApi>, activeHost: string): Error | u
   }
 }
 
-function withProtocolCapabilities(models: readonly Model<LiteLLMApi>[]): readonly Model<LiteLLMApi>[] {
-  const catalog = [...models];
-  Object.defineProperty(catalog, "some", {
-    value(
-      predicate: (model: Model<LiteLLMApi>, index: number, models: Model<LiteLLMApi>[]) => unknown,
-      thisArg?: unknown,
-    ): boolean {
-      if (Array.prototype.some.call(catalog, predicate, thisArg)) return true;
-      return getApiProviders().some(({ api }) =>
-        predicate.call(thisArg, { api } as Model<LiteLLMApi>, catalog.length, catalog),
-      );
-    },
-  });
-  return catalog;
-}
-
 function requestModel(
   provider: string,
   model: Model<LiteLLMApi>,
@@ -152,12 +135,8 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     api: createLiteLLMProtocolApis(),
   });
   const refreshModels = provider.refreshModels;
-  const getModels = provider.getModels;
   const guardedProvider: Provider<LiteLLMApi> = {
     ...provider,
-    // Pi 0.84's composer probes base API support with getModels().some(). Make every
-    // generic fallback reach this provider's guard without adding synthetic catalog entries.
-    getModels: () => withProtocolCapabilities(getModels()),
     stream: <T extends LiteLLMApi>(model: Model<T>, context: Context, requestOptions?: ApiStreamOptions<T>) =>
       provider.stream(
         requestModel(
