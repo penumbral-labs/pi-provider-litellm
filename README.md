@@ -147,7 +147,7 @@ Treat the configured LiteLLM proxy as trusted: Skills can add instructions to th
 
 ## Model transport
 
-A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat mode, identifies a Claude backend through an Anthropic-, Bedrock-, or Vertex-capable adapter, and resolves the same Anthropic compatibility policy. Mixed-generation, mixed-family, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit Responses mode takes precedence. Catalog identity such as Amazon Bedrock remains separate from the selected wire protocol.
+A `/model/info` route group uses native Anthropic `/v1/messages` only when every deployment explicitly reports Chat mode, identifies a Claude backend through an Anthropic-, Bedrock-, or Vertex-capable adapter, and every declared backend identity resolves the same Anthropic compatibility policy. An unresolved routing or base-model identity denies native Messages rather than being discarded from the unanimity check. Mixed-generation, mixed-family, unknown, and fallback-only groups remain on Chat Completions; unanimous explicit Responses mode takes precedence. Catalog identity such as Amazon Bedrock remains separate from the selected wire protocol.
 
 Native Messages authenticates with `x-api-key` and intentionally omits `litellm_session_id`. Chat Completions and Responses keep their existing request behavior.
 

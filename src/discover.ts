@@ -297,13 +297,13 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
         baseFamily === "claude" &&
         CLAUDE_MODEL_PATTERN.test(baseModel)));
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
-  const candidateCompats = claudeEvidence
-    ? candidates.map(messagesCompatFromBackend).filter((value): value is MessagesBackendCompat => value !== undefined)
-    : [];
-  // Routing and base model are two descriptions of one deployment. Conflicting
-  // generation policies cannot authorize native Messages for that deployment.
+  const candidateCompats = claudeEvidence ? candidates.map(messagesCompatFromBackend) : [];
+  // Every declared backend identity that participates in Claude evidence must
+  // resolve a Messages policy. Filtering unresolved entries would incorrectly
+  // make the remaining policy look unanimous.
+  const allCandidatesHaveCompat = candidateCompats.length === candidates.length && candidateCompats.every(Boolean);
   const compatIdentities = new Set(candidateCompats.map((value) => JSON.stringify(value)));
-  const compat = compatIdentities.size === 1 ? candidateCompats[0] : undefined;
+  const compat = allCandidatesHaveCompat && compatIdentities.size === 1 ? candidateCompats[0] : undefined;
   if (conflictingCatalogModels) return semantic ? { semanticFamily: semantic } : undefined;
 
   for (const candidate of candidates) {

@@ -694,6 +694,21 @@ describe("discoverModels via /model/info", () => {
     expect(resolved).not.toHaveProperty("messagesCompat");
   });
 
+  it("withholds native Messages when any declared Claude backend lacks a compatible policy", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "partially-resolved-claude-generations",
+      litellm_params: { model: "anthropic/claude-opus-4-7" },
+      model_info: {
+        mode: "chat",
+        litellm_provider: "anthropic",
+        base_model: "anthropic/claude-future-9-9",
+      },
+    });
+
+    expect(resolved).toMatchObject({ semanticFamily: "claude", provider: "anthropic" });
+    expect(resolved).not.toHaveProperty("messagesCompat");
+  });
+
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
