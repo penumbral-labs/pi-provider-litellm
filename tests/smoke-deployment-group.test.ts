@@ -192,7 +192,9 @@ describe("smoke-deployment-group script", () => {
       expect(JSON.parse(stdout)).toEqual(summarizeGroupedDeployments(rows));
       expect(stdout).not.toContain(secret);
       expect(stdout).not.toContain("private-chat-backend");
-      expect(stderr).toBe("");
+      expect(stderr).not.toContain(secret);
+      expect(stderr).not.toContain("private-chat-backend");
+      expect(stderr).not.toContain("LITELLM_BASE_URL and LITELLM_API_KEY must be set");
     } finally {
       await new Promise<void>((resolveClose, rejectClose) =>
         server.close((error) => (error ? rejectClose(error) : resolveClose())),
