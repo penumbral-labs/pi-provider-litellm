@@ -191,7 +191,12 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
-export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
+interface ModelInfoCatalogEvidence {
+  catalog?: CatalogResolution;
+  providerConflict: boolean;
+}
+
+function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalogEvidence {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
@@ -199,6 +204,8 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const candidateResolutions = candidates.map((candidate) => {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     const separator = candidate.indexOf("/");
+    // A recognized prefix remains provider-identity evidence even when the model
+    // itself is absent from that provider's catalog.
     const unresolvedPrefix = separator > 0 ? adapterCatalogProvider(candidate.slice(0, separator)) : undefined;
     return { resolved, provider: resolved?.provider ?? unresolvedPrefix };
   });
@@ -206,9 +213,16 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
     ...(adapterProvider ? [adapterProvider] : []),
     ...candidateResolutions.flatMap(({ provider }) => (provider ? [provider] : [])),
   ]);
-  if (providers.size !== 1) return undefined;
+  if (providers.size !== 1) return { providerConflict: providers.size > 1 };
   const resolved = candidateResolutions.find((candidate) => candidate.resolved)?.resolved;
-  return resolved ? catalogResolution(resolved.provider, resolved.model) : undefined;
+  return {
+    ...(resolved ? { catalog: catalogResolution(resolved.provider, resolved.model) } : {}),
+    providerConflict: false,
+  };
+}
+
+export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
+  return resolveModelInfoCatalogEvidence(entry).catalog;
 }
 
 async function fetchJson<T>(
@@ -266,8 +280,11 @@ function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
+  let hasIntraRowProviderConflict = false;
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
-    const resolved = resolveModelInfoCatalog(entry);
+    const evidence = resolveModelInfoCatalogEvidence(entry);
+    if (evidence.providerConflict) hasIntraRowProviderConflict = true;
+    const resolved = evidence.catalog;
     if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
     // Preserve upstream singleton enrichment only when LiteLLM provides no
     // readable backend identity. Route text never overrides opaque evidence.
@@ -277,7 +294,7 @@ function mapFromModelInfoGroup(
     return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
+  if (reduced.catalogAuthorityAmbiguous || hasIntraRowProviderConflict) ambiguousRoutes?.push(reduced.id);
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes

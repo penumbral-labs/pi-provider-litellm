@@ -268,6 +268,8 @@ export function reduceModelGroup(
     (entry, index) =>
       explicitLimit(entry.model_info?.max_output_tokens) ?? explicitLimit(catalogAuthority[index]?.maxTokens),
   );
+  // Explicit false is authoritative: reasoning controls cannot survive when any
+  // deployment says the route does not support reasoning.
   const reasoning = reasoningEvidence.every((value) => value ?? false);
   const vision = visionEvidence.every((value) => value ?? false);
   const contextWindow = min(deployments.map((_entry, index) => contextWindowEvidence[index] ?? DEFAULT_CONTEXT_WINDOW));
@@ -292,6 +294,9 @@ export function reduceModelGroup(
   };
   if (hasCompleteCost && catalogProvider) {
     const deploymentCosts = deployments.map((entry, index) => {
+      // Tier schedules are request-wide rather than field-specific. Any explicit
+      // router base price therefore replaces the catalog's whole pricing scheme
+      // for this deployment, even when only one base field was supplied.
       const hasExplicitBaseCost = COST_FIELDS.some((field) => explicitCost(entry, field) !== undefined);
       return {
         input: costValues[0][index] as number,

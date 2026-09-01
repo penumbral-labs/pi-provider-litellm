@@ -825,41 +825,48 @@ describe("reduceModelGroup", () => {
     }
   });
 
-  it("does not attach catalog tiers when explicit router prices override catalog bases", () => {
-    const result = reduceModelGroup(
-      [
-        row({
-          model_info: {
-            id: "explicit-prices",
-            mode: "chat",
-            input_cost_per_token: 0.000004,
-            output_cost_per_token: 0.00002,
-            cache_read_input_token_cost: 0.0000004,
-            cache_creation_input_token_cost: 0.000005,
-          },
-        }),
-      ],
-      () => ({
-        provider: "anthropic",
-        reasoning: true,
-        vision: true,
-        contextWindow: 200_000,
-        maxTokens: 64_000,
-        cost: {
-          input: 3,
-          output: 15,
-          cacheRead: 0.3,
-          cacheWrite: 3.75,
-          tiers: [{ inputTokensAbove: 200_000, input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5 }],
-        },
-      }),
-    );
+  it.each([
+    [
+      "complete",
+      {
+        input_cost_per_token: 0.000004,
+        output_cost_per_token: 0.00002,
+        cache_read_input_token_cost: 0.0000004,
+        cache_creation_input_token_cost: 0.000005,
+      },
+      { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
+    ],
+    [
+      "partial",
+      {
+        input_cost_per_token: 0.000004,
+        output_cost_per_token: undefined,
+        cache_read_input_token_cost: undefined,
+        cache_creation_input_token_cost: undefined,
+      },
+      { input: 4, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    ],
+  ])("drops the entire catalog tier ladder for a %s explicit router base price", (_case, prices, expectedCost) => {
+    const result = reduceModelGroup([row({ model_info: { id: "explicit-prices", mode: "chat", ...prices } })], () => ({
+      provider: "anthropic",
+      reasoning: true,
+      vision: true,
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      cost: {
+        input: 3,
+        output: 15,
+        cacheRead: 0.3,
+        cacheWrite: 3.75,
+        tiers: [{ inputTokensAbove: 200_000, input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5 }],
+      },
+    }));
 
     expect(result).toMatchObject({
       hasCompleteCost: true,
-      cost: { input: 4, output: 20, cacheWrite: 5 },
+      cost: { input: expectedCost.input, output: expectedCost.output, cacheWrite: expectedCost.cacheWrite },
     });
-    expect(result?.cost.cacheRead).toBeCloseTo(0.4);
+    expect(result?.cost.cacheRead).toBeCloseTo(expectedCost.cacheRead);
     expect(result?.cost.tiers).toBeUndefined();
   });
 

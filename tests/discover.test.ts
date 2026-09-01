@@ -611,15 +611,17 @@ describe("discoverModels via /model/info", () => {
     },
   );
 
-  it("withholds catalog metadata for a singleton deployment with contradictory provider signals", async () => {
+  it("withholds catalog metadata and diagnoses a singleton with contradictory provider signals", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `conflicting-evidence-${process.pid}-${Date.now()}-${Math.random()}`;
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
             {
-              model_name: "conflicting-evidence",
-              litellm_params: { model: "openai/gpt-4o" },
-              model_info: { mode: "chat", litellm_provider: "anthropic", base_model: "anthropic/opus-4-7" },
+              model_name: route,
+              litellm_params: { model: "openai/not-in-catalog" },
+              model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
             },
           ],
         }),
@@ -628,8 +630,8 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      id: "conflicting-evidence",
-      name: "conflicting-evidence (incomplete metadata)",
+      id: route,
+      name: `${route} (incomplete metadata)`,
       reasoning: false,
       input: ["text"],
       contextWindow: 128_000,
@@ -637,6 +639,10 @@ describe("discoverModels via /model/info", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("missing or conflicting deployment provider evidence");
+    expect(diagnostics[0]).toContain(route);
   });
 
   it("preserves Bedrock catalog authority", () => {
