@@ -287,14 +287,13 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
         baseFamily === "claude" &&
         CLAUDE_MODEL_PATTERN.test(baseModel)));
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
-  // routingModel and base_model are two descriptions of one deployment, so the
-  // first catalogued policy wins here. Group-level unanimity is enforced later.
-  const compat = claudeEvidence
-    ? candidates.reduce<MessagesBackendCompat | undefined>(
-        (carried, candidate) => carried ?? messagesCompatFromBackend(candidate),
-        undefined,
-      )
-    : undefined;
+  const candidateCompats = claudeEvidence
+    ? candidates.map(messagesCompatFromBackend).filter((value): value is MessagesBackendCompat => value !== undefined)
+    : [];
+  // Routing and base model are two descriptions of one deployment. Conflicting
+  // generation policies cannot authorize native Messages for that deployment.
+  const compatIdentities = new Set(candidateCompats.map((value) => JSON.stringify(value)));
+  const compat = compatIdentities.size === 1 ? candidateCompats[0] : undefined;
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);

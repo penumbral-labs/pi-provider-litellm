@@ -69,6 +69,9 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("With `/login litellm`, choose `Sign in with an API key` directly");
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
+    expect(readme).toContain("### Model host enforcement");
+    expect(readme).toContain("Pi uses its global implementation, bypassing this extension's host guard");
+    expect(readme).toContain("Path prefixes are part of the root and remain case-sensitive");
     expect(readme).not.toContain("/litellm-refresh");
     expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
     expect(readme).not.toContain("older than 24 hours");

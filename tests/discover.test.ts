@@ -677,6 +677,21 @@ describe("discoverModels via /model/info", () => {
     ).toBeUndefined();
   });
 
+  it("withholds native Messages policy when one deployment names conflicting Claude generations", () => {
+    const resolved = resolveModelInfoCatalog({
+      model_name: "contradictory-claude-generations",
+      litellm_params: { model: "anthropic/claude-opus-4-7" },
+      model_info: {
+        mode: "chat",
+        litellm_provider: "anthropic",
+        base_model: "anthropic/claude-opus-4-5",
+      },
+    });
+
+    expect(resolved).toMatchObject({ semanticFamily: "claude" });
+    expect(resolved).not.toHaveProperty("messagesCompat");
+  });
+
   it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),

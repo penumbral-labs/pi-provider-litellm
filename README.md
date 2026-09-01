@@ -236,6 +236,14 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
+### Model host enforcement
+
+Models this provider dispatches are sent to the proxy root resolved from the active credential. The extension hides cached models whose stored canonical root is malformed, still uses the documentation placeholder, or differs from that credential, and its dispatch guard rejects the same cases before a request. Accepted request URLs are re-derived from the credential root rather than trusted from model configuration. Path prefixes are part of the root and remain case-sensitive.
+
+Catalog filtering and dispatch are separate. Choosing a model by ID or restoring it from a session can skip filtering. Pi 0.84 routes such a model to this provider only when its current catalog already contains the same `api`; the native `Provider` contract has no separate protocol-capability declaration. If the catalog has no model for that API, Pi uses its global implementation, bypassing this extension's host guard while still applying the LiteLLM credential. Until Pi exposes provider protocol capabilities, do not configure or restore a LiteLLM model whose `api` is absent from the current catalog, and never give such an entry a `baseUrl` that should not receive the LiteLLM credential.
+
+`LITELLM_OFFLINE=1` does not recover a root mismatch: refresh online against the active proxy first, then return to offline use.
+
 ### Deployment groups and metadata authority
 
 LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model:
@@ -255,7 +263,9 @@ The ` (no metadata)` suffix is reserved for evidence-free `/v1/models` fallback 
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
-| Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models. Offline mode does not recover a root mismatch — see [Model host enforcement](#model-host-enforcement) |
+| A provider shows no models | Its active root is missing, malformed, still the placeholder, or differs from the cached catalog root. Check stderr and see [Model host enforcement](#model-host-enforcement) |
+| A configured or restored model bypasses host enforcement | Its `api` is absent from the current provider catalog, so Pi used global API fallback. Refresh the catalog and do not configure an untrusted `baseUrl` for that entry — see [Model host enforcement](#model-host-enforcement) |
 | `LiteLLM discovery: ... route group(s) have missing or conflicting deployment provider evidence` | One or more deployments lack a resolvable backend provider or resolve to different providers. Add consistent `litellm_params.model`, `model_info.base_model`, or adapter metadata; catalog-derived limits, pricing, and reasoning metadata are withheld meanwhile. |
 | A model is marked ` (incomplete metadata)` | `/model/info` or `/health` did not provide enough authoritative metadata. Explicit fields remain usable, but unknown cost fields are shown as zero and route-name cache enrichment stays disabled. |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
