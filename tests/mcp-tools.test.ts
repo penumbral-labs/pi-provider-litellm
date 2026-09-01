@@ -1795,6 +1795,18 @@ describe("every registered schema is safe for the validator that consumes it", (
       },
     },
     {
+      name: "refcombinatorcycle",
+      server_name: "srv",
+      inputSchema: {
+        type: "object",
+        $defs: {
+          a: { allOf: [{ $ref: "#/$defs/b" }] },
+          b: { allOf: [{ $ref: "#/$defs/a" }] },
+        },
+        properties: { s: { $ref: "#/$defs/a" } },
+      },
+    },
+    {
       name: "refanchor",
       server_name: "srv",
       inputSchema: { type: "object", properties: { s: { $ref: "#someAnchor" } } },
@@ -1940,7 +1952,7 @@ describe("reference resolution hazards", () => {
     ).toBe("unresolvable-ref");
   });
 
-  it("reports a reference cycle that object identity cannot see", () => {
+  it("reports reference cycles hidden behind same-instance schema combinators", () => {
     expect(
       findSchemaHazard({
         type: "object",
@@ -1948,6 +1960,31 @@ describe("reference resolution hazards", () => {
         properties: { s: { $ref: "#/$defs/a" } },
       }),
     ).toBe("ref-cycle");
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: {
+          a: { allOf: [{ $ref: "#/$defs/b" }] },
+          b: { allOf: [{ $ref: "#/$defs/a" }] },
+        },
+        properties: { s: { $ref: "#/$defs/a" } },
+      }),
+    ).toBe("ref-cycle");
+  });
+
+  it("accepts productive recursive references through nested values", () => {
+    expect(
+      findSchemaHazard({
+        type: "object",
+        $defs: {
+          node: {
+            type: "object",
+            properties: { next: { anyOf: [{ type: "null" }, { $ref: "#/$defs/node" }] } },
+          },
+        },
+        properties: { root: { $ref: "#/$defs/node" } },
+      }),
+    ).toBeUndefined();
   });
 
   it("accepts local pointers that resolve to a usable subschema", () => {

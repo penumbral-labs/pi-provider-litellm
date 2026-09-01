@@ -675,12 +675,17 @@ function findLocalRefHazard(
   ref: string,
   schemaPositionNodes: WeakSet<object>,
 ): SchemaHazard | undefined {
-  const visited = new Set<string>();
-  let pointer = ref;
-  for (;;) {
-    if (visited.has(pointer)) return "ref-cycle";
-    visited.add(pointer);
-    if (visited.size > MAX_REF_HOPS) return "budget";
+  const activePointers = new Set<string>();
+  const checkedPointers = new Set<string>();
+  // This is intentionally shared across the complete traversal from one root ref so a broad
+  // combinator graph cannot evade the same bound by branching.
+  let referenceCount = 0;
+
+  const visitRef = (pointer: string): SchemaHazard | undefined => {
+    if (activePointers.has(pointer)) return "ref-cycle";
+    if (checkedPointers.has(pointer)) return undefined;
+    referenceCount += 1;
+    if (referenceCount > MAX_REF_HOPS) return "budget";
     // TypeBox percent-decodes URI fragments before resolving their JSON pointer. Keeping encoded
     // refs would require exactly mirroring that decoding (including failures), so refuse them.
     if (pointer.includes("%")) return "unresolvable-ref";
@@ -693,11 +698,52 @@ function findLocalRefHazard(
     // keys are interpreted as schema keywords prevents a ref from turning one into a schema behind
     // the scan's back (for example, `#/dependencies`).
     if (!record || !schemaPositionNodes.has(record) || !hasValidSchemaShape(record)) return "unresolvable-ref";
-    const next = record.$ref;
-    if (typeof next !== "string") return undefined;
-    if (!next.startsWith("#")) return "nonlocal-ref";
-    pointer = next;
-  }
+
+    activePointers.add(pointer);
+    const hazard = visitSameInstanceSchemas(record);
+    activePointers.delete(pointer);
+    if (!hazard) checkedPointers.add(pointer);
+    return hazard;
+  };
+
+  // TypeBox evaluates these applicators against the same instance as their containing schema.
+  // Following only those edges catches unproductive reference cycles without rejecting ordinary
+  // recursive object/array schemas, whose property or item edge advances to a nested value.
+  const visitSameInstanceSchemas = (schema: Record<string, unknown>): SchemaHazard | undefined => {
+    if (typeof schema.$ref === "string") {
+      const hazard = schema.$ref.startsWith("#") ? visitRef(schema.$ref) : "nonlocal-ref";
+      if (hazard) return hazard;
+    }
+    for (const keyword of ["not", "if", "then", "else"] as const) {
+      const child = asRecord(schema[keyword]);
+      if (!child) continue;
+      const hazard = visitSameInstanceSchemas(child);
+      if (hazard) return hazard;
+    }
+    for (const keyword of ["allOf", "anyOf", "oneOf"] as const) {
+      const schemas = schema[keyword];
+      if (!Array.isArray(schemas)) continue;
+      for (const child of schemas) {
+        const record = asRecord(child);
+        if (!record) continue;
+        const hazard = visitSameInstanceSchemas(record);
+        if (hazard) return hazard;
+      }
+    }
+    for (const keyword of ["dependentSchemas", "dependencies"] as const) {
+      const map = asRecord(schema[keyword]);
+      if (!map) continue;
+      for (const child of Object.values(map)) {
+        const record = asRecord(child);
+        if (!record) continue;
+        const hazard = visitSameInstanceSchemas(record);
+        if (hazard) return hazard;
+      }
+    }
+    return undefined;
+  };
+
+  return visitRef(ref);
 }
 
 function schemaPositionNodes(root: Record<string, unknown>): WeakSet<object> {
