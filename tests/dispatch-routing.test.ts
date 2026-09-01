@@ -43,6 +43,7 @@ function discovered(id: string): DiscoveredModel {
 
 function harness(options: { configuredModels: ReturnType<typeof model>[]; discoveredApis?: string[] }) {
   const wire: WireRequest[] = [];
+  const payloads: unknown[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const headers = new Headers(init?.headers);
     wire.push({
@@ -50,6 +51,7 @@ function harness(options: { configuredModels: ReturnType<typeof model>[]; discov
       authorization: headers.get("authorization"),
       tenant: headers.get("x-tenant"),
     });
+    if (typeof init?.body === "string") payloads.push(JSON.parse(init.body));
     return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { "content-type": "text/event-stream" },
     });
@@ -87,7 +89,7 @@ function harness(options: { configuredModels: ReturnType<typeof model>[]; discov
     authContext,
   });
   models.setProvider(composed);
-  return { wire, models };
+  return { wire, payloads, models };
 }
 
 describe("dispatch routing through Pi's provider composer", () => {
@@ -151,5 +153,27 @@ describe("dispatch routing through Pi's provider composer", () => {
         tenant: "canary-tenant",
       },
     ]);
+  });
+
+  it("uses Responses-native prompt caching for Anthropic-backed aliases", async () => {
+    const entry = model("anthropic/claude-sonnet-4-6", "openai-responses", `${CREDENTIAL_ROOT}/v1`);
+    const { payloads, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-responses"] });
+
+    await models.complete(
+      entry,
+      {
+        systemPrompt: "system",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 }],
+      },
+      { sessionId: "cache-session" },
+    );
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      model: "anthropic/claude-sonnet-4-6",
+      prompt_cache_key: "cache-session",
+      input: expect.any(Array),
+    });
+    expect(JSON.stringify(payloads[0])).not.toContain("cache_control");
   });
 });
