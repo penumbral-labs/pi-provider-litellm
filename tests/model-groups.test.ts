@@ -447,8 +447,10 @@ describe("reduceModelGroup", () => {
     expect(result).toMatchObject({
       semanticFamily: "claude",
       catalogAuthorityAmbiguous: true,
-      contextWindow: 128_000,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      // Explicit router evidence remains usable; only conflicting catalog
+      // authority is withheld.
+      contextWindow: 200_000,
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     });
     expect(result).not.toHaveProperty("catalogProvider");
   });

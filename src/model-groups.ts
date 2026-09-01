@@ -215,7 +215,8 @@ export function reduceModelGroup(
   const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
   // Provider-only resolver fixtures preserve the pre-existing reducer contract;
   // production catalog resolutions always carry a concrete model identity.
-  const hasCatalogAuthority = catalogProvider !== undefined && (!hasCatalogModelIdentity || catalogModelId !== undefined);
+  const hasCatalogAuthority =
+    catalogProvider !== undefined && (!hasCatalogModelIdentity || catalogModelId !== undefined);
   const catalogAuthority = hasCatalogAuthority ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
     !hasCatalogAuthority &&
@@ -301,7 +302,7 @@ export function reduceModelGroup(
     maxTokens,
     cost,
     hasCompleteMetadata,
-    ...(catalogProvider ? { catalogProvider } : {}),
+    ...(hasCatalogAuthority && catalogProvider ? { catalogProvider } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),

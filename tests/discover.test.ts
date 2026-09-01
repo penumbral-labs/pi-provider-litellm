@@ -1514,7 +1514,7 @@ describe("discoverModels fallback to /v1/models", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.5",
-      name: "openai/gpt-5.5 (no metadata)",
+      name: "openai/gpt-5.5 (incomplete metadata)",
       reasoning: false,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128000,
@@ -1966,11 +1966,11 @@ describe("native Messages backend evidence conflicts", () => {
     expect(resolved).toBeUndefined();
   });
 
-  it("uses Claude base_model evidence for an opaque adapter target", () => {
+  it("uses Claude base_model evidence when every declared adapter target resolves the same policy", () => {
     expect(
       resolveModelInfoCatalog({
-        model_name: "opaque-route",
-        litellm_params: { model: "bedrock/arn:aws:bedrock:us-east-1:123:application-inference-profile/opaque" },
+        model_name: "qualified-route",
+        litellm_params: { model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0" },
         model_info: {
           mode: "chat",
           litellm_provider: "bedrock",
