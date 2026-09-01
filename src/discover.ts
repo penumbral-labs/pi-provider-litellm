@@ -304,9 +304,7 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   // generation policies cannot authorize native Messages for that deployment.
   const compatIdentities = new Set(candidateCompats.map((value) => JSON.stringify(value)));
   const compat = compatIdentities.size === 1 ? candidateCompats[0] : undefined;
-  if (conflictingCatalogModels) {
-    return semantic ? { semanticFamily: semantic, backendIdentity, ...(model ? { semanticModel: model } : {}) } : undefined;
-  }
+  if (conflictingCatalogModels) return semantic ? { semanticFamily: semantic } : undefined;
 
   for (const candidate of candidates) {
     const resolved = resolveCatalogModel(candidate, undefined, adapterProvider);

@@ -688,7 +688,7 @@ describe("discoverModels via /model/info", () => {
       },
     });
 
-    expect(resolved).toEqual({ semanticFamily: "claude", backendIdentity: { semanticFamily: "claude" } });
+    expect(resolved).toEqual({ semanticFamily: "claude" });
     expect(resolved).not.toHaveProperty("provider");
     expect(resolved).not.toHaveProperty("cost");
     expect(resolved).not.toHaveProperty("messagesCompat");
