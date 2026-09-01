@@ -204,15 +204,17 @@ function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalo
   const candidateResolutions = candidates.map((candidate) => {
     const resolved = resolveCatalogModel(candidate, adapterProvider);
     const separator = candidate.indexOf("/");
-    // A recognized prefix remains provider-identity evidence even when the model
-    // itself is absent from that provider's catalog.
-    const unresolvedPrefix = separator > 0 ? adapterCatalogProvider(candidate.slice(0, separator)) : undefined;
-    return { resolved, provider: resolved?.provider ?? unresolvedPrefix };
+    // A recognized prefix remains independent provider-identity evidence even
+    // when adapter-first lookup resolves the same model in the adapter catalog.
+    const prefixProvider = separator > 0 ? adapterCatalogProvider(candidate.slice(0, separator)) : undefined;
+    return { resolved, prefixProvider };
   });
-  const providers = new Set([
-    ...(adapterProvider ? [adapterProvider] : []),
-    ...candidateResolutions.flatMap(({ provider }) => (provider ? [provider] : [])),
-  ]);
+  const providers = new Set(
+    [
+      ...(adapterProvider ? [adapterProvider] : []),
+      ...candidateResolutions.flatMap(({ resolved, prefixProvider }) => [resolved?.provider, prefixProvider]),
+    ].filter((provider): provider is BuiltinProvider => provider !== undefined),
+  );
   const catalogIdentities = new Set(
     candidateResolutions.flatMap(({ resolved }) => (resolved ? [`${resolved.provider}\0${resolved.model.id}`] : [])),
   );
@@ -276,12 +278,6 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
   );
 }
 
-function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
-  return [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider].some(
-    (candidate) => Boolean(wireString(candidate)?.trim()),
-  );
-}
-
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
@@ -290,13 +286,13 @@ function mapFromModelInfoGroup(
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const evidence = resolveModelInfoCatalogEvidence(entry);
     if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
-    const resolved = evidence.catalog;
-    if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
-    // Preserve upstream singleton enrichment only when LiteLLM provides no
-    // readable backend identity. Route text never overrides opaque evidence.
-    // `reduceModelGroup` only passes rows whose route name is a readable string.
+    if (evidence.catalog || !singleton) return evidence.catalog;
+    // Preserve the historical singleton route lookup only for the public model
+    // families that Pi already recognizes. A provider-qualified route remains a
+    // routing alias and cannot establish backend identity by itself.
     const id = entry.model_name;
-    const catalog = id ? resolveCatalogModel(id) : undefined;
+    if (!id || id.includes("/")) return undefined;
+    const catalog = resolveCatalogModel(id);
     return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
@@ -453,7 +449,7 @@ function mapFromWildcardExpansion(
   const id = wireString(entry.id);
   if (!id || id.includes("*")) return undefined;
   const matches = wildcards.filter((model) => wildcardMatches(model.id, id));
-  if (matches.length === 0) return mapFromModelsList(entry);
+  if (matches.length === 0) return undefined;
 
   const api = matches.every((model) => model.api === "openai-responses") ? "openai-responses" : "openai-completions";
   const reasoning = matches.every((model) => model.reasoning);

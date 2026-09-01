@@ -220,7 +220,8 @@ describe("discoverModels via /model/info", () => {
     const openai = result.models.find((m) => m.id === "openai/gpt-4o");
     expect(openai).toMatchObject({
       id: "openai/gpt-4o",
-      input: ["text", "image"],
+      name: "openai/gpt-4o (incomplete metadata)",
+      input: ["text"],
       compat: { supportsStore: false },
     });
   });
@@ -266,6 +267,7 @@ describe("discoverModels via /model/info", () => {
         data: [
           {
             model_name: "openai/gpt-5.6-luna",
+            litellm_params: { model: "openai/gpt-5.6-luna" },
             model_info: { mode: "chat", supports_reasoning: true, supports_xhigh_reasoning_effort: false },
           },
         ],
@@ -297,7 +299,13 @@ describe("discoverModels via /model/info", () => {
   it("preserves catalog pricing tiers for /model/info models", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "openai/gpt-5.5", model_info: { mode: "chat" } }],
+        data: [
+          {
+            model_name: "openai/gpt-5.5",
+            litellm_params: { model: "openai/gpt-5.5" },
+            model_info: { mode: "chat" },
+          },
+        ],
       }),
     );
 
@@ -311,7 +319,13 @@ describe("discoverModels via /model/info", () => {
   it("preserves catalog max thinking metadata for /model/info models", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "openai/gpt-5.6-luna", model_info: { mode: "chat" } }],
+        data: [
+          {
+            model_name: "openai/gpt-5.6-luna",
+            litellm_params: { model: "openai/gpt-5.6-luna" },
+            model_info: { mode: "chat" },
+          },
+        ],
       }),
     );
 
@@ -488,6 +502,7 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
+    ["no backend identity", { model_info: {} }],
     ["opaque backend model", { litellm_params: { model: "internal/mystery" }, model_info: {} }],
     ["opaque base model", { model_info: { base_model: "internal/mystery" } }],
     ["unresolved adapter", { model_info: { litellm_provider: "custom_proxy" } }],
@@ -522,6 +537,7 @@ describe("discoverModels via /model/info", () => {
   it("treats repeated identified deployment rows as one effective singleton", async () => {
     const deployment = {
       model_name: "openai/gpt-5.5",
+      litellm_params: { model: "openai/gpt-5.5" },
       model_info: { id: "deployment-a", mode: "chat" },
     };
     const fetchMock = vi.spyOn(globalThis, "fetch");
@@ -580,7 +596,15 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "anthropic" });
   });
 
-  it("includes unresolved known provider prefixes in conflict checks", () => {
+  it("includes resolved and unresolved known provider prefixes in conflict checks", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "adapter-first-prefix-conflict",
+        litellm_params: { model: "openai/gpt-4o" },
+        model_info: { mode: "chat", litellm_provider: "azure" },
+      }),
+    ).toBeUndefined();
+
     expect(
       resolveModelInfoCatalog({
         model_name: "conflicting-unresolved-prefix",
@@ -1160,15 +1184,18 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics[0]).toContain(route);
   });
 
-  it("keeps catalog authority for a lone chat deployment beside a non-chat sibling", async () => {
-    // An embedding sibling votes on transport but is not a deployment, so the group
-    // is still a singleton and its route name remains a usable catalog hint. If the
-    // count were taken before the mode filter, this route would lose its metadata.
+  it("keeps catalog authority for a lone identified chat deployment beside a non-chat sibling", async () => {
+    // An embedding sibling votes on transport but is not a deployment, so the
+    // remaining chat row can retain independently supplied backend authority.
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
           data: [
-            { model_name: "openai/gpt-5.5", model_info: { id: "chat", mode: "chat" } },
+            {
+              model_name: "openai/gpt-5.5",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { id: "chat", mode: "chat" },
+            },
             { model_name: "openai/gpt-5.5", model_info: { id: "embed", mode: "embedding" } },
           ],
         }),
@@ -1438,9 +1465,9 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       expect.arrayContaining([
         expect.objectContaining({ id: "responses/model-a", api: "openai-responses" }),
         expect.objectContaining({ id: "chat/model-b", api: "openai-completions" }),
-        expect.objectContaining({ id: "other/model-c", api: "openai-completions" }),
       ]),
     );
+    expect(result.models.map((model) => model.id)).not.toContain("other/model-c");
   });
 
   it("preserves tiered pricing from a single wildcard match", async () => {
@@ -1810,9 +1837,12 @@ describe("catalog provider candidates", () => {
     "opus-4.7",
     "fable-5",
     "opus-5",
-  ])("resolves the bare Anthropic catalog id %s from the shared lookup rule", async (id) => {
+  ])("resolves the bare Anthropic backend id %s from the shared lookup rule", async (id) => {
     mockEndpoints({
-      "/model/info": () => jsonResponse(200, { data: [{ model_name: id, model_info: { mode: "chat" } }] }),
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: id, litellm_params: { model: id }, model_info: { mode: "chat" } }],
+        }),
     });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
