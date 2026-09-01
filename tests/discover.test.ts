@@ -1810,6 +1810,43 @@ describe("discoverModels fallback to /health", () => {
     });
   });
 
+  it("rejects per-deployment detail metadata whose route disagrees with /health", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "team-a", model_id: "shared-id" }] }),
+      "/model/info?litellm_model_id=shared-id": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team-b",
+              litellm_params: { model: "anthropic/claude-opus-4-7" },
+              model_info: {
+                id: "shared-id",
+                mode: "chat",
+                litellm_provider: "anthropic",
+                max_input_tokens: 200_000,
+                input_cost_per_token: 0.000005,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "team-a",
+        name: "team-a (incomplete metadata)",
+        api: "openai-completions",
+        contextWindow: 128_000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ]);
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("uses healthy endpoint model names when /health entries do not include model ids", async () => {
     const urls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

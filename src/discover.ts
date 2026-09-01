@@ -412,9 +412,13 @@ function healthDeployment(
   deploymentId: string | undefined,
 ): HealthDeployment | undefined {
   const detailRoute = wireString(detail?.model_name)?.trim() || undefined;
-  const route = fallbackRoute?.trim() || detailRoute;
+  const healthRoute = fallbackRoute?.trim() || undefined;
+  const route = healthRoute ?? detailRoute;
   if (!route) return undefined;
-  if (!detail) {
+  // A detail request is correlated by deployment ID, but its public route must
+  // still agree with the route established by /health. Mismatched detail may
+  // describe another route and cannot contribute metadata to this deployment.
+  if (!detail || (healthRoute && detailRoute && detailRoute !== healthRoute)) {
     return {
       entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
       hasDetailRoute: false,
