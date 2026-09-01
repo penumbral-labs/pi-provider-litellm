@@ -2,7 +2,7 @@ import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
-export type LiteLLMApi = "openai-completions" | "openai-responses";
+export type LiteLLMApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 
 export type LiteLLMRuntimeAuth = {
   baseUrl: string;
@@ -10,9 +10,15 @@ export type LiteLLMRuntimeAuth = {
   headers?: Record<string, string>;
 };
 
-export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
-  api?: LiteLLMApi;
-};
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
+
+export type DiscoveredModel = {
+  [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
+}[LiteLLMApi];
+
+export type ModelProtocol = {
+  [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
+}[LiteLLMApi];
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];
@@ -27,8 +33,16 @@ export interface DiscoveryOptions {
 
 export interface ModelInfoEntry {
   model_name?: string;
+  litellm_params?: {
+    model?: string;
+    allowed_openai_params?: string[];
+  };
   model_info?: {
+    id?: string;
     mode?: string | null;
+    litellm_provider?: string;
+    base_model?: string;
+    supported_openai_params?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;
