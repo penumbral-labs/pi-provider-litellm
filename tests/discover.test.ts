@@ -592,6 +592,32 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
+    ["openai/gpt-4o", "openai/gpt-4.1"],
+    ["openai/gpt-4.1", "openai/gpt-4o"],
+  ])("withholds two different concrete %s and %s catalog identities from one row", (backend, baseModel) => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "same-provider-model-conflict",
+        litellm_params: { model: backend },
+        model_info: { mode: "chat", litellm_provider: "openai", base_model: baseModel },
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each(["azure/my-deployment", "my-deployment"])(
+    "resolves the Azure deployment name %s through its concrete base model",
+    (backend) => {
+      expect(
+        resolveModelInfoCatalog({
+          model_name: "azure-deployment-route",
+          litellm_params: { model: backend },
+          model_info: { mode: "chat", litellm_provider: "azure", base_model: "gpt-4o" },
+        }),
+      ).toMatchObject({ provider: "azure-openai-responses" });
+    },
+  );
+
+  it.each([
     ["anthropic", "openai/gpt-4o", "bedrock/anthropic.claude-sonnet-4-6"],
     ["anthropic", "bedrock/anthropic.claude-sonnet-4-6", "openai/gpt-4o"],
     ["openai", "anthropic/opus-4-7", "bedrock/anthropic.claude-sonnet-4-6"],
@@ -610,6 +636,40 @@ describe("discoverModels via /model/info", () => {
       ).toBeUndefined();
     },
   );
+
+  it("withholds and diagnoses different concrete catalog identities from one provider row", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `same-provider-model-conflict-${process.pid}-${Date.now()}-${Math.random()}`;
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: route,
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { mode: "chat", litellm_provider: "openai", base_model: "openai/gpt-4.1" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: route,
+      name: `${route} (incomplete metadata)`,
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("missing or conflicting deployment provider evidence");
+    expect(diagnostics[0]).toContain(route);
+  });
 
   it("withholds catalog metadata and diagnoses a singleton with contradictory provider signals", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);

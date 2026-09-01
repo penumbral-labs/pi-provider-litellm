@@ -193,7 +193,7 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
 
 interface ModelInfoCatalogEvidence {
   catalog?: CatalogResolution;
-  providerConflict: boolean;
+  authorityConflict: boolean;
 }
 
 function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalogEvidence {
@@ -213,11 +213,17 @@ function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalo
     ...(adapterProvider ? [adapterProvider] : []),
     ...candidateResolutions.flatMap(({ provider }) => (provider ? [provider] : [])),
   ]);
-  if (providers.size !== 1) return { providerConflict: providers.size > 1 };
+  const catalogIdentities = new Set(
+    candidateResolutions.flatMap(({ resolved }) => (resolved ? [`${resolved.provider}\0${resolved.model.id}`] : [])),
+  );
+  // Provider agreement alone is insufficient: model and base_model can both
+  // resolve within one provider while naming different concrete catalog models.
+  if (providers.size > 1 || catalogIdentities.size > 1) return { authorityConflict: true };
+  if (providers.size === 0) return { authorityConflict: false };
   const resolved = candidateResolutions.find((candidate) => candidate.resolved)?.resolved;
   return {
     ...(resolved ? { catalog: catalogResolution(resolved.provider, resolved.model) } : {}),
-    providerConflict: false,
+    authorityConflict: false,
   };
 }
 
@@ -280,10 +286,10 @@ function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
-  let hasIntraRowProviderConflict = false;
+  let hasIntraRowAuthorityConflict = false;
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const evidence = resolveModelInfoCatalogEvidence(entry);
-    if (evidence.providerConflict) hasIntraRowProviderConflict = true;
+    if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
     const resolved = evidence.catalog;
     if (resolved || !singleton || hasReadableBackendEvidence(entry)) return resolved;
     // Preserve upstream singleton enrichment only when LiteLLM provides no
@@ -294,7 +300,7 @@ function mapFromModelInfoGroup(
     return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  if (reduced.catalogAuthorityAmbiguous || hasIntraRowProviderConflict) ambiguousRoutes?.push(reduced.id);
+  if (reduced.catalogAuthorityAmbiguous || hasIntraRowAuthorityConflict) ambiguousRoutes?.push(reduced.id);
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
