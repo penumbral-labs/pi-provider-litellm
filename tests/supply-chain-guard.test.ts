@@ -118,8 +118,10 @@ describe("supply-chain guard", () => {
         "index",
         "litellm",
         "mcp-tools",
+        "model-groups",
         "provider",
         "skills",
+        "thinking-levels",
         "types",
       ]) {
         await writeFile(join(fixture, "dist", `${file}.js`), "export {};\n");
