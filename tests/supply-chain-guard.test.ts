@@ -110,7 +110,7 @@ describe("supply-chain guard", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("authorizes exactly the source modules this branch ships", async () => {
+  it("authorizes exactly the source modules the package ships", async () => {
     const shipped = (await readdir(join(repoRoot, "src")))
       .filter((file) => file.endsWith(".ts"))
       .map((file) => file.replace(/\.ts$/, ""))

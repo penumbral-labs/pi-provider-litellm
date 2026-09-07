@@ -21,7 +21,7 @@
 
 - Model discovery lives in `src/discover.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
-- The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
+- An evidence-free fallback entry (a bare `/v1/models` id or a `/health` entry with no detail row) takes its protocol and presentation metadata from the Pi catalog entry for its id; an unknown id stays on Chat Completions. The route name alone authorizes nothing. Keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
@@ -30,7 +30,7 @@
 
 ## LiteLLM Request Hooks
 
-- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
+- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider` matches the default `litellm` provider or a registered alias from `litellm.providers`.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
 - `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
@@ -38,8 +38,8 @@
 ## Compatibility Rules
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
-- Kimi/Moonshot-style models are handled in `buildCompat()`; keep regression tests with model discovery changes.
-- Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM.
+- Kimi/Moonshot-style compatibility is split across `completionsCompat()` and `responsesCompat()`; `buildCompat()` is retained only as the completions alias. Keep regression tests with model discovery changes.
+- Anthropic-backed aliases using `openai-completions` need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM; `openai-responses` uses its native prompt cache fields instead.
 
 ## Smoke And CI
 
