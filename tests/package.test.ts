@@ -283,12 +283,10 @@ describe("pi package compatibility", () => {
     );
 
     // A scanner bug that returned nothing would make the allowlist vacuously true, so
-    // require every shipped module to yield at least one specifier. The oracle itself is
-    // pinned by tests/import-specifiers.test.ts.
+    // require the shipped source set to yield specifiers. Pure helper modules may have no
+    // imports. The oracle itself is pinned by tests/import-specifiers.test.ts.
     expect(sourceFiles.length).toBeGreaterThan(0);
-    for (const [file, specifiers] of imports) {
-      expect(specifiers.length, `${file}: no module specifiers found`).toBeGreaterThan(0);
-    }
+    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(0);
 
     const allowed = new Set([
       "@earendil-works/pi-ai",
@@ -336,7 +334,8 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
     expect(readme).not.toContain("/litellm-refresh");
-    expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
+    expect(readme).toContain("Legacy `litellm-models.json` model caches are ignored and never deleted");
+    expect(readme).toContain("`litellm-models-dev.json` is the models.dev cache and is refreshed in place");
     expect(readme).not.toContain("older than 24 hours");
     expect(readme).not.toContain("enter `2` for SSO");
   });

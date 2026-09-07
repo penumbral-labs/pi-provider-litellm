@@ -13,26 +13,37 @@
 - Use `npm ci` when reinstalling dependencies from the lockfile.
 - Use `npm test` for the full test suite.
 - Use `npm test -- tests/<file>.test.ts` for a focused Vitest run.
+- Use `npm run probe:proxy -- --snapshot <fixture> [--src <worktree>]` for snapshot probing, or `npm run probe:proxy -- --live --base-url $LITELLM_DEV_BASE_URL --max-requests 100` for the bounded live matrix.
 - Use `npm run check` before committing code changes; it runs Biome, typecheck, tests, and the package-content guard.
 - Use `npm run clean && npm run build` when changing exported/runtime code.
 - Use `npm run supply-chain:guard` and `npm pack --dry-run` when package contents, dependency policy, or release packaging change.
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
+- Treat `model_name` as a public route group, not backend evidence. Reduce every deployment before choosing capabilities,
+  limits, prices, or catalog authority; never shallow-merge duplicate route rows. Evidence-free `/health` and
+  `/v1/models` entries use the Pi catalog's `openai-responses` API when present and Chat otherwise. Keep reasoning levels
+  denied. `/v1/models` may take catalog presentation metadata; `/health` without detail takes transport only.
+- Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
 - The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
+- `(no metadata)` is the fallback-only cache enrichment marker. Its cache-read enrichment applies the same catalog
+  transport rule. Reduced `/model/info` groups and unresolved `/health` routes use `(incomplete metadata)`, which must
+  remain ineligible for route-name cache enrichment.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
+- Pi owns discovered-model persistence in `models-store.json`. Legacy `litellm-models.json` model caches are ignored and never deleted. `litellm-models-dev.json` is the models.dev cache and is refreshed in place.
 - Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, and service accounts warn and fail closed.
 - `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.
 
 ## LiteLLM Request Hooks
 
-- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
+- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider` is one of the configured LiteLLM provider names.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
 - `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
+- Model-scoped request behavior travels on discovered `litellmPolicy` evidence; request hooks must not infer Moonshot or
+  Gemini behavior from public route text.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 
 ## Compatibility Rules

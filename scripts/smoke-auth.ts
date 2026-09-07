@@ -169,7 +169,7 @@ export async function runSsoLoginSmoke(
 
     const authInfos: Array<{ url: string; instructions?: string }> = [];
     const fetchImpl = globalThis.fetch;
-    // ponytail: the smoke proxy has no SSO IdP; protocol tests cover CLI SSO while this keeps legacy fallback live.
+    // The smoke proxy has no SSO IdP; protocol tests cover CLI SSO while this keeps legacy fallback live.
     globalThis.fetch = (input, init) =>
       String(input) === `${baseUrl}/sso/cli/start`
         ? Promise.resolve(new Response(null, { status: 404 }))
