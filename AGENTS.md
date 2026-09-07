@@ -19,9 +19,16 @@
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
-- The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
+- Treat `model_name` as a public route group, not backend evidence. Reduce every deployment before choosing transport,
+  capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
+- Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
+- The `/v1/models` fallback enriches metadata from the Pi catalog only and takes its transport from that entry:
+  `openai-responses` when the catalog says so, otherwise Chat. A `/health` entry without detail uses the same transport rule,
+  while route text grants no other catalog metadata or reasoning levels; keep fallback metadata tests current.
+- ` (no metadata)` is the fallback-only cache enrichment marker. Reduced `/model/info` groups and unresolved `/health`
+  routes use ` (incomplete metadata)`, which must remain ineligible for route-name cache enrichment.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
@@ -30,7 +37,7 @@
 
 ## LiteLLM Request Hooks
 
-- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
+- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider` is one of the configured LiteLLM provider names.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
 - `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
