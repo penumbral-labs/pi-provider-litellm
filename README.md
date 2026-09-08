@@ -238,7 +238,7 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 
 Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models.json` model caches are ignored and never deleted. `litellm-models-dev.json` is the models.dev cache and is refreshed in place.
 
-For `/model/info` enrichment, the extension requests `https://models.dev/api.json` and caches the result for 28 days in `~/.pi/agent/litellm-models-dev.json`. `PI_OFFLINE` suppresses activation-time discovery and the models.dev request. `LITELLM_OFFLINE=1` also disables LiteLLM discovery; direct discovery callers use only an existing models.dev cache and do not refresh it.
+For every genuine `/model/info` row, including deployment details fetched through `/health`, the extension requests `https://models.dev/api.json` for enrichment and caches the result for 28 days in `~/.pi/agent/litellm-models-dev.json`. Health-only entries without deployment details remain unenriched. `PI_OFFLINE` suppresses activation-time discovery and the models.dev request. `LITELLM_OFFLINE=1` also disables LiteLLM discovery; direct discovery callers use only an existing models.dev cache and do not refresh it.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 

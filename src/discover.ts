@@ -355,6 +355,19 @@ async function awaitEnrichmentWithinBudget<T>(
   }
 }
 
+function loadDiscoveryPublicCatalog(options: DiscoveryOptions): Promise<PublicCatalog | undefined> {
+  const publicCatalogPromise = loadPublicCatalog({
+    cachePath: options.modelsDevCachePath,
+    offline: options.modelsDev === false ? true : undefined,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+  });
+  return awaitEnrichmentWithinBudget(
+    publicCatalogPromise,
+    options.signal,
+    Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, PUBLIC_CATALOG_BUDGET_MS),
+  );
+}
+
 async function fetchJson<T>(
   url: string,
   apiKey: string,
@@ -529,11 +542,12 @@ async function discoverFromHealth(
     group.push(entry);
     groups.set(route, group);
   }
+  const publicCatalog = await loadDiscoveryPublicCatalog(options);
   const incompatibleModeRoutes: string[] = [];
   const models = [...groups.entries()]
     .map(([route, group]) => {
       if (hasMixedIncompatibleDeploymentModes(group)) incompatibleModeRoutes.push(route);
-      const model = mapFromModelInfoGroup(group);
+      const model = mapFromModelInfoGroup(group, publicCatalog);
       if (model && group.some((entry) => denyThinkingLevels.has(entry))) delete model.thinkingLevelMap;
       return model;
     })
@@ -640,16 +654,7 @@ export async function discoverModels(
       group.push(entry);
       groups.set(route, group);
     }
-    const publicCatalogPromise = loadPublicCatalog({
-      cachePath: options.modelsDevCachePath,
-      offline: options.modelsDev === false ? true : undefined,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    });
-    const publicCatalog = await awaitEnrichmentWithinBudget(
-      publicCatalogPromise,
-      options.signal,
-      Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, PUBLIC_CATALOG_BUDGET_MS),
-    );
+    const publicCatalog = await loadDiscoveryPublicCatalog(options);
     const ambiguousRoutes: string[] = [];
     const incompatibleModeRoutes: string[] = [];
     const reducedGroups = [...groups.entries()].map(([route, group]) => {

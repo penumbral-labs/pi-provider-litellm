@@ -1921,6 +1921,69 @@ describe("discoverModels via /model/info", () => {
 });
 
 describe("discoverModels via /health", () => {
+  it("enriches deployment details without granting catalog metadata to health-only routes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-health-detail-catalog-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          private: {
+            models: {
+              "priced-model": {
+                modalities: { input: ["text", "image"] },
+                limit: { context: 64_000, output: 8_000 },
+                cost: { input: 7, output: 9, cache_read: 1, cache_write: 2 },
+              },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "detailed-route", model_id: "detailed-deployment" },
+            { model: "private/priced-model" },
+          ],
+        }),
+      "/model/info?litellm_model_id=detailed-deployment": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "detailed-route",
+              litellm_params: { model: "private/priced-model" },
+              model_info: { mode: "chat", supports_reasoning: false, supports_vision: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models.find((model) => model.id === "detailed-route")).toMatchObject({
+      name: "detailed-route",
+      input: ["text", "image"],
+      contextWindow: 64_000,
+      maxTokens: 8_000,
+      cost: { input: 7, output: 9, cacheRead: 1, cacheWrite: 2 },
+    });
+    expect(result.models.find((model) => model.id === "private/priced-model")).toMatchObject({
+      name: "private/priced-model (incomplete metadata)",
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
   it("withholds mixed chat and embedding detail rows with one diagnostic", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const route = `mixed-health-route-${process.pid}-${Date.now()}-${Math.random()}`;
