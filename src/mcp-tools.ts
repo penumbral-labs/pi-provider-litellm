@@ -441,8 +441,9 @@ function invalidToolLabel(index: number): string {
 }
 
 // This structural encoding never retains or prints raw entry text. Length prefixes preserve
-// boundaries, while the discovery body cap bounds the amount of input hashed. The per-process salt
-// keeps low-entropy malformed entries from being recoverable by guessing.
+// boundaries, while the discovery body cap bounds the amount of input hashed. Cursor frames also
+// keep traversal storage proportional to nesting depth instead of container width. The per-process
+// salt keeps low-entropy malformed entries from being recoverable by guessing.
 const invalidEntryIdentitySalt = randomBytes(32);
 const invalidEntryIdentityEncoder = new TextEncoder();
 const invalidEntryIdentityBuffer = new Uint8Array(INVALID_ENTRY_IDENTITY_BUFFER_BYTES);
@@ -465,22 +466,32 @@ function invalidToolIdentity(value: unknown): string {
   };
   type IdentityPart =
     | { kind: "value"; value: unknown }
-    | { kind: "text" | "string"; value: string }
-    | { kind: "leave"; value: object };
+    | { kind: "array"; value: unknown[]; index: number }
+    | { kind: "object"; value: object; fields: [string, unknown][]; index: number };
   const pending: IdentityPart[] = [{ kind: "value", value }];
   while (pending.length > 0) {
     const part = pending.pop();
     if (!part) break;
-    if (part.kind === "text") {
-      writeText(part.value);
+    if (part.kind === "array") {
+      if (part.index >= part.value.length) {
+        writeText("]");
+        active.delete(part.value);
+      } else {
+        pending.push({ ...part, index: part.index + 1 });
+        pending.push({ kind: "value", value: part.value[part.index] });
+      }
       continue;
     }
-    if (part.kind === "string") {
-      writeString(part.value);
-      continue;
-    }
-    if (part.kind === "leave") {
-      active.delete(part.value);
+    if (part.kind === "object") {
+      if (part.index >= part.fields.length) {
+        writeText("}");
+        active.delete(part.value);
+      } else {
+        const [key, child] = part.fields[part.index] as [string, unknown];
+        writeString(key);
+        pending.push({ ...part, index: part.index + 1 });
+        pending.push({ kind: "value", value: child });
+      }
       continue;
     }
 
@@ -501,19 +512,12 @@ function invalidToolIdentity(value: unknown): string {
     } else if (Array.isArray(entry)) {
       active.add(entry);
       writeText(`array:${entry.length}[`);
-      pending.push({ kind: "leave", value: entry }, { kind: "text", value: "]" });
-      for (let index = entry.length - 1; index >= 0; index--) {
-        pending.push({ kind: "value", value: entry[index] });
-      }
+      pending.push({ kind: "array", value: entry, index: 0 });
     } else {
       active.add(entry);
       const fields = Object.entries(entry as Record<string, unknown>);
       writeText(`object:${fields.length}{`);
-      pending.push({ kind: "leave", value: entry }, { kind: "text", value: "}" });
-      for (let index = fields.length - 1; index >= 0; index--) {
-        const [key, child] = fields[index] as [string, unknown];
-        pending.push({ kind: "value", value: child }, { kind: "string", value: key });
-      }
+      pending.push({ kind: "object", value: entry, fields, index: 0 });
     }
   }
   return digest.digest("hex").slice(0, 32);

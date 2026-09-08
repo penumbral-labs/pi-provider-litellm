@@ -29,6 +29,41 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function eagerInvalidEntryEncoding(value: unknown): Buffer {
+  const chunks: string[] = [];
+  const active = new WeakSet<object>();
+  const writeString = (text: string) => chunks.push(`${Buffer.byteLength(text)}:`, text);
+  const visit = (entry: unknown): void => {
+    if (entry === null) chunks.push("null;");
+    else if (typeof entry === "string") {
+      chunks.push("string:");
+      writeString(entry);
+    } else if (typeof entry === "number") chunks.push(`number:${entry};`);
+    else if (typeof entry === "boolean") chunks.push(entry ? "true;" : "false;");
+    else if (typeof entry !== "object") chunks.push(`${typeof entry};`);
+    else if (active.has(entry)) chunks.push("cycle;");
+    else if (Array.isArray(entry)) {
+      active.add(entry);
+      chunks.push(`array:${entry.length}[`);
+      for (const child of entry) visit(child);
+      chunks.push("]");
+      active.delete(entry);
+    } else {
+      active.add(entry);
+      const fields = Object.entries(entry as Record<string, unknown>);
+      chunks.push(`object:${fields.length}{`);
+      for (const [key, child] of fields) {
+        writeString(key);
+        visit(child);
+      }
+      chunks.push("}");
+      active.delete(entry);
+    }
+  };
+  visit(value);
+  return Buffer.from(chunks.join(""));
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -2253,6 +2288,95 @@ describe("unrecognized discovery body shapes", () => {
 });
 
 describe("bounded diagnostic labels", () => {
+  it("preserves the invalid-entry encoding for wide and deeply nested containers", async () => {
+    vi.resetModules();
+    const salt = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const hmacInputs: Buffer[][] = [];
+    vi.doMock("node:crypto", async () => {
+      const crypto = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+      return {
+        ...crypto,
+        randomBytes: () => Buffer.from(salt),
+        createHmac: ((algorithm: string, key: import("node:crypto").BinaryLike) => {
+          const hmac = crypto.createHmac(algorithm, key);
+          const inputs: Buffer[] = [];
+          hmacInputs.push(inputs);
+          return {
+            update(data: string | NodeJS.ArrayBufferView) {
+              const input =
+                typeof data === "string"
+                  ? Buffer.from(data)
+                  : Buffer.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+              inputs.push(input);
+              hmac.update(data);
+              return this;
+            },
+            digest(encoding: import("node:crypto").BinaryToTextEncoding) {
+              return hmac.digest(encoding);
+            },
+          } as unknown as ReturnType<typeof crypto.createHmac>;
+        }) as typeof crypto.createHmac,
+      };
+    });
+    try {
+      const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+      const flat = Array.from({ length: 20_000 }, (_, index) => index % 7);
+      let deep: unknown = "leaf";
+      for (let level = 0; level < 200; level++) deep = { level, next: [deep] };
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [flat, deep] }));
+
+      await createDefinitionsRaw(async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" }));
+
+      const encodedInputs = hmacInputs.map((inputs) => Buffer.concat(inputs));
+      const expectedFlat = eagerInvalidEntryEncoding(flat);
+      const expectedDeep = eagerInvalidEntryEncoding(deep);
+      expect(encodedInputs.some((input) => input.equals(expectedFlat))).toBe(true);
+      expect(encodedInputs.some((input) => input.equals(expectedDeep))).toBe(true);
+      expect(createHash("sha256").update(expectedFlat).digest("hex")).toBe(
+        "5465fd24b3c708ee4611e296094dc1ba6e023abd7286760fef4abcf457bcca06",
+      );
+      expect(createHash("sha256").update(expectedDeep).digest("hex")).toBe(
+        "2586d5132d0b86496d94dc6f653638e4e5ae422a7a73a4b24fbf2cf2f1f5961f",
+      );
+    } finally {
+      vi.doUnmock("node:crypto");
+      vi.resetModules();
+    }
+  });
+
+  it("keeps identity traversal storage proportional to nesting depth", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    const wide = Array.from({ length: 20_000 }, (_, index) => ({ index }));
+    const children = new WeakSet<object>(wide);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [wide] }));
+    const originalPush = Array.prototype.push;
+    let identityPendingHighWater = 0;
+    Array.prototype.push = function <T>(this: T[], ...items: T[]): number {
+      const parts = [...this, ...items] as Array<{ kind?: unknown; value?: unknown }>;
+      if (
+        parts.some(
+          (part) =>
+            (part?.kind === "array" && part.value === wide) ||
+            (part?.kind === "value" &&
+              typeof part.value === "object" &&
+              part.value !== null &&
+              children.has(part.value)),
+        )
+      ) {
+        identityPendingHighWater = Math.max(identityPendingHighWater, parts.length);
+      }
+      return Reflect.apply(originalPush, this, items) as number;
+    };
+    try {
+      await createDefinitionsRaw(async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" }));
+    } finally {
+      Array.prototype.push = originalPush;
+    }
+
+    expect(identityPendingHighWater).toBeLessThanOrEqual(2);
+  });
+
   it("re-reports a different malformed entry at the same position but suppresses an unchanged one", async () => {
     vi.resetModules();
     const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
