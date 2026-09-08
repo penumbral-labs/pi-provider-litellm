@@ -2228,6 +2228,62 @@ describe("discoverModels response-mode models", () => {
     expect(String(stderr.mock.calls[0]?.[0])).toContain("explicitly incompatible deployment modes");
   });
 
+  it("enriches correlated health details without trusting synthetic health routes", async () => {
+    vi.resetModules();
+    const { discoverModels: isolatedDiscoverModels } = await import("../src/discover.js");
+    mockEndpoints({
+      "/model/info?litellm_model_id=kimi-detail": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team-kimi",
+              litellm_params: {
+                model: "moonshot/custom-kimi",
+                allowed_openai_params: ["reasoning_effort"],
+              },
+              model_info: { id: "kimi-detail", mode: "chat", supports_reasoning: true },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [{ model: "moonshot/custom-kimi", model_id: "kimi-detail" }, { model: "openai/gpt-5.5" }],
+        }),
+      "models.dev/api.json": () =>
+        jsonResponse(200, {
+          moonshotai: {
+            models: {
+              "custom-kimi": {
+                modalities: { input: ["text", "image"] },
+                limit: { context: 77_777, output: 3333 },
+                cost: { input: 1.25, output: 2.5, cache_read: 0.25, cache_write: 0.5 },
+                reasoning_options: { type: "effort", values: ["low", "high"] },
+              },
+            },
+          },
+        }),
+    });
+
+    await rm(join(agentDir, "litellm-models-dev.json"), { force: true });
+    const result = await isolatedDiscoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models.find((model) => model.id === "team-kimi")).toMatchObject({
+      input: ["text", "image"],
+      contextWindow: 77_777,
+      maxTokens: 3333,
+      cost: { input: 1.25, output: 2.5, cacheRead: 0.25, cacheWrite: 0.5 },
+    });
+    expect(result.models.find((model) => model.id === "openai/gpt-5.5")).toMatchObject({
+      name: "openai/gpt-5.5 (incomplete metadata)",
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    });
+  });
+
   it("uses the correlated detail model_name instead of the health backend model", async () => {
     mockEndpoints({
       "/model/info?litellm_model_id=uuid-redirect": () =>
@@ -2235,7 +2291,7 @@ describe("discoverModels response-mode models", () => {
           data: [
             {
               model_name: "different-route",
-              litellm_params: { model: "moonshot/kimi-k3", allowed_openai_params: ["reasoning_effort"] },
+              litellm_params: { model: "moonshot/kimi-k3" },
               model_info: { id: "uuid-redirect", mode: "chat", supports_reasoning: true },
             },
           ],
@@ -2249,7 +2305,15 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ id: "different-route", reasoning: true });
-    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: null, xhigh: null, max: null });
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    });
   });
 
   it("keeps /health response-mode model_info fallbacks on Responses", async () => {

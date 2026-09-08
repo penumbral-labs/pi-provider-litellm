@@ -466,6 +466,26 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   return resolveModelInfoCatalogEvidence(entry).catalog;
 }
 
+async function loadPublicCatalogForRows(
+  rows: readonly ModelInfoEntry[],
+  options: DiscoveryOptions,
+): Promise<PublicCatalog | undefined> {
+  const acceptsReasoningEffort = (value: unknown) =>
+    Array.isArray(value) && value.some((param) => wireString(param)?.trim() === "reasoning_effort");
+  const needsPublicReasoning = rows.some(
+    (entry) =>
+      acceptsReasoningEffort(entry.model_info?.supported_openai_params) ||
+      acceptsReasoningEffort(entry.litellm_params?.allowed_openai_params),
+  );
+  if (!needsPublicReasoning) return undefined;
+  return loadPublicCatalog({
+    cachePath: join(getAgentDir(), "litellm-models-dev.json"),
+    offline: options.modelsDev === false ? true : undefined,
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+  });
+}
+
 async function fetchJson<T>(
   url: string,
   apiKey: string,
@@ -598,6 +618,19 @@ function mapFromModelInfoGroup(
       identity && hasBackendIdentity
         ? publicCatalog?.lookup(identity.provider ?? adapter, identity.modelId)
         : undefined;
+    const publicCost = publicRecord?.cost;
+    const completePublicCost =
+      publicCost?.input !== undefined &&
+      publicCost.output !== undefined &&
+      publicCost.cacheRead !== undefined &&
+      publicCost.cacheWrite !== undefined
+        ? {
+            input: publicCost.input,
+            output: publicCost.output,
+            cacheRead: publicCost.cacheRead,
+            cacheWrite: publicCost.cacheWrite,
+          }
+        : undefined;
     if (evidence.catalog || (publicRecord && identity)) {
       return {
         ...evidence.catalog,
@@ -606,6 +639,10 @@ function mapFromModelInfoGroup(
         ...(identity && semanticModel(identity.qualifiedId)
           ? { semanticModel: semanticModel(identity.qualifiedId) }
           : {}),
+        ...(publicRecord?.modalities ? { vision: publicRecord.modalities.includes("image") } : {}),
+        ...(publicRecord?.limits?.context !== undefined ? { contextWindow: publicRecord.limits.context } : {}),
+        ...(publicRecord?.limits?.output !== undefined ? { maxTokens: publicRecord.limits.output } : {}),
+        ...(completePublicCost ? { cost: completePublicCost } : {}),
         ...(publicRecord?.effortLevels ? { reasoning: true, effortLevels: publicRecord.effortLevels } : {}),
         ...(publicRecord?.thinkingLevelMap
           ? { thinkingLevelMap: publicRecord.thinkingLevelMap as DiscoveredModel["thinkingLevelMap"] }
@@ -899,6 +936,10 @@ async function discoverFromHealth(
     group.push(deployment);
     groups.set(route, group);
   }
+  const publicCatalog = await loadPublicCatalogForRows(
+    [...groups.values()].flatMap((group) => group.map(({ entry }) => entry)),
+    options,
+  );
   const incompatibleModeRoutes: string[] = [];
   const ambiguousRoutes: string[] = [];
   const conflictingFamilyRoutes: string[] = [];
@@ -910,7 +951,7 @@ async function discoverFromHealth(
         const route = wireString(entries[0]?.model_name);
         if (route) incompatibleModeRoutes.push(route);
       }
-      return mapFromModelInfoGroup(entries, undefined, {
+      return mapFromModelInfoGroup(entries, publicCatalog, {
         ambiguousRoutes,
         conflictingFamilyRoutes,
         withheldRepairRoutes,
@@ -946,21 +987,7 @@ export async function discoverModels(
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
     const infoRows = infoResult.data.data ?? [];
-    const acceptsReasoningEffort = (value: unknown) =>
-      Array.isArray(value) && value.some((param) => wireString(param)?.trim() === "reasoning_effort");
-    const needsPublicReasoning = infoRows.some(
-      (entry) =>
-        acceptsReasoningEffort(entry.model_info?.supported_openai_params) ||
-        acceptsReasoningEffort(entry.litellm_params?.allowed_openai_params),
-    );
-    const publicCatalog = needsPublicReasoning
-      ? await loadPublicCatalog({
-          cachePath: join(getAgentDir(), "litellm-models-dev.json"),
-          offline: options.modelsDev === false ? true : undefined,
-          timeoutMs: options.timeoutMs,
-          signal: options.signal,
-        })
-      : undefined;
+    const publicCatalog = await loadPublicCatalogForRows(infoRows, options);
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoRows) {
       const route = wireString(entry.model_name);
