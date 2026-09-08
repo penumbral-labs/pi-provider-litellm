@@ -1,7 +1,7 @@
 import { type Credential, createProvider, type Provider, type ProviderAuth } from "@earendil-works/pi-ai";
 import { openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
-import { enrichCachedModel } from "./discover.js";
+import { enrichCachedModel, restoreCachedModelPolicy } from "./discover.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, LiteLLMModel } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -55,7 +55,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       const stored = context.stored && {
         ...context.stored,
         models: context.stored.models.map((model) =>
-          isLegacyReasoningModel(model as LiteLLMModel) ? model : enrichCachedModel(model),
+          isLegacyReasoningModel(model as LiteLLMModel) ? restoreCachedModelPolicy(model) : enrichCachedModel(model),
         ),
       };
       let replacedLegacyModels = false;

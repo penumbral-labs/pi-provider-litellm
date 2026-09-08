@@ -274,6 +274,17 @@ describe("discovery cache version transition", () => {
     thinkingLevelMap: { low: null },
     litellmDiscoveryVersion: undefined,
   });
+  const legacyMoonshotModel = () => ({
+    ...legacyModel(),
+    id: "moonshot/kimi-k2.6",
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false,
+      maxTokensField: "max_tokens" as const,
+    },
+  });
   const restorableV2Model = () => ({
     ...native("moonshot/kimi-k2.6"),
     compat: {
@@ -302,6 +313,24 @@ describe("discovery cache version transition", () => {
       "fresh",
     );
     expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("restores response policy without rewriting legacy reasoning levels offline", async () => {
+    const discover = vi.fn();
+    const provider = controller({ discover });
+    const legacy = legacyMoonshotModel();
+
+    await provider.refreshModels?.(context([legacy], false));
+
+    expect(discover).not.toHaveBeenCalled();
+    expect(provider.getModels()[0]).toMatchObject({
+      thinkingLevelMap: { low: null },
+      litellmPolicy: {
+        normalizeStrictToolMessages: false,
+        normalizeThinkTags: true,
+        suppressReasoningVisibility: false,
+      },
+    });
   });
 
   it("handles mixed stores per entry without warning during offline restore", async () => {

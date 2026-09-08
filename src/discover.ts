@@ -176,7 +176,7 @@ function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
 // stored compatibility fingerprint can recover the response-only conclusion,
 // but it cannot prove that every deployment identified Moonshot, so the
 // outbound repair stays disabled until fresh discovery persists that authority.
-function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
+export function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
   const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
   if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
   const restored: typeof cached = { ...cached, litellmPolicy: moonshotPolicy(model.id) };
