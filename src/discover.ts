@@ -618,19 +618,6 @@ function mapFromModelInfoGroup(
       identity && hasBackendIdentity
         ? publicCatalog?.lookup(identity.provider ?? adapter, identity.modelId)
         : undefined;
-    const publicCost = publicRecord?.cost;
-    const completePublicCost =
-      publicCost?.input !== undefined &&
-      publicCost.output !== undefined &&
-      publicCost.cacheRead !== undefined &&
-      publicCost.cacheWrite !== undefined
-        ? {
-            input: publicCost.input,
-            output: publicCost.output,
-            cacheRead: publicCost.cacheRead,
-            cacheWrite: publicCost.cacheWrite,
-          }
-        : undefined;
     if (evidence.catalog || (publicRecord && identity)) {
       return {
         ...evidence.catalog,
@@ -639,10 +626,6 @@ function mapFromModelInfoGroup(
         ...(identity && semanticModel(identity.qualifiedId)
           ? { semanticModel: semanticModel(identity.qualifiedId) }
           : {}),
-        ...(publicRecord?.modalities ? { vision: publicRecord.modalities.includes("image") } : {}),
-        ...(publicRecord?.limits?.context !== undefined ? { contextWindow: publicRecord.limits.context } : {}),
-        ...(publicRecord?.limits?.output !== undefined ? { maxTokens: publicRecord.limits.output } : {}),
-        ...(completePublicCost ? { cost: completePublicCost } : {}),
         ...(publicRecord?.effortLevels ? { reasoning: true, effortLevels: publicRecord.effortLevels } : {}),
         ...(publicRecord?.thinkingLevelMap
           ? { thinkingLevelMap: publicRecord.thinkingLevelMap as DiscoveredModel["thinkingLevelMap"] }

@@ -50,7 +50,8 @@ afterAll(async () => {
   await rm(agentDir, { recursive: true, force: true });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await rm(join(agentDir, "litellm-models-dev.json"), { force: true });
   vi.restoreAllMocks();
 });
 
@@ -2271,10 +2272,19 @@ describe("discoverModels response-mode models", () => {
 
     expect(result.source).toBe("health");
     expect(result.models.find((model) => model.id === "team-kimi")).toMatchObject({
-      input: ["text", "image"],
-      contextWindow: 77_777,
-      maxTokens: 3333,
-      cost: { input: 1.25, output: 2.5, cacheRead: 0.25, cacheWrite: 0.5 },
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: null,
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
     });
     expect(result.models.find((model) => model.id === "openai/gpt-5.5")).toMatchObject({
       name: "openai/gpt-5.5 (incomplete metadata)",
@@ -2291,7 +2301,7 @@ describe("discoverModels response-mode models", () => {
           data: [
             {
               model_name: "different-route",
-              litellm_params: { model: "moonshot/kimi-k3" },
+              litellm_params: { model: "moonshot/kimi-k3", allowed_openai_params: ["reasoning_effort"] },
               model_info: { id: "uuid-redirect", mode: "chat", supports_reasoning: true },
             },
           ],
@@ -2305,12 +2315,14 @@ describe("discoverModels response-mode models", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({ id: "different-route", reasoning: true });
+    // The per-endpoint detail row is enriched from the public catalog exactly like the
+    // same row served by aggregate /model/info.
     expect(result.models[0]?.thinkingLevelMap).toEqual({
       off: null,
       minimal: null,
-      low: null,
+      low: "low",
       medium: null,
-      high: null,
+      high: "high",
       xhigh: null,
       max: null,
     });
