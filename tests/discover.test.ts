@@ -745,7 +745,7 @@ describe("discoverModels via /model/info", () => {
     },
   );
 
-  it("publishes Kimi compatibility when an OpenAI transport adapter routes openai/kimi", async () => {
+  it("publishes Kimi compatibility without Moonshot request parameters through an OpenAI transport", async () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -774,7 +774,7 @@ describe("discoverModels via /model/info", () => {
       litellmPolicy: {
         normalizeStrictToolMessages: true,
         normalizeThinkTags: true,
-        suppressReasoningVisibility: true,
+        suppressReasoningVisibility: false,
       },
     });
   });

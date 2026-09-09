@@ -44,7 +44,8 @@
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
 - `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
 - Model-scoped request behavior travels on discovered `litellmPolicy` evidence; request hooks must not infer Moonshot or
-  Gemini behavior from public route text.
+  Gemini behavior from public route text. Kimi response normalization follows deployment family, while request-side
+  reasoning visibility suppression additionally requires the LiteLLM routing provider to be Moonshot.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 
 ## Compatibility Rules

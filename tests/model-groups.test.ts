@@ -1292,6 +1292,65 @@ describe("reduceModelGroup", () => {
     },
   );
 
+  it.each([
+    {
+      name: "Azure-hosted Kimi",
+      litellm_params: { model: "azure/FW-Kimi-K3" },
+      model_info: {
+        base_model: "fireworks/accounts/fireworks/models/kimi-k3",
+        litellm_provider: "azure",
+      },
+    },
+    {
+      name: "Bedrock-hosted Kimi",
+      litellm_params: { model: "bedrock/moonshotai.kimi-k2.5" },
+      model_info: { base_model: "moonshotai.kimi-k2.5", litellm_provider: "bedrock_converse" },
+    },
+  ])("normalizes $name responses without sending Moonshot visibility parameters", ({ litellm_params, model_info }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "hosted-kimi",
+          litellm_params,
+          model_info: { ...model_info, mode: "chat", supports_reasoning: true },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi" }),
+    );
+
+    expect(result).toMatchObject({ normalizeThinkTags: true, suppressReasoningVisibility: false });
+  });
+
+  it("suppresses reasoning visibility on Moonshot transport", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "k3-prod",
+          litellm_params: { model: "moonshot/kimi-k2.5" },
+          model_info: { mode: "chat", supports_reasoning: true },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi" }),
+    );
+
+    expect(result).toMatchObject({ normalizeThinkTags: true, suppressReasoningVisibility: true });
+  });
+
+  it("keeps conflicting routing signals from enabling Moonshot visibility parameters", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_name: "conflicting-route",
+          litellm_params: { model: "azure_ai/FW-Kimi-K3", custom_llm_provider: "moonshot" },
+          model_info: { mode: "chat", supports_reasoning: true },
+        }),
+      ],
+      () => ({ semanticFamily: "kimi" }),
+    );
+
+    expect(result).toMatchObject({ normalizeThinkTags: true, suppressReasoningVisibility: false });
+  });
+
   it("does not suppress visibility when any Kimi deployment is always-thinking", () => {
     const result = reduceModelGroup(
       [

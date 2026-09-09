@@ -649,7 +649,11 @@ export function conservativeCostTiers(costs: readonly ModelCost[]): ModelCost["t
 const KIMI_FAMILY_PATTERN = /(?:^|[./_-])(?:moonshotai|moonshot|kimi)(?:$|[./_:-])/i;
 const FORCED_THINKING_PATTERN = /(?:^|[./_-])thinking(?:$|[./_:-])/i;
 
-function kimiDeploymentEvidence(entry: ModelInfoEntry): { identified: boolean; forcedThinking: boolean } {
+function kimiDeploymentEvidence(entry: ModelInfoEntry): {
+  identified: boolean;
+  forcedThinking: boolean;
+  moonshotTransport: boolean;
+} {
   const identities = [
     entry.litellm_params?.model,
     entry.litellm_params?.custom_llm_provider,
@@ -659,9 +663,21 @@ function kimiDeploymentEvidence(entry: ModelInfoEntry): { identified: boolean; f
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
   const kimi = identities.filter((identity) => KIMI_FAMILY_PATTERN.test(identity));
+  const routingModel = wireString(entry.litellm_params?.model)?.trim();
+  const routingProviders = [
+    wireString(entry.litellm_params?.custom_llm_provider)?.trim(),
+    routingModel?.includes("/") ? routingModel.split("/", 1)[0] : undefined,
+  ]
+    .filter((provider): provider is string => Boolean(provider))
+    .map((provider) => provider.toLowerCase());
   return {
     identified: kimi.length > 0,
     forcedThinking: kimi.some((identity) => FORCED_THINKING_PATTERN.test(identity)),
+    // Visibility parameters are accepted by Moonshot's API, not by every host
+    // that serves a Kimi model. Both declared routing signals must name Moonshot.
+    moonshotTransport:
+      routingProviders.length > 0 &&
+      routingProviders.every((provider) => provider === "moonshot" || provider === "moonshotai"),
   };
 }
 
@@ -771,6 +787,7 @@ export function reduceModelGroup(
   const thinkingLevelMap = acceptsResponsesReasoningControl ? evidenceLevelMap : undefined;
   const kimiEvidence = deployments.map((entry) => kimiDeploymentEvidence(entry));
   const unanimousNormalKimi = kimiEvidence.every((evidence) => evidence.identified && !evidence.forcedThinking);
+  const unanimousMoonshotTransport = kimiEvidence.every((evidence) => evidence.moonshotTransport);
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
@@ -825,7 +842,7 @@ export function reduceModelGroup(
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     deploymentFamilies: catalogs.map((catalog) => catalog?.semanticFamily),
     normalizeThinkTags: unanimousNormalKimi,
-    suppressReasoningVisibility: unanimousNormalKimi,
+    suppressReasoningVisibility: unanimousNormalKimi && unanimousMoonshotTransport,
     acceptedOpenAIParams,
     reasoningPolicy,
   };
