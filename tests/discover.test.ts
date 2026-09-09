@@ -498,6 +498,50 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
+    [
+      "Azure-hosted Kimi",
+      {
+        model_name: "kimi-k3",
+        litellm_params: { model: "azure/FW-Kimi-K3" },
+        model_info: {
+          mode: "chat",
+          base_model: "fireworks/accounts/fireworks/models/kimi-k3",
+          litellm_provider: "azure",
+        },
+      },
+      false,
+    ],
+    [
+      "Bedrock-hosted Kimi",
+      {
+        model_name: "moonshotai-kimi-k2-5",
+        litellm_params: { model: "bedrock/moonshotai.kimi-k2.5" },
+        model_info: {
+          mode: "chat",
+          base_model: "moonshotai.kimi-k2.5",
+          litellm_provider: "bedrock_converse",
+        },
+      },
+      false,
+    ],
+    [
+      "opaque Moonshot alias",
+      {
+        model_name: "k3-prod",
+        litellm_params: { model: "moonshot/kimi-k2.5" },
+        model_info: { mode: "chat" },
+      },
+      true,
+    ],
+  ] as const)("derives reasoning suppression from the transport for %s", async (_name, entry, suppress) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [entry] }));
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
+  it.each([
     ["Moonshot deployments", ["moonshot/kimi-k3", "moonshot/kimi-k3"], true],
     ["mixed deployments", ["moonshot/kimi-k3", "azure_ai/FW-Kimi-K3"], false],
     ["reversed mixed deployments", ["azure_ai/FW-Kimi-K3", "moonshot/kimi-k3"], false],
