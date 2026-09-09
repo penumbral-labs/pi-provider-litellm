@@ -1833,6 +1833,50 @@ describe("discoverModels via /model/info", () => {
     expect(stderr).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [
+      "Azure-hosted Kimi",
+      {
+        model_name: "kimi-k3",
+        litellm_params: { model: "azure/FW-Kimi-K3" },
+        model_info: {
+          mode: "chat",
+          base_model: "fireworks/accounts/fireworks/models/kimi-k3",
+          litellm_provider: "azure",
+        },
+      },
+      false,
+    ],
+    [
+      "Bedrock-hosted Kimi",
+      {
+        model_name: "moonshotai-kimi-k2-5",
+        litellm_params: { model: "bedrock/moonshotai.kimi-k2.5" },
+        model_info: {
+          mode: "chat",
+          base_model: "moonshotai.kimi-k2.5",
+          litellm_provider: "bedrock_converse",
+        },
+      },
+      false,
+    ],
+    [
+      "Moonshot-hosted opaque alias",
+      {
+        model_name: "k3-prod",
+        litellm_params: { model: "moonshot/kimi-k2.5" },
+        model_info: { mode: "chat" },
+      },
+      true,
+    ],
+  ] as const)("keeps reasoning suppression transport-scoped for %s", async (_name, entry, suppress) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [entry] }));
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
   it("does not suppress an alias routed to a forced-thinking Moonshot model", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
