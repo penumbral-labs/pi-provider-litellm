@@ -1315,7 +1315,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const message = normalizeThinkTags(
       event.message as AssistantMessage,
       providerNames,
-      model?.suppressReasoningContent === true,
+      // Mirror the request-side gate: the merge flag is only sent on Chat Completions.
+      model?.api !== "openai-responses" && model?.suppressReasoningContent === true,
     );
     if (!message) return;
     return { message };
