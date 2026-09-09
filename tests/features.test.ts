@@ -1385,6 +1385,93 @@ describe("feature parity", () => {
     ]);
   });
 
+  it("normalizes merged think tags for an opaque Moonshot route", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "k3-prod",
+              litellm_params: { model: "moonshot/kimi-k2.5" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    const model = pi.providers[0]?.getModels().find((candidate) => candidate.id === "k3-prod");
+    expect(model).toMatchObject({ api: "openai-completions", suppressReasoningContent: true });
+
+    let message: any = {
+      role: "assistant",
+      provider: "litellm",
+      model: "k3-prod",
+      content: [{ type: "text", text: "<think>x</think>DONE" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+    for (const handler of pi.handlers.get("message_end") ?? []) {
+      const result = await handler(
+        { message },
+        {
+          modelRegistry: {
+            find: (provider: string, id: string) => (provider === "litellm" && id === "k3-prod" ? model : undefined),
+          },
+        },
+      );
+      if (result?.message) message = result.message;
+    }
+
+    expect(message.content).toEqual([
+      { type: "thinking", thinking: "x" },
+      { type: "text", text: "DONE" },
+    ]);
+  });
+
+  it("does not normalize opaque native Messages responses from request-side suppression metadata", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const model = testModel("litellm", "kimi-named-claude", "anthropic-messages");
+    const message = {
+      role: "assistant",
+      provider: "litellm",
+      model: "kimi-named-claude",
+      content: [{ type: "text", text: "<think>x</think>DONE" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+    // Cost tracking registers the first message_end handler; run every handler so the
+    // normalizer is exercised.
+    for (const endHandler of pi.handlers.get("message_end") ?? []) {
+      const result = await endHandler(
+        { message },
+        {
+          modelRegistry: {
+            find: (provider: string, id: string) =>
+              provider === "litellm" && id === "kimi-named-claude" ? model : undefined,
+          },
+        },
+      );
+      expect(result).toBeUndefined();
+    }
+    expect(message.content).toEqual([{ type: "text", text: "<think>x</think>DONE" }]);
+  });
+
   it("keeps final Kimi text visible when a dangling think tag prefixes it", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

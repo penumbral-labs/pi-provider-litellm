@@ -1011,8 +1011,11 @@ function prepareLiteLLMRequestPayload(
 function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
+  model?: LiteLLMModel,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !emitsThinkTags(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || model?.api === "anthropic-messages") return;
+  const mergedReasoning = model?.api === "openai-completions" && model.suppressReasoningContent === true;
+  if (!mergedReasoning && !emitsThinkTags(message.model)) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1361,9 +1364,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
+    const model = ctx?.modelRegistry?.find(event.message.provider, event.message.model) as LiteLLMModel | undefined;
+    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames, model);
     if (!message) return;
     return { message };
   });
