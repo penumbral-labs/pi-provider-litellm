@@ -499,6 +499,50 @@ describe("live outcomes", () => {
     ]);
   });
 
+  it("applies discovered visibility policy to the live Chat request", async () => {
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ choices: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const moonshotPolicy = {
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: true,
+      suppressReasoningVisibility: true,
+    };
+    const hostedKimiPolicy = {
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: true,
+      suppressReasoningVisibility: false,
+    };
+    await runLiveMatrix(
+      "https://proxy.example",
+      "secret",
+      [
+        { ...probeModel, id: "moonshot-route" },
+        { ...probeModel, id: "azure-kimi-route" },
+      ],
+      { levels: ["low"] },
+      new Map([
+        ["moonshot-route", moonshotPolicy],
+        ["azure-kimi-route", hostedKimiPolicy],
+      ]),
+    );
+
+    expect(requests[0]).toMatchObject({
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+    });
+    expect(requests[1]).not.toHaveProperty("include_reasoning");
+    expect(requests[1]).not.toHaveProperty("reasoning_content");
+    expect(requests[1]).not.toHaveProperty("merge_reasoning_content_in_choices");
+  });
+
   it("applies discovered level mappings to Chat and Responses probes", async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {

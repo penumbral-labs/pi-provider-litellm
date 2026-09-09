@@ -6,8 +6,10 @@ import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type BackendIdentityRow, isRecord, resolveBackendIdentity } from "../src/backend-identity.js";
 import { wildcardMatches } from "../src/discover.js";
+import { prepareLiteLLMRequestPayload } from "../src/index.js";
 import { isResponsesMode } from "../src/model-groups.js";
 import { loadPublicCatalog } from "../src/public-catalog.js";
+import type { LiteLLMModel, LiteLLMModelPolicy } from "../src/types.js";
 
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type ReasoningLevel = (typeof LEVELS)[number];
@@ -18,10 +20,12 @@ type Discover = (
   apiKey: string,
   options?: JsonObject,
 ) => Promise<{ source: string; models: ProbeModel[] }>;
+type PreparePayload = typeof prepareLiteLLMRequestPayload;
 type ProbeModel = {
   id: string;
   api: string;
   compat?: JsonObject;
+  litellmPolicy?: LiteLLMModelPolicy;
   reasoning: boolean;
   thinkingLevelMap?: Record<string, unknown>;
   contextWindow: number;
@@ -167,15 +171,31 @@ function snapshotFetch(snapshot: ProbeSnapshot): typeof fetch {
   }) as typeof fetch;
 }
 
-async function loadDiscover(src = join(process.cwd(), "src")): Promise<Discover> {
-  let path = isAbsolute(src) ? src : resolve(src);
+function sourceFile(src: string | undefined, name: "discover.ts" | "index.ts"): string {
+  let path = isAbsolute(src ?? "") ? (src as string) : resolve(src ?? join(process.cwd(), "src"));
   if (!extname(path)) {
-    const worktreeDiscover = join(path, "src", "discover.ts");
-    path = existsSync(worktreeDiscover) ? worktreeDiscover : join(path, "discover.ts");
+    const worktreeFile = join(path, "src", name);
+    path = existsSync(worktreeFile) ? worktreeFile : join(path, name);
+  } else if (name !== "discover.ts") {
+    path = join(dirname(path), name);
   }
+  return path;
+}
+
+async function loadDiscover(src?: string): Promise<Discover> {
+  const path = sourceFile(src, "discover.ts");
   const module = (await import(pathToFileURL(path).href)) as { discoverModels?: unknown };
   if (typeof module.discoverModels !== "function") throw new Error(`${path} does not export discoverModels`);
   return module.discoverModels as Discover;
+}
+
+async function loadPreparePayload(src?: string): Promise<PreparePayload> {
+  const path = sourceFile(src, "index.ts");
+  const module = (await import(pathToFileURL(path).href)) as { prepareLiteLLMRequestPayload?: unknown };
+  if (typeof module.prepareLiteLLMRequestPayload !== "function") {
+    throw new Error(`${path} does not export prepareLiteLLMRequestPayload`);
+  }
+  return module.prepareLiteLLMRequestPayload as PreparePayload;
 }
 
 function reasoningFlags(row: BackendIdentityRow): Record<string, boolean> {
@@ -259,6 +279,7 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
     const apiKey = snapshot ? "snapshot" : (options.apiKey as string);
     if (snapshot) globalThis.fetch = snapshotFetch(snapshot);
     const discoverModels = await loadDiscover(options.src);
+    const preparePayload = options.live ? await loadPreparePayload(options.src) : prepareLiteLLMRequestPayload;
     const discovery = await discoverModels(baseUrl, apiKey, { silent: true, modelsDev: snapshot ? false : undefined });
     const rawInfo = snapshot
       ? snapshot.modelInfo
@@ -333,7 +354,8 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
     });
     const report: ProbeReport = { source: discovery.source, models };
     if (options.live) {
-      report.live = await runLiveMatrix(baseUrl, apiKey, models, options);
+      const modelPolicies = new Map(discovery.models.map((model) => [model.id, model.litellmPolicy]));
+      report.live = await runLiveMatrix(baseUrl, apiKey, models, options, modelPolicies, preparePayload);
       const comparison = compareLive(report.live, models);
       report.mismatches = comparison.mismatches;
       report.informational = comparison.informational;
@@ -391,6 +413,8 @@ async function liveRequest(
   path: "chat" | "messages" | "responses",
   compat?: JsonObject,
   thinkingLevelMap?: Record<string, unknown>,
+  modelPolicy?: LiteLLMModelPolicy,
+  preparePayload: PreparePayload = prepareLiteLLMRequestPayload,
 ): Promise<LiveResult> {
   const wireLevel = wireReasoningLevel(level, thinkingLevelMap);
   const endpoint =
@@ -418,6 +442,12 @@ async function liveRequest(
             messages: [{ role: "user", content: "Reply with one word." }],
             ...chatReasoningCarrier(level, compat, thinkingLevelMap),
           };
+  const preparedBody =
+    preparePayload(
+      body,
+      { id: model, api: path === "responses" ? "openai-responses" : "openai-completions" } as LiteLLMModel,
+      modelPolicy,
+    ) ?? body;
   try {
     const response = await fetch(`${baseUrl}${endpoint}`, {
       method: "POST",
@@ -427,7 +457,7 @@ async function liveRequest(
         "Content-Type": "application/json",
         "x-litellm-session-id": `pi-probe-${new Date().toISOString().slice(0, 10)}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(preparedBody),
       signal: AbortSignal.timeout(30_000),
     });
     let parsed: unknown;
@@ -483,6 +513,8 @@ export async function runLiveMatrix(
   apiKey: string,
   models: ProbeReport["models"],
   options: ProbeOptions,
+  modelPolicies: ReadonlyMap<string, LiteLLMModelPolicy | undefined> = new Map(),
+  preparePayload: PreparePayload = prepareLiteLLMRequestPayload,
 ): Promise<LiveResult[]> {
   const selected = options.models ? new Set(options.models) : undefined;
   const levels = options.levels ?? ["low", "medium", "high", "xhigh"];
@@ -492,6 +524,7 @@ export async function runLiveMatrix(
     path: "chat" | "messages" | "responses";
     compat?: JsonObject;
     thinkingLevelMap?: Record<string, unknown>;
+    modelPolicy?: LiteLLMModelPolicy;
   }> = [];
   for (const model of models) {
     if (selected && !selected.has(model.id)) continue;
@@ -509,6 +542,7 @@ export async function runLiveMatrix(
         path,
         compat: model.compat,
         thinkingLevelMap: model.thinkingLevelMap,
+        modelPolicy: modelPolicies.get(model.id),
       });
     }
   }
@@ -524,6 +558,8 @@ export async function runLiveMatrix(
         request.path,
         request.compat,
         request.thinkingLevelMap,
+        request.modelPolicy,
+        preparePayload,
       ),
     );
   }

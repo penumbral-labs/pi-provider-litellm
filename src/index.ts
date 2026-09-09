@@ -892,7 +892,7 @@ const REASONING_REQUEST_KEYS = [
   ...Object.keys(REASONING_VISIBILITY_DEFAULTS),
   "thinking",
 ];
-function prepareLiteLLMRequestPayload(
+export function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   model: LiteLLMModel | undefined,
   modelPolicy: LiteLLMModelPolicy | undefined,
