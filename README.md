@@ -244,7 +244,7 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 
 ### Deployment groups and metadata authority
 
-LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model. A route group that mixes a chat-style deployment with an explicitly incompatible mode such as embedding is withheld entirely and reported with a bounded diagnostic.
+LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model. A route group that mixes a chat-style deployment with an explicitly incompatible mode such as embedding is withheld entirely and reported with a bounded diagnostic. Request-side Moonshot reasoning suppression follows LiteLLM's routing provider, not `model_info.base_model`; Pi normalizes `<think>` output for Moonshot-named models and opaque aliases whose discovered route enables that suppression.
 
 - Responses is selected only when every row explicitly reports Responses mode; mixed or unknown groups use Chat.
 - Vision and reasoning are advertised only when every routable deployment resolves them as supported. An explicit `supports_reasoning: false` suppresses all thinking controls, even when catalog or router effort metadata exists. Catalog thinking controls are intersected per level: a level is exposed only when every deployment maps it to the same value, while disagreement or absence becomes an explicit denial. Router-reported reasoning-effort levels similarly require every deployment to explicitly support the level.

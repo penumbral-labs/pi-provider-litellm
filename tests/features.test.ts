@@ -1415,6 +1415,61 @@ describe("feature parity", () => {
     ]);
   });
 
+  it("normalizes think tags for an opaque alias on the Moonshot transport", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "k3-prod",
+              litellm_params: { model: "moonshot/kimi-k2.5" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await pi.providers[0]?.refreshModels?.({
+      allowNetwork: true,
+      credential: { type: "api_key", key: "sk-test" },
+      publish: async (publication) => {
+        publication.update?.();
+        return true;
+      },
+      signal: new AbortController().signal,
+    });
+    const model = pi.providers[0]?.getModels().find((candidate) => candidate.id === "k3-prod");
+    expect(model).toMatchObject({ id: "k3-prod", suppressReasoningContent: true });
+
+    let message: any = {
+      role: "assistant",
+      provider: "litellm",
+      model: "k3-prod",
+      content: [{ type: "text", text: "<think>internal reasoning</think>DONE" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    };
+    const ctx = { modelRegistry: { find: () => model } };
+    for (const handler of pi.handlers.get("message_end") ?? []) {
+      const result = await handler({ message }, ctx);
+      if (result?.message) message = result.message;
+    }
+
+    expect(message.content).toEqual([
+      { type: "thinking", thinking: "internal reasoning" },
+      { type: "text", text: "DONE" },
+    ]);
+  });
+
   it("keeps final Kimi text visible when a dangling think tag prefixes it", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";

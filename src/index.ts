@@ -982,8 +982,11 @@ function prepareLiteLLMRequestPayload(
 function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
+  suppressReasoningContent = false,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !emitsThinkTags(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || (!emitsThinkTags(message.model) && !suppressReasoningContent)) {
+    return;
+  }
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1306,9 +1309,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
+    const model = ctx?.modelRegistry?.find(event.message.provider, event.message.model) as LiteLLMModel | undefined;
+    const message = normalizeThinkTags(
+      event.message as AssistantMessage,
+      providerNames,
+      model?.suppressReasoningContent === true,
+    );
     if (!message) return;
     return { message };
   });
