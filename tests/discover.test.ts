@@ -316,6 +316,59 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
   });
 
+  it.each([
+    [
+      "Azure-hosted Kimi",
+      {
+        model_name: "kimi-k3",
+        litellm_params: { model: "azure/FW-Kimi-K3" },
+        model_info: {
+          mode: "chat",
+          base_model: "fireworks/accounts/fireworks/models/kimi-k3",
+          litellm_provider: "azure",
+        },
+      },
+      false,
+    ],
+    [
+      "Bedrock-hosted Kimi",
+      {
+        model_name: "moonshotai-kimi-k2-5",
+        litellm_params: { model: "bedrock/moonshotai.kimi-k2.5" },
+        model_info: {
+          mode: "chat",
+          base_model: "moonshotai.kimi-k2.5",
+          litellm_provider: "bedrock_converse",
+        },
+      },
+      false,
+    ],
+    [
+      "opaque Moonshot route",
+      {
+        model_name: "k3-prod",
+        litellm_params: { model: "moonshot/kimi-k2.5" },
+        model_info: { mode: "chat" },
+      },
+      true,
+    ],
+    [
+      "conflicting Moonshot provider and Azure backend",
+      {
+        model_name: "kimi-prod",
+        litellm_params: { custom_llm_provider: "moonshot", model: "azure_ai/FW-Kimi-K3" },
+        model_info: { mode: "chat" },
+      },
+      false,
+    ],
+  ] as const)("keeps request-side reasoning suppression transport-scoped for %s", async (_name, entry, suppress) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [entry] }));
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
   it("withholds suppression from mixed Moonshot and non-Moonshot routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
