@@ -2332,6 +2332,7 @@ describe("bounded diagnostic labels", () => {
       const expectedDeep = eagerInvalidEntryEncoding(deep);
       expect(encodedInputs.some((input) => input.equals(expectedFlat))).toBe(true);
       expect(encodedInputs.some((input) => input.equals(expectedDeep))).toBe(true);
+      // Captured from the eager encoding at ed44608; update only for an intentional encoding change.
       expect(createHash("sha256").update(expectedFlat).digest("hex")).toBe(
         "5465fd24b3c708ee4611e296094dc1ba6e023abd7286760fef4abcf457bcca06",
       );
@@ -2348,23 +2349,22 @@ describe("bounded diagnostic labels", () => {
     vi.resetModules();
     const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
     const wide = Array.from({ length: 20_000 }, (_, index) => ({ index }));
-    const children = new WeakSet<object>(wide);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [wide] }));
     const originalPush = Array.prototype.push;
     let identityPendingHighWater = 0;
     Array.prototype.push = function <T>(this: T[], ...items: T[]): number {
-      const parts = [...this, ...items] as Array<{ kind?: unknown; value?: unknown }>;
+      const parts = items as Array<{ kind?: unknown; value?: unknown }>;
       if (
         parts.some(
           (part) =>
-            (part?.kind === "array" && part.value === wide) ||
+            (part?.kind === "array" && Array.isArray(part.value) && part.value.length === wide.length) ||
             (part?.kind === "value" &&
               typeof part.value === "object" &&
               part.value !== null &&
-              children.has(part.value)),
+              typeof (part.value as { index?: unknown }).index === "number"),
         )
       ) {
-        identityPendingHighWater = Math.max(identityPendingHighWater, parts.length);
+        identityPendingHighWater = Math.max(identityPendingHighWater, this.length + items.length);
       }
       return Reflect.apply(originalPush, this, items) as number;
     };
@@ -2374,7 +2374,7 @@ describe("bounded diagnostic labels", () => {
       Array.prototype.push = originalPush;
     }
 
-    expect(identityPendingHighWater).toBeLessThanOrEqual(2);
+    expect(identityPendingHighWater).toBe(2);
   });
 
   it("re-reports a different malformed entry at the same position but suppresses an unchanged one", async () => {
