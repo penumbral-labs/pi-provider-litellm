@@ -469,7 +469,7 @@ describe("extension startup", () => {
     await extension(pi);
 
     await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({
-      auth: { apiKey: "sk-local" },
+      auth: { apiKey: "sk-local", baseUrl: "http://host.docker.internal" },
       env: { LITELLM_BASE_URL: "http://host.docker.internal" },
     });
   });
@@ -613,6 +613,8 @@ describe("extension startup", () => {
       auth: {
         apiKey: "context-key",
         headers: { "x-tenant": "context" },
+        // Pinned to the injected-context base URL, not the process-env one.
+        baseUrl: "https://context.example.com",
       },
       source: "LITELLM_API_KEY",
     });
@@ -1031,6 +1033,7 @@ describe("extension startup", () => {
     });
     await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toEqual({
       apiKey: "sk-virtual-abc",
+      baseUrl: "https://proxy.example.com",
     });
     expect(seenRequests).toContainEqual(
       expect.objectContaining({

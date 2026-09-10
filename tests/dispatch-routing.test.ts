@@ -67,8 +67,10 @@ function harness(options: { configuredModels: ReturnType<typeof model>[]; discov
     auth: {
       apiKey: {
         name: "API key",
+        // Mirrors resolveApiKeyAuth: auth.baseUrl pins the request host to the credential
+        // root so Models.applyAuth overrides any model.baseUrl before dispatch.
         resolve: async () => ({
-          auth: { apiKey: CANARY_CREDENTIAL, headers: { "x-tenant": "canary-tenant" } },
+          auth: { apiKey: CANARY_CREDENTIAL, headers: { "x-tenant": "canary-tenant" }, baseUrl: CREDENTIAL_ROOT },
         }),
       },
     },
@@ -97,58 +99,73 @@ describe("dispatch routing through Pi's provider composer", () => {
     vi.restoreAllMocks();
   });
 
-  it("runs the LiteLLM host guard for a protocol in the discovered catalog", async () => {
+  // The security invariant across every routing outcome: a stale or attacker-supplied
+  // model.baseUrl never receives the LiteLLM credential. auth.baseUrl (set by
+  // resolveApiKeyAuth / the OAuth toAuth wrapper) pins the request host to the credential
+  // root before dispatch, so it holds even when Pi bypasses the provider-owned host guard.
+  const assertNoForeignCredential = (wire: WireRequest[]) => {
+    for (const request of wire) {
+      expect(request.url.startsWith(FOREIGN_ROOT)).toBe(false);
+      if (request.authorization === `Bearer ${CANARY_CREDENTIAL}` || request.tenant === "canary-tenant") {
+        expect(request.url.startsWith(CREDENTIAL_ROOT)).toBe(true);
+      }
+    }
+  };
+
+  it("pins a foreign-host model to the credential root for a protocol in the catalog", async () => {
     const entry = model("configured-chat", "openai-completions", `${FOREIGN_ROOT}/v1`);
     const { wire, models } = harness({ configuredModels: [entry] });
 
     const result = await models.complete(entry, { messages: [] });
 
-    expect(result.stopReason).toBe("error");
-    expect(wire).toEqual([]);
+    expect(result.stopReason).toBe("stop");
+    expect(wire.map((request) => request.url)).toEqual([`${CREDENTIAL_ROOT}/v1/chat/completions`]);
+    assertNoForeignCredential(wire);
   });
 
-  it("runs the LiteLLM host guard once Responses is in the discovered catalog", async () => {
+  it("pins a foreign-host Responses model to the credential root when Responses is in the catalog", async () => {
     const entry = model("configured-responses", "openai-responses", `${FOREIGN_ROOT}/v1`);
     const { wire, models } = harness({
       configuredModels: [entry],
       discoveredApis: ["openai-completions", "openai-responses"],
     });
 
-    const result = await models.complete(entry, { messages: [] });
+    // The mock only speaks Chat Completions, so the Responses parse fails after the request;
+    // the routed URL is what matters here.
+    await models.complete(entry, { messages: [] });
 
-    expect(result.stopReason).toBe("error");
-    expect(wire).toEqual([]);
+    expect(wire.map((request) => request.url)).toEqual([`${CREDENTIAL_ROOT}/v1/responses`]);
+    assertNoForeignCredential(wire);
   });
 
-  it("documents Pi's generic fallback when the configured API is absent from the catalog", async () => {
+  it("keeps the credential on the credential root when Pi's generic fallback bypasses the guard", async () => {
     const entry = model("configured-responses", "openai-responses", `${FOREIGN_ROOT}/v1`);
     const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
 
     await models.complete(entry, { messages: [] });
 
-    // Pi 0.84 infers provider protocol support from the current model list. Because
-    // Responses is absent, this bypasses the provider-owned host guard and uses the
-    // global Responses implementation with the LiteLLM credential. README documents
-    // the limitation; this canary should change when Pi exposes protocol capabilities.
+    // Responses is absent from the catalog, so Pi 0.84 routes through its global Responses
+    // implementation instead of the provider-owned guard. auth.baseUrl still pins the host,
+    // so the credential reaches the LiteLLM proxy, never the model's stale baseUrl.
     expect(wire).toEqual([
       {
-        url: `${FOREIGN_ROOT}/v1/responses`,
+        url: `${CREDENTIAL_ROOT}/responses`,
         authorization: `Bearer ${CANARY_CREDENTIAL}`,
         tenant: "canary-tenant",
       },
     ]);
   });
 
-  it("uses generic dispatch for an unsupported configured API absent from the catalog", async () => {
+  it("does not leak the credential to a foreign host for an unsupported configured API", async () => {
     const entry = model("configured-google", "google-generative-ai", FOREIGN_ROOT);
     const { wire, models } = harness({ configuredModels: [entry], discoveredApis: ["openai-completions"] });
 
     const result = await models.complete(entry, { messages: [] });
 
-    // The mock covers OpenAI-compatible APIs only, so this generic provider fails
-    // before issuing a request. The important seam is that LiteLLM's guard is bypassed.
+    // Generic dispatch for a non-LiteLLM API bypasses the provider guard; the host pin still
+    // keeps the request off the model's foreign baseUrl.
     expect(result.stopReason).toBe("error");
-    expect(wire).toEqual([]);
+    assertNoForeignCredential(wire);
   });
 
   it("applies cacheControlFormat only to Chat Completions payloads", async () => {

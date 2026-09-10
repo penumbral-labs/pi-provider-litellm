@@ -337,6 +337,7 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
     expect(readme).toContain("### Model host enforcement");
     expect(readme).toContain("native `Provider` contract has no separate protocol-capability declaration");
+    expect(readme).toContain("resolved auth carries `baseUrl` set to the credential's proxy root");
     expect(readme).toContain(
       "Responses transport has a different compatibility type and uses native `prompt_cache_key`",
     );

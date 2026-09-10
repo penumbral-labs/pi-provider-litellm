@@ -786,12 +786,26 @@ async function resolveApiKeyAuth(
     if (!creds.baseUrl && baseUrl) creds.baseUrl = normalizeBaseUrl(baseUrl, definition.allowInsecureHttp);
   }
   if (!creds.apiKey) return undefined;
+  const normalizedRoot = baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
+  // Pin the request host to the root resolved from the credential. Pi's provider composer
+  // routes an off-catalog model through a global API implementation that trusts model.baseUrl
+  // verbatim, bypassing the provider's own host guard; Models.applyAuth overrides model.baseUrl
+  // with auth.baseUrl on every path, so this keeps the credential from reaching a stale or
+  // attacker-supplied host. Leave it unset when no usable root resolves so the provider guard
+  // still rejects the request rather than pinning to a placeholder.
+  let pinnedRoot: string | undefined;
+  try {
+    pinnedRoot = requireCredentialRoot(resolveCredentialRoot(definition, credential, normalizedRoot), definition.name);
+  } catch {
+    pinnedRoot = undefined;
+  }
   return {
     auth: {
       apiKey: creds.apiKey,
       headers: await resolveHeadersFromContext(definition, ctx.env),
+      ...(pinnedRoot ? { baseUrl: pinnedRoot } : {}),
     },
-    env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) } : undefined,
+    env: normalizedRoot ? { [ENV_BASE_URL]: normalizedRoot } : undefined,
     source: source ?? (creds.apiKeyFromGcloudAdc ? GCLOUD_ADC_SOURCE : undefined) ?? creds.apiKeyConfig ?? ENV_API_KEY,
   };
 }
@@ -1278,7 +1292,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         const resolved = await toAuth(credential);
         const root = requireCredentialRoot(resolveCredentialRoot(definition, credential), definition.name);
         oauthRuntimeRoots.set(definition.name, { apiKey: credential.access, root });
-        return resolved;
+        // Pin the request host to the credential root so Pi's global-API fallback for an
+        // off-catalog model cannot send this credential to a stale model.baseUrl.
+        return { ...resolved, baseUrl: root };
       };
     }
     const provider = createLiteLLMProvider({
